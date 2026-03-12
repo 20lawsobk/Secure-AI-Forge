@@ -64,3 +64,10 @@ timeoutMs = 20000
 
 [nix]
 channel = "stable-25_05"
+
+[userenv]
+
+[userenv.shared]
+STORAGE_HTTP_URL = "https://5930b718-c9b4-48b9-a838-9e39a30ed4d8-00-22qt9tvbcozsn.spock.replit.dev/api/redis/instances/f26378c8b4faf9f237a0f816/exec"
+STORAGE_BEARER_TOKEN = "4b1660b376e535a16ea7649db6c25c5fbec67995de0610ac9c529c722f4c4d8f"
+STORAGE_INSTANCE = "max-booster-training"

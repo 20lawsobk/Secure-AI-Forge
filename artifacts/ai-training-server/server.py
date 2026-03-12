@@ -8,6 +8,7 @@ Production-grade AI model training server with:
   - GPU simulation / HyperGPU cluster
   - Multi-platform content generation
   - BoostSheet management
+  - Storage server sync (datasets, checkpoints, curriculum state)
 """
 from __future__ import annotations
 
@@ -375,6 +376,18 @@ async def on_startup():
     init_db()
     thread = threading.Thread(target=_init_ai_model, daemon=True)
     thread.start()
+    storage_thread = threading.Thread(target=_init_storage, daemon=True)
+    storage_thread.start()
+
+
+def _init_storage():
+    from storage_client import get_storage
+    storage = get_storage()
+    ok = storage.ping()
+    if ok:
+        print("[Storage] Connected to MaxBooster storage server")
+    else:
+        print("[Storage] Storage server offline — using in-process fallback")
 
 # ─── Health ───────────────────────────────────────────────────────────────────
 
@@ -790,6 +803,112 @@ async def dashboard_stats():
         "gpu_lanes": 512,
         "boostsheet_count": boostsheet_count,
     }
+
+# ─── Storage Sync Endpoints ───────────────────────────────────────────────────
+
+class CurriculumFeedback(BaseModel):
+    user_id: str
+    platform: str
+    engagement_rate: float = Field(ge=0.0, le=100.0)
+    content_type: str = "post"
+    style_tags: List[str] = []
+
+
+class DatasetRegister(BaseModel):
+    name: str
+    description: str = ""
+    size_bytes: int = 0
+    num_chunks: int = 0
+    content_type: str = "text"
+
+
+class CheckpointSave(BaseModel):
+    model_id: str
+    state: dict
+    metadata: Optional[dict] = None
+
+
+@app.get("/storage/status")
+async def storage_status(_key = Depends(verify_api_key)):
+    from storage_client import get_storage, get_checkpoint_client
+    storage = get_storage()
+    checkpoints = get_checkpoint_client().list_checkpoints()
+    return {
+        **storage.status(),
+        "recent_checkpoints": checkpoints[:5],
+    }
+
+
+@app.post("/storage/feedback")
+async def record_curriculum_feedback(feedback: CurriculumFeedback, _key = Depends(verify_api_key)):
+    from storage_client import get_curriculum_client
+    get_curriculum_client().record_feedback(
+        user_id=feedback.user_id,
+        platform=feedback.platform,
+        engagement_rate=feedback.engagement_rate,
+        content_type=feedback.content_type,
+        style_tags=feedback.style_tags,
+    )
+    return {"status": "recorded", "user_id": feedback.user_id}
+
+
+@app.get("/storage/curriculum/{user_id}")
+async def get_curriculum(user_id: str, limit: int = 50, _key = Depends(verify_api_key)):
+    from storage_client import get_curriculum_client
+    client = get_curriculum_client()
+    return {
+        "user_id": user_id,
+        "feedback": client.get_user_curriculum(user_id, limit=limit),
+        "top_performers": client.get_top_performers(user_id, top_n=10),
+        "stats": client.get_user_stats(user_id),
+    }
+
+
+@app.get("/storage/datasets")
+async def list_datasets(_key = Depends(verify_api_key)):
+    from storage_client import get_dataset_client
+    return {"datasets": get_dataset_client().list_datasets()}
+
+
+@app.post("/storage/datasets/register")
+async def register_dataset(dataset: DatasetRegister, _admin = Depends(verify_admin)):
+    from storage_client import get_dataset_client
+    get_dataset_client().register_dataset(
+        name=dataset.name,
+        description=dataset.description,
+        size_bytes=dataset.size_bytes,
+        num_chunks=dataset.num_chunks,
+        content_type=dataset.content_type,
+    )
+    return {"status": "registered", "name": dataset.name}
+
+
+@app.post("/storage/checkpoint/save")
+async def save_checkpoint(payload: CheckpointSave, _admin = Depends(verify_admin)):
+    from storage_client import get_checkpoint_client
+    ok = get_checkpoint_client().save_checkpoint(
+        model_id=payload.model_id,
+        state=payload.state,
+        metadata=payload.metadata,
+    )
+    return {"status": "saved" if ok else "fallback", "model_id": payload.model_id}
+
+
+@app.get("/storage/checkpoint/{model_id}")
+async def load_checkpoint(model_id: str, _admin = Depends(verify_admin)):
+    from storage_client import get_checkpoint_client
+    client = get_checkpoint_client()
+    meta = client.get_checkpoint_meta(model_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail=f"Checkpoint '{model_id}' not found")
+    return {"model_id": model_id, "meta": meta}
+
+
+@app.get("/storage/checkpoints")
+async def list_checkpoints(_admin = Depends(verify_admin)):
+    from storage_client import get_checkpoint_client
+    return {"checkpoints": get_checkpoint_client().list_checkpoints()}
+
 
 # ─── Entry Point ─────────────────────────────────────────────────────────────
 

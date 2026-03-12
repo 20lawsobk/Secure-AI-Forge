@@ -100,4 +100,36 @@ router.get("/dashboard/stats", async (req, res) => {
   await proxyRequest(req, res, "/dashboard/stats");
 });
 
+router.get("/storage/status", async (req, res) => {
+  await proxyRequest(req, res, "/storage/status");
+});
+
+router.post("/storage/feedback", async (req, res) => {
+  await proxyRequest(req, res, "/storage/feedback");
+});
+
+router.get("/storage/curriculum/:userId", async (req, res) => {
+  await proxyRequest(req, res, `/storage/curriculum/${req.params.userId}`);
+});
+
+router.get("/storage/datasets", async (req, res) => {
+  await proxyRequest(req, res, "/storage/datasets");
+});
+
+router.post("/storage/datasets/register", async (req, res) => {
+  await proxyRequest(req, res, "/storage/datasets/register");
+});
+
+router.get("/storage/checkpoints", async (req, res) => {
+  await proxyRequest(req, res, "/storage/checkpoints");
+});
+
+router.post("/storage/checkpoint/save", async (req, res) => {
+  await proxyRequest(req, res, "/storage/checkpoint/save");
+});
+
+router.get("/storage/checkpoint/:modelId", async (req, res) => {
+  await proxyRequest(req, res, `/storage/checkpoint/${req.params.modelId}`);
+});
+
 export default router;
