@@ -1,22 +1,32 @@
 openapi: 3.1.0
 info:
-  # Do not change the title, if the title changes, the import paths will be broken
   title: Api
-  version: 0.1.0
-  description: API specification
+  version: 1.0.0
+  description: AI Model Training Server API with custom API key management
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: api-keys
+    description: API key management
+  - name: model
+    description: AI model operations
+  - name: training
+    description: Model training operations
+  - name: gpu
+    description: GPU status and compute
+  - name: content
+    description: Content generation
+  - name: boostsheets
+    description: BoostSheet management
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
@@ -24,13 +34,586 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /api-keys:
+    get:
+      operationId: listApiKeys
+      tags: [api-keys]
+      summary: List all API keys
+      security:
+        - adminKey: []
+      responses:
+        "200":
+          description: List of API keys
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiKeyList"
+    post:
+      operationId: createApiKey
+      tags: [api-keys]
+      summary: Create a new API key
+      security:
+        - adminKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateApiKeyRequest"
+      responses:
+        "201":
+          description: Created API key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiKeyCreated"
+
+  /api-keys/{keyId}:
+    delete:
+      operationId: revokeApiKey
+      tags: [api-keys]
+      summary: Revoke an API key
+      security:
+        - adminKey: []
+      parameters:
+        - name: keyId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Key revoked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiKeyRevoked"
+
+  /api-keys/{keyId}/rotate:
+    post:
+      operationId: rotateApiKey
+      tags: [api-keys]
+      summary: Rotate an API key
+      security:
+        - adminKey: []
+      parameters:
+        - name: keyId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Rotated key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiKeyCreated"
+
+  /model/status:
+    get:
+      operationId: getModelStatus
+      tags: [model]
+      summary: Get AI model status
+      responses:
+        "200":
+          description: Model status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelStatus"
+
+  /gpu/status:
+    get:
+      operationId: getGpuStatus
+      tags: [gpu]
+      summary: Get GPU status
+      responses:
+        "200":
+          description: GPU status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GpuStatus"
+
+  /gpu/hyper/status:
+    get:
+      operationId: getHyperGpuStatus
+      tags: [gpu]
+      summary: Get HyperGPU cluster status
+      responses:
+        "200":
+          description: HyperGPU status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HyperGpuStatus"
+
+  /training/status:
+    get:
+      operationId: getTrainingStatus
+      tags: [training]
+      summary: Get training status
+      responses:
+        "200":
+          description: Training status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrainingStatus"
+
+  /training/start:
+    post:
+      operationId: startTraining
+      tags: [training]
+      summary: Start model training
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StartTrainingRequest"
+      responses:
+        "200":
+          description: Training started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrainingStarted"
+
+  /training/logs:
+    get:
+      operationId: getTrainingLogs
+      tags: [training]
+      summary: Get recent training logs
+      responses:
+        "200":
+          description: Training logs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrainingLogs"
+
+  /content/generate:
+    post:
+      operationId: generateContent
+      tags: [content]
+      summary: Generate multi-platform content
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContentGenerateRequest"
+      responses:
+        "200":
+          description: Generated content
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContentGenerateResponse"
+
+  /boostsheets:
+    get:
+      operationId: listBoostsheets
+      tags: [boostsheets]
+      summary: List all BoostSheets
+      responses:
+        "200":
+          description: List of BoostSheets
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BoostSheetList"
+
+  /dashboard/stats:
+    get:
+      operationId: getDashboardStats
+      tags: [model]
+      summary: Get dashboard statistics
+      responses:
+        "200":
+          description: Dashboard stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardStats"
+
 components:
+  securitySchemes:
+    adminKey:
+      type: apiKey
+      in: header
+      name: X-Admin-Key
+
   schemas:
     HealthStatus:
       type: object
       properties:
         status:
           type: string
+        model_loaded:
+          type: boolean
+        uptime_seconds:
+          type: number
+        version:
+          type: string
       required:
         - status
 
+    ApiKey:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        prefix:
+          type: string
+        created_at:
+          type: string
+        last_used_at:
+          type: string
+          nullable: true
+        expires_at:
+          type: string
+          nullable: true
+        is_active:
+          type: boolean
+        request_count:
+          type: integer
+        scopes:
+          type: array
+          items:
+            type: string
+      required:
+        - id
+        - name
+        - prefix
+        - created_at
+        - is_active
+        - request_count
+        - scopes
+
+    ApiKeyList:
+      type: object
+      properties:
+        keys:
+          type: array
+          items:
+            $ref: "#/components/schemas/ApiKey"
+        total:
+          type: integer
+      required:
+        - keys
+        - total
+
+    CreateApiKeyRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+        expires_in_days:
+          type: integer
+          nullable: true
+      required:
+        - name
+        - scopes
+
+    ApiKeyCreated:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        key:
+          type: string
+        prefix:
+          type: string
+        created_at:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+      required:
+        - id
+        - name
+        - key
+        - prefix
+        - created_at
+        - scopes
+
+    ApiKeyRevoked:
+      type: object
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+      required:
+        - success
+        - message
+
+    ModelStatus:
+      type: object
+      properties:
+        model_loaded:
+          type: boolean
+        vocab_size:
+          type: integer
+        device:
+          type: string
+        dim:
+          type: integer
+        layers:
+          type: integer
+        heads:
+          type: integer
+        max_len:
+          type: integer
+        weights_exist:
+          type: boolean
+        weights_path:
+          type: string
+      required:
+        - model_loaded
+        - vocab_size
+        - device
+        - weights_exist
+
+    GpuStatus:
+      type: object
+      properties:
+        available:
+          type: boolean
+        backend:
+          type: string
+        lanes:
+          type: integer
+        vram_mb:
+          type: number
+        utilization:
+          type: number
+      required:
+        - available
+        - backend
+
+    HyperGpuStatus:
+      type: object
+      properties:
+        engine:
+          type: string
+        lanes:
+          type: integer
+        tensor_cores:
+          type: integer
+        precision:
+          type: string
+        total_ops:
+          type: integer
+        total_tensor_core_tflops:
+          type: number
+        total_compute_ms:
+          type: number
+        uptime_s:
+          type: number
+      required:
+        - engine
+        - lanes
+        - tensor_cores
+        - precision
+
+    TrainingStatus:
+      type: object
+      properties:
+        state:
+          type: string
+        epoch:
+          type: integer
+        total_epochs:
+          type: integer
+        loss:
+          type: number
+          nullable: true
+        perplexity:
+          type: number
+          nullable: true
+        samples_trained:
+          type: integer
+        elapsed_seconds:
+          type: number
+        eta_seconds:
+          type: number
+          nullable: true
+        weights_exist:
+          type: boolean
+      required:
+        - state
+        - samples_trained
+        - weights_exist
+
+    StartTrainingRequest:
+      type: object
+      properties:
+        epochs:
+          type: integer
+        learning_rate:
+          type: number
+        batch_size:
+          type: integer
+        use_synthetic:
+          type: boolean
+        synthetic_count:
+          type: integer
+      required:
+        - epochs
+
+    TrainingStarted:
+      type: object
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+        job_id:
+          type: string
+      required:
+        - success
+        - message
+        - job_id
+
+    TrainingLogs:
+      type: object
+      properties:
+        logs:
+          type: array
+          items:
+            $ref: "#/components/schemas/TrainingLogEntry"
+        total:
+          type: integer
+      required:
+        - logs
+        - total
+
+    TrainingLogEntry:
+      type: object
+      properties:
+        timestamp:
+          type: string
+        level:
+          type: string
+        message:
+          type: string
+        epoch:
+          type: integer
+          nullable: true
+        loss:
+          type: number
+          nullable: true
+      required:
+        - timestamp
+        - level
+        - message
+
+    ContentGenerateRequest:
+      type: object
+      properties:
+        platform:
+          type: string
+        topic:
+          type: string
+        tone:
+          type: string
+        goal:
+          type: string
+        include_hashtags:
+          type: boolean
+      required:
+        - platform
+        - topic
+
+    ContentGenerateResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        platform:
+          type: string
+        caption:
+          type: string
+        hook:
+          type: string
+        body:
+          type: string
+        cta:
+          type: string
+        hashtags:
+          type: array
+          items:
+            type: string
+        source:
+          type: string
+        processing_time_ms:
+          type: number
+      required:
+        - success
+        - platform
+        - caption
+        - hook
+        - body
+        - cta
+        - hashtags
+        - source
+        - processing_time_ms
+
+    BoostSheetList:
+      type: object
+      properties:
+        sheet_ids:
+          type: array
+          items:
+            type: string
+        count:
+          type: integer
+      required:
+        - sheet_ids
+        - count
+
+    DashboardStats:
+      type: object
+      properties:
+        total_api_keys:
+          type: integer
+        active_api_keys:
+          type: integer
+        total_requests_today:
+          type: integer
+        model_status:
+          type: string
+        training_state:
+          type: string
+        vocab_size:
+          type: integer
+        weights_exist:
+          type: boolean
+        gpu_lanes:
+          type: integer
+        boostsheet_count:
+          type: integer
+      required:
+        - total_api_keys
+        - active_api_keys
+        - total_requests_today
+        - model_status
+        - training_state
+        - vocab_size
+        - weights_exist
+        - gpu_lanes
+        - boostsheet_count

@@ -1,0 +1,178 @@
+{
+  "version": "3.0-public-datasets",
+  "trainedAt": "2026-03-12T10:35:49.212Z",
+  "dataSources": {
+    "youtubeEightM": {
+      "url": "https://research.google.com/youtube8m/",
+      "samples": 9,
+      "type": "video_engagement_signals"
+    },
+    "audioSet": {
+      "url": "https://research.google.com/audioset/",
+      "samples": 6,
+      "type": "audio_engagement_boosts"
+    },
+    "harmonySet": {
+      "url": "https://arxiv.org/html/2502.12489v2",
+      "samples": 4,
+      "type": "video_music_alignment_2025"
+    },
+    "musicBench": {
+      "url": "https://huggingface.co/datasets/MusicBench",
+      "samples": 30,
+      "type": "text_music_pairs_52768"
+    },
+    "mtgJamendo": {
+      "url": "https://mtg.upf.edu/download/datasets/jamendo-audio",
+      "samples": 7,
+      "type": "cc_licensed_genre_tags"
+    },
+    "harrisonDataset": {
+      "url": "https://github.com/minstone/HARRISON-Dataset",
+      "samples": 134,
+      "type": "hashtag_hook_patterns"
+    },
+    "socialMediaInstruction": {
+      "url": "https://huggingface.co/datasets/Shekswess/social-media-instruction",
+      "samples": 59,
+      "type": "caption_cta_patterns"
+    },
+    "platformScripts": {
+      "samples": 22,
+      "type": "platform_content_formulas"
+    }
+  },
+  "totals": {
+    "genresEnriched": 8,
+    "platformsSupported": 4,
+    "hookSamples": 134,
+    "ctaSamples": 34,
+    "videoEngagementSamples": 9,
+    "musicBenchSamples": 30,
+    "jamendoTagCombos": 7,
+    "emotionalTriggerSamples": 25,
+    "platformScriptSamples": 22,
+    "totalSamplesEncoded": 261
+  },
+  "audioSignalBoosts": [
+    {
+      "signal": "vocalsPresent",
+      "engagementBoost": 1.31,
+      "shareabilityBoost": 1.18
+    },
+    {
+      "signal": "strongBeat",
+      "engagementBoost": 1.44,
+      "shareabilityBoost": 1.37
+    },
+    {
+      "signal": "buildUp",
+      "engagementBoost": 1.58,
+      "shareabilityBoost": 1.52
+    },
+    {
+      "signal": "dropPresent",
+      "engagementBoost": 1.71,
+      "shareabilityBoost": 1.64
+    },
+    {
+      "signal": "melodicHook",
+      "engagementBoost": 1.62,
+      "shareabilityBoost": 1.55
+    },
+    {
+      "signal": "lyricalHook",
+      "engagementBoost": 1.68,
+      "shareabilityBoost": 1.61
+    }
+  ],
+  "harmonySetVideoLift": {
+    "beatSyncedEditing": {
+      "retentionLift": 0.28,
+      "completionLift": 0.23,
+      "shareabilityLift": 0.31
+    },
+    "moodColorGrading": {
+      "retentionLift": 0.18,
+      "completionLift": 0.15,
+      "shareabilityLift": 0.19
+    },
+    "lyricOnScreen": {
+      "retentionLift": 0.22,
+      "completionLift": 0.19,
+      "shareabilityLift": 0.24
+    },
+    "emotionArcMatch": {
+      "retentionLift": 0.34,
+      "completionLift": 0.29,
+      "shareabilityLift": 0.38
+    }
+  },
+  "jamendoTempoEngagement": {
+    "slow": {
+      "bpmMax": 80,
+      "avgEngagement": 0.058
+    },
+    "moderate": {
+      "bpmMin": 80,
+      "bpmMax": 120,
+      "avgEngagement": 0.071
+    },
+    "fast": {
+      "bpmMin": 120,
+      "bpmMax": 160,
+      "avgEngagement": 0.066
+    },
+    "veryFast": {
+      "bpmMin": 160,
+      "avgEngagement": 0.054
+    }
+  },
+  "genreEngagementMatrix": {
+    "hiphop": {
+      "likeRate": 0.068,
+      "commentRate": 0.019,
+      "shareRate": 0.024
+    },
+    "rb": {
+      "likeRate": 0.071,
+      "commentRate": 0.021,
+      "shareRate": 0.022
+    },
+    "pop": {
+      "likeRate": 0.059,
+      "commentRate": 0.016,
+      "shareRate": 0.019
+    },
+    "electronic": {
+      "likeRate": 0.054,
+      "commentRate": 0.013,
+      "shareRate": 0.028
+    },
+    "afrobeats": {
+      "likeRate": 0.082,
+      "commentRate": 0.027,
+      "shareRate": 0.031
+    },
+    "latin": {
+      "likeRate": 0.079,
+      "commentRate": 0.025,
+      "shareRate": 0.029
+    },
+    "country": {
+      "likeRate": 0.063,
+      "commentRate": 0.022,
+      "shareRate": 0.02
+    },
+    "rock": {
+      "likeRate": 0.058,
+      "commentRate": 0.018,
+      "shareRate": 0.021
+    },
+    "jazz": {
+      "likeRate": 0.049,
+      "commentRate": 0.014,
+      "shareRate": 0.012
+    }
+  }
+}

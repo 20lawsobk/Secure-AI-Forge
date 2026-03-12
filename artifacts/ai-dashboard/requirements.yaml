@@ -1,0 +1,19 @@
+packages:
+  "framer-motion": "For fluid page transitions and interactive element animations"
+  "recharts": "For displaying training loss and perplexity graphs"
+  "date-fns": "For formatting timestamps in logs and API key creation dates"
+  "zustand": "For lightweight global state management (Admin Key)"
+  "@hookform/resolvers": "For Zod schema validation in forms"
+  "react-hook-form": "For robust form state management"
+
+images:
+  - path: "artifacts/ai-dashboard/public/images/abstract-mesh.png"
+    description: "Dark, moody, professional abstract background with glowing violet and blue nodes connecting in a 3D network mesh, suitable for a modern AI developer tool."
+    aspect_ratio: "16:9"
+  - path: "artifacts/ai-dashboard/public/images/logo-icon.png"
+    description: "Minimalist geometric icon for an AI model, glowing purple on transparent or dark background."
+    aspect_ratio: "1:1"
+
+notes:
+  - Backend API requires `X-Admin-Key` header for the /api-keys routes.
+  - The `@workspace/api-client-react` package must be installed and built in the monorepo for imports to work.

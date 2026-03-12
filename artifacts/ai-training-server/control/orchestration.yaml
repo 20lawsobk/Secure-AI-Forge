@@ -1,0 +1,27 @@
+orchestration:
+  dataset_root: "D:\\ai_server\\datasets"
+  control_endpoint: "https://maxbooster.replit.app"
+  modules:
+    - dataset_manager
+    - gpu_scheduler
+    - control_daemon
+    - replit_bridge
+  workflows:
+    download_dataset:
+      steps:
+        - validate_repo
+        - ensure_dir
+        - start_download
+        - monitor_progress
+        - verify_integrity
+    training_job:
+      steps:
+        - queue_job
+        - monitor_job
+        - report_status
+    system_health:
+      steps:
+        - ping_daemon
+        - check_disk
+        - check_gpu
+        - report
