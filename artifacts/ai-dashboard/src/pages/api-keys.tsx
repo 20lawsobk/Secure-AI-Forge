@@ -4,7 +4,7 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
 import { Copy, Plus, Trash2, RefreshCw, Key, ShieldAlert } from "lucide-react";
-import { useAuth, getAuthHeaders } from "@/hooks/use-auth";
+import { useAuth } from "@/hooks/use-auth";
 import { useToast } from "@/hooks/use-toast";
 import {
   useListApiKeys,
@@ -58,17 +58,13 @@ export default function ApiKeys() {
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [newKeyData, setNewKeyData] = useState<{ key: string; name: string } | null>(null);
 
-  // Queries & Mutations
-  const headers = getAuthHeaders();
-  
   const { data, isLoading, refetch } = useListApiKeys({
     query: { enabled: !!adminKey },
-    request: { headers }
   });
 
-  const createMut = useCreateApiKey({ request: { headers } });
-  const revokeMut = useRevokeApiKey({ request: { headers } });
-  const rotateMut = useRotateApiKey({ request: { headers } });
+  const createMut = useCreateApiKey();
+  const revokeMut = useRevokeApiKey();
+  const rotateMut = useRotateApiKey();
 
   const form = useForm<z.infer<typeof createKeySchema>>({
     resolver: zodResolver(createKeySchema),

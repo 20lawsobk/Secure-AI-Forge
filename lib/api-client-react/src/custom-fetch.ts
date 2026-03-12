@@ -271,6 +271,12 @@ async function parseSuccessBody(
   }
 }
 
+let _globalHeaderProvider: (() => Record<string, string>) | null = null;
+
+export function setAuthHeaderProvider(fn: () => Record<string, string>) {
+  _globalHeaderProvider = fn;
+}
+
 export async function customFetch<T = unknown>(
   input: RequestInfo | URL,
   options: CustomFetchOptions = {},
@@ -283,7 +289,12 @@ export async function customFetch<T = unknown>(
     throw new TypeError(`customFetch: ${method} requests cannot have a body.`);
   }
 
-  const headers = mergeHeaders(isRequest(input) ? input.headers : undefined, headersInit);
+  const globalHeaders = _globalHeaderProvider ? _globalHeaderProvider() : {};
+  const headers = mergeHeaders(
+    isRequest(input) ? input.headers : undefined,
+    globalHeaders,
+    headersInit,
+  );
 
   if (
     typeof init.body === "string" &&
