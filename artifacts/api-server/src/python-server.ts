@@ -1,13 +1,10 @@
 import { spawn, ChildProcess } from "child_process";
 import path from "path";
 import net from "net";
-import { fileURLToPath } from "url";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const PYTHON_PORT = parseInt(process.env.MODEL_API_PORT || "9878", 10);
-const PYTHON_SCRIPT = path.resolve(__dirname, "../../../artifacts/ai-training-server/server.py");
+const WORKSPACE_ROOT = process.cwd();
+const PYTHON_SCRIPT = path.join(WORKSPACE_ROOT, "artifacts/ai-training-server/server.py");
 const MAX_RETRIES = 5;
 const RETRY_DELAY_MS = 3000;
 
