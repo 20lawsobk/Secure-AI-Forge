@@ -188,10 +188,11 @@ _model_config = {}
 
 _model_lock = threading.Lock()
 
-# ─── Workers (DataPuller + ContinuousTrainer) ────────────────────────────────
+# ─── Workers (DataPuller + ContinuousTrainer + Watchdog) ─────────────────────
 
 _data_puller = None
 _continuous_trainer = None
+_watchdog = None
 _workers_lock = threading.Lock()
 
 def _init_ai_model():
@@ -404,7 +405,7 @@ async def on_startup():
 
 def _init_storage():
     """Connect to storage server, load checkpoint, and start workers."""
-    global _data_puller, _continuous_trainer
+    global _data_puller, _continuous_trainer, _watchdog
     from storage_client import get_storage, get_checkpoint_client
     storage = get_storage()
     ok = storage.ping()
@@ -418,6 +419,8 @@ def _init_storage():
     from workers.data_puller import DataPuller
     from workers.continuous_trainer import ContinuousTrainer
 
+    from workers.watchdog import get_watchdog
+
     with _workers_lock:
         _data_puller = DataPuller(storage)
         _continuous_trainer = ContinuousTrainer(
@@ -426,7 +429,20 @@ def _init_storage():
             run_training_fn=_training_bridge,
             curriculum_phases=CURRICULUM_PHASES,
         )
-    print("[Workers] DataPuller and ContinuousTrainer initialized")
+        _watchdog = get_watchdog()
+
+    # Inject references the watchdog needs to monitor everything
+    _watchdog.storage           = storage
+    _watchdog.training_state    = _training_state
+    _watchdog.training_lock     = _training_lock
+    _watchdog.model_ready_ref   = lambda: _model_ready
+    _watchdog.init_model_fn     = _init_ai_model
+    _watchdog.continuous_trainer = _continuous_trainer
+    _watchdog.data_puller       = _data_puller
+    _watchdog.weights_dir       = Path(__file__).parent / "ai_model" / "weights"
+    _watchdog.start()
+
+    print("[Workers] DataPuller, ContinuousTrainer, and Watchdog initialized and running")
 
 
 def _training_bridge(texts: list, epochs: int, phase_label: str,
@@ -1176,6 +1192,37 @@ async def puller_stop_auto(_key = Depends(require_scope("train"))):
         return {"success": False, "message": "DataPuller not initialized"}
     dp.stop()
     return {"success": True, "message": "DataPuller auto-pull stopped"}
+
+
+# ─── Watchdog Endpoints ────────────────────────────────────────────────────────
+
+@app.get("/watchdog/status")
+async def watchdog_status(_key = Depends(require_scope("read"))):
+    with _workers_lock:
+        wd = _watchdog
+    if wd is None:
+        return {"status": "not_initialized", "running": False}
+    return wd.get_status()
+
+
+@app.get("/watchdog/log")
+async def watchdog_log(limit: int = 50, _key = Depends(require_scope("read"))):
+    with _workers_lock:
+        wd = _watchdog
+    if wd is None:
+        return {"log": [], "count": 0}
+    entries = wd.get_log(limit=limit)
+    return {"log": entries, "count": len(entries)}
+
+
+@app.post("/watchdog/reset")
+async def watchdog_reset(_key = Depends(require_scope("train"))):
+    with _workers_lock:
+        wd = _watchdog
+    if wd is None:
+        return {"success": False, "message": "Watchdog not initialized"}
+    wd.reset_alerts()
+    return {"success": True, "message": "Watchdog alert log cleared"}
 
 
 # ─── Content Generation ───────────────────────────────────────────────────────

@@ -249,4 +249,19 @@ router.post("/platform/ads/optimize", async (req, res) => {
   await proxyRequest(req, res, "/platform/ads/optimize");
 });
 
+// ─── Watchdog ──────────────────────────────────────────────────────────────
+
+router.get("/watchdog/status", async (req, res) => {
+  await proxyRequest(req, res, "/watchdog/status");
+});
+
+router.get("/watchdog/log", async (req, res) => {
+  const limit = req.query.limit ? `?limit=${req.query.limit}` : "";
+  await proxyRequest(req, res, `/watchdog/log${limit}`);
+});
+
+router.post("/watchdog/reset", async (req, res) => {
+  await proxyRequest(req, res, "/watchdog/reset");
+});
+
 export default router;
