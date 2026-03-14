@@ -88,6 +88,18 @@ router.get("/training/logs", async (req, res) => {
   await proxyRequest(req, res, `/training/logs${req.query.limit ? `?limit=${req.query.limit}` : ""}`);
 });
 
+router.post("/training/stop", async (req, res) => {
+  await proxyRequest(req, res, "/training/stop");
+});
+
+router.get("/training/datasets", async (req, res) => {
+  await proxyRequest(req, res, "/training/datasets");
+});
+
+router.post("/training/schedule", async (req, res) => {
+  await proxyRequest(req, res, "/training/schedule");
+});
+
 router.post("/content/generate", async (req, res) => {
   await proxyRequest(req, res, "/content/generate");
 });

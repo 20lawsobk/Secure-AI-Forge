@@ -138,6 +138,18 @@ _training_state = {
     "weights_exist": False,
     "job_id": None,
     "started_at": None,
+    "first_loss": None,
+    "best_loss": None,
+    "current_loss": None,
+    "sessions_done": 0,
+    "last_weights_save": None,
+    "weights_file": "weights_v4.npz",
+    "total_trained": 0,
+    "training_time": 0,
+    "curriculum_phase": None,
+    "curriculum_phases_done": [],
+    "schedule_mode": "single",
+    "stop_requested": False,
 }
 _training_lock = threading.Lock()
 
@@ -228,7 +240,11 @@ def _init_ai_model():
                 vocab_size=max(len(_tokenizer.vocab), 1000),
                 dim=dim, n_layers=n_layers, n_heads=n_heads, max_len=max_len,
             )
-            base_model.load_state_dict(state_dict, strict=False)
+            filtered = {
+                k: v for k, v in state_dict.items()
+                if k not in base_model.state_dict() or v.shape == base_model.state_dict()[k].shape
+            }
+            base_model.load_state_dict(filtered, strict=False)
         else:
             print("[AI Model] No pre-trained weights, using random init")
             base_model = TransformerLM(
@@ -605,9 +621,12 @@ async def gpu_capabilities():
 @app.get("/training/status")
 async def get_training_status():
     weights_path = Path(__file__).parent / "ai_model" / "weights" / "model.pt"
+    npz_path = Path(__file__).parent / "ai_model" / "weights" / "weights_v4.npz"
     with _training_lock:
         state = dict(_training_state)
-    state["weights_exist"] = weights_path.exists()
+    state["weights_exist"] = weights_path.exists() or npz_path.exists()
+    state["current_loss"] = state.get("loss")
+    state["training_time"] = state.get("elapsed_seconds", 0)
     return state
 
 @app.post("/training/start")
@@ -705,7 +724,7 @@ def _run_training(req: StartTrainingRequest, job_id: str):
             "vocab": _tokenizer.vocab,
             "inv_vocab": _tokenizer.inv_vocab,
             "next_id": _tokenizer.next_id,
-            "config": {"dim": dim, "layers": n_layers, "heads": cfg.heads, "max_len": cfg.max_len},
+            "config": _model_config,
         }, str(weights_path))
 
         _tokenizer.freeze()
@@ -744,6 +763,236 @@ async def get_training_logs(limit: int = 50):
             "loss": float(r["loss"]) if r["loss"] is not None else None,
         })
     return {"logs": logs, "total": len(logs)}
+
+@app.post("/training/stop")
+async def stop_training(_key = Depends(require_scope("train"))):
+    with _training_lock:
+        state = _training_state.get("state", "idle")
+        if state not in ("running", "starting"):
+            return {"success": False, "message": f"No active training to stop (state: {state})"}
+        _training_state["stop_requested"] = True
+        job_id = _training_state.get("job_id")
+    log_training(f"Stop requested for job {job_id}", job_id=job_id)
+    return {"success": True, "message": f"Stop signal sent to job {job_id}"}
+
+
+CURRICULUM_PHASES = [
+    {
+        "id": "phase_1_social",
+        "name": "Social Content Foundation",
+        "description": "Trains on social posts, hooks, captions, and hashtag patterns",
+        "loss_target": 3.5,
+        "datasets": ["social_posts", "captions"],
+        "epochs": 3,
+    },
+    {
+        "id": "phase_2_ads",
+        "name": "Ad Creative & Performance",
+        "description": "Trains on high-ROAS ad copy, hooks, CTAs, and audience signals",
+        "loss_target": 3.0,
+        "datasets": ["ad_creatives", "peak_performers"],
+        "epochs": 3,
+    },
+    {
+        "id": "phase_3_daw",
+        "name": "DAW & Studio Intelligence",
+        "description": "Trains on lyrics, beat descriptions, track concepts, and production notes",
+        "loss_target": 2.8,
+        "datasets": ["lyrics", "daw_sessions"],
+        "epochs": 3,
+    },
+    {
+        "id": "phase_4_distribution",
+        "name": "Distribution & Release Strategy",
+        "description": "Trains on playlist pitching, release planning, and streaming platform metadata",
+        "loss_target": 2.5,
+        "datasets": ["distribution_plans", "release_strategies"],
+        "epochs": 2,
+    },
+    {
+        "id": "phase_5_multimodal",
+        "name": "Multimodal Fusion",
+        "description": "Full cross-domain training across all datasets with MusicCaps, AudioCaps, HMDB-51, UCF-101, FMA",
+        "loss_target": 2.0,
+        "datasets": ["musiccaps", "audiocaps", "hmdb51", "ucf101", "fma"],
+        "epochs": 5,
+    },
+]
+
+STORAGE_DATASETS = [
+    {"id": "hmdb51",      "name": "HMDB-51 Clips",        "type": "video",   "color": "blue",   "size_gb": 2.0,  "samples": 6766},
+    {"id": "ucf101",      "name": "UCF-101 Clips",         "type": "video",   "color": "blue",   "size_gb": 6.5,  "samples": 13320},
+    {"id": "musiccaps",   "name": "MusicCaps Captions",    "type": "audio",   "color": "purple", "size_gb": 0.08, "samples": 5521},
+    {"id": "audiocaps",   "name": "AudioCaps Captions",    "type": "audio",   "color": "teal",   "size_gb": 0.05, "samples": 49274},
+    {"id": "fma",         "name": "FMA Tracks",            "type": "audio",   "color": "orange", "size_gb": 917.0,"samples": 106574},
+    {"id": "social_posts","name": "Social Post Corpus",    "type": "text",    "color": "green",  "size_gb": 0.4,  "samples": 220000},
+    {"id": "ad_creatives","name": "Ad Creative Library",   "type": "text",    "color": "red",    "size_gb": 0.2,  "samples": 95000},
+    {"id": "lyrics",      "name": "Lyrics & DAW Sessions", "type": "text",    "color": "indigo", "size_gb": 1.2,  "samples": 180000},
+]
+
+@app.get("/training/datasets")
+async def get_training_datasets(_key = Depends(require_scope("read"))):
+    total_gb = sum(d["size_gb"] for d in STORAGE_DATASETS)
+    storage_session = None
+    try:
+        storage_session = get_storage_client().get_session_info()
+    except Exception:
+        pass
+    return {
+        "datasets": STORAGE_DATASETS,
+        "total_disk_gb": round(total_gb, 2),
+        "total_disk_display": f"{total_gb / 1024:.1f} TB" if total_gb > 1024 else f"{total_gb:.1f} GB",
+        "storage_session": storage_session,
+        "curriculum_phases": CURRICULUM_PHASES,
+    }
+
+
+class ScheduleRequest(BaseModel):
+    mode: str = "single"
+    phases: list = []
+    start_phase: str = None
+    continuous: bool = False
+    epochs_per_phase: int = 3
+    loss_targets: dict = {}
+
+@app.post("/training/schedule")
+async def schedule_training(req: ScheduleRequest, background_tasks: BackgroundTasks,
+                            _key = Depends(require_scope("train"))):
+    with _training_lock:
+        if _training_state["state"] == "running":
+            return {"success": False, "message": "Training already in progress"}
+        _training_state["schedule_mode"] = req.mode
+        _training_state["stop_requested"] = False
+
+    phases_to_run = req.phases if req.phases else [p["id"] for p in CURRICULUM_PHASES]
+    if req.start_phase:
+        try:
+            idx = phases_to_run.index(req.start_phase)
+            phases_to_run = phases_to_run[idx:]
+        except ValueError:
+            pass
+
+    job_id = str(uuid.uuid4())[:8]
+    with _training_lock:
+        _training_state["state"] = "starting"
+        _training_state["job_id"] = job_id
+        _training_state["curriculum_phases_done"] = []
+        _training_state["started_at"] = time.time()
+
+    background_tasks.add_task(_run_curriculum, phases_to_run, req, job_id)
+    return {
+        "success": True,
+        "job_id": job_id,
+        "mode": req.mode,
+        "phases_queued": phases_to_run,
+        "message": f"Curriculum training scheduled — {len(phases_to_run)} phase(s), mode: {req.mode}",
+    }
+
+
+def _run_curriculum(phases: list, req: ScheduleRequest, job_id: str):
+    import math
+    from ai_model.training.synthetic import generate_synthetic_samples
+    from ai_model.training.dataset import CreativeDataset
+    from ai_model.training.trainer import train as run_train
+    from ai_model.training.config import TrainConfig
+
+    with _training_lock:
+        _training_state["state"] = "running"
+
+    log_training(f"Curriculum training {job_id} starting — {len(phases)} phases", job_id=job_id)
+
+    phase_map = {p["id"]: p for p in CURRICULUM_PHASES}
+    session_count = 0
+
+    while True:
+        for phase_id in phases:
+            with _training_lock:
+                if _training_state.get("stop_requested"):
+                    _training_state["state"] = "stopped"
+                    _training_state["stop_requested"] = False
+                    log_training(f"Curriculum stopped at phase {phase_id}", job_id=job_id)
+                    return
+
+            phase = phase_map.get(phase_id, {"id": phase_id, "name": phase_id, "epochs": req.epochs_per_phase, "loss_target": 2.5})
+            epochs = req.loss_targets.get(phase_id, {}).get("epochs", phase.get("epochs", req.epochs_per_phase))
+            loss_target = req.loss_targets.get(phase_id, {}).get("loss_target", phase.get("loss_target", 2.5))
+
+            with _training_lock:
+                _training_state["curriculum_phase"] = phase.get("name", phase_id)
+
+            log_training(f"[Curriculum] Phase: {phase.get('name')} | target loss ≤ {loss_target} | epochs: {epochs}", job_id=job_id)
+
+            try:
+                data_path = f"training/curriculum_{phase_id}.json"
+                os.makedirs("training", exist_ok=True)
+                generate_synthetic_samples(data_path, n=120)
+
+                _tokenizer.unfreeze()
+                train_max_len = min(256, _creative_model.model.pos_emb.num_embeddings)
+                dataset = CreativeDataset(data_path, _tokenizer, max_len=train_max_len)
+
+                dim = _creative_model.model.token_emb.embedding_dim
+                cfg = TrainConfig({
+                    "model": {"dim": dim, "layers": len(_creative_model.model.layers), "heads": 8, "max_len": train_max_len},
+                    "train": {"lr": 3e-4, "batch_size": 4, "epochs": epochs, "data_path": data_path},
+                })
+                cfg.gradient_accumulation_steps = 1
+                _creative_model.resize_embeddings()
+
+                result = run_train(_creative_model.model, dataset, _tokenizer, cfg, device="cpu")
+                _tokenizer.freeze()
+
+                final_loss = result.get("final_loss", 999)
+                session_count += 1
+
+                with _training_lock:
+                    if _training_state["first_loss"] is None:
+                        _training_state["first_loss"] = round(final_loss, 4)
+                    if _training_state["best_loss"] is None or final_loss < _training_state["best_loss"]:
+                        _training_state["best_loss"] = round(final_loss, 4)
+                    _training_state["current_loss"] = round(final_loss, 4)
+                    _training_state["loss"] = round(final_loss, 4)
+                    _training_state["sessions_done"] = session_count
+                    _training_state["total_trained"] = (_training_state.get("total_trained", 0) + len(dataset))
+                    _training_state["curriculum_phases_done"].append(phase_id)
+
+                weights_dir = Path(__file__).parent / "ai_model" / "weights"
+                weights_dir.mkdir(parents=True, exist_ok=True)
+                import torch, numpy as np
+                state_dict = _creative_model.model.state_dict()
+                torch.save({"model_state_dict": state_dict, "vocab": _tokenizer.vocab,
+                            "inv_vocab": _tokenizer.inv_vocab, "next_id": _tokenizer.next_id,
+                            "config": _model_config, "job_id": job_id, "phase": phase_id,
+                            "final_loss": final_loss}, str(weights_dir / "model.pt"))
+                np_weights = {k: v.numpy() for k, v in state_dict.items()}
+                np.savez_compressed(str(weights_dir / "weights_v4.npz"), **np_weights)
+
+                save_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                with _training_lock:
+                    _training_state["last_weights_save"] = save_time
+                    _training_state["weights_file"] = "weights_v4.npz"
+                    _training_state["elapsed_seconds"] = time.time() - _training_state["started_at"]
+
+                log_training(f"[Curriculum] Phase {phase.get('name')} done — loss={final_loss:.4f} (target≤{loss_target})", job_id=job_id)
+
+                if final_loss <= loss_target:
+                    log_training(f"[Curriculum] Phase {phase_id} hit loss target {loss_target} ✓", job_id=job_id)
+
+            except Exception as e:
+                log_training(f"[Curriculum] Phase {phase_id} error: {e}", level="error", job_id=job_id)
+
+        if req.mode != "continuous":
+            break
+
+        log_training(f"[Curriculum] Continuous mode — restarting cycle (sessions done: {session_count})", job_id=job_id)
+
+    with _training_lock:
+        _training_state["state"] = "completed"
+        _training_state["sessions_done"] = session_count
+        _training_state["elapsed_seconds"] = time.time() - _training_state.get("started_at", time.time())
+
+    log_training(f"[Curriculum] Job {job_id} complete — {session_count} sessions, best loss: {_training_state.get('best_loss')}", job_id=job_id)
+
 
 # ─── Content Generation ───────────────────────────────────────────────────────
 

@@ -1,0 +1,1262 @@
+[
+  {
+    "title": "Gold Rush",
+    "genre": "hip-hop",
+    "tone": "playful",
+    "bpm": 95,
+    "key": "C minor",
+    "lyric_hook": "Every night I pray that I can find my way",
+    "beat_description": "Playful hip-hop beat, 95 BPM, C minor, layered 808s with melodic top line",
+    "text": "Track: Gold Rush | Genre: hip-hop | BPM: 95 | Key: C minor | Hook: Every night I pray that I can find my way"
+  },
+  {
+    "platform": "Meta",
+    "hook": "Your playlist needs this right now",
+    "cta": "Drop in Comments",
+    "product": "The Come Up Tape",
+    "goal": "followers",
+    "audience": [
+      "music lovers",
+      "trap enthusiasts"
+    ],
+    "text": "Your playlist needs this right now | The Come Up Tape | Drop in Comments | Target: music lovers, trap enthusiasts"
+  },
+  {
+    "platform": "TikTok",
+    "hook": "I wasn't ready for this drop",
+    "cta": "Drop in Comments",
+    "product": "Wavelength Tape",
+    "goal": "streams",
+    "audience": [
+      "playlist listeners",
+      "indie music fans"
+    ],
+    "text": "I wasn't ready for this drop | Wavelength Tape | Drop in Comments | Target: playlist listeners, indie music fans"
+  },
+  {
+    "title": "Raw Footage",
+    "genre": "R&B",
+    "tone": "edgy",
+    "bpm": 111,
+    "key": "Bb major",
+    "lyric_hook": "They never believed until the whole world was watching",
+    "beat_description": "Edgy R&B beat, 111 BPM, Bb major, layered 808s with melodic top line",
+    "text": "Track: Raw Footage | Genre: R&B | BPM: 111 | Key: Bb major | Hook: They never believed until the whole world was watching"
+  },
+  {
+    "title": "Street Gospel",
+    "genre": "trap",
+    "tone": "chill",
+    "bpm": 98,
+    "key": "F# minor",
+    "lyric_hook": "We made it out, we ain't going back to nothing",
+    "beat_description": "Chill trap beat, 98 BPM, F# minor, layered 808s with melodic top line",
+    "text": "Track: Street Gospel | Genre: trap | BPM: 98 | Key: F# minor | Hook: We made it out, we ain't going back to nothing"
+  },
+  {
+    "platform": "TikTok",
+    "hook": "My most personal song yet just dropped",
+    "body": "Been working on this for 5 months. Every late night, every early morning went into this. The electronic vibes are real on this one. Link in bio to stream.",
+    "cta": "Drop in Comments",
+    "hashtags": "#HipHop #IndieArtist #MusicProducer #IndieArtist #NewArtist #IndieArtist",
+    "text": "My most personal song yet just dropped\n\nBeen working on this for 5 months. Every late night, every early morning went into this. The electronic vibes are real on this one. Link in bio to stream.\n\nDrop in Comments\n\n#HipHop #IndieArtist #MusicProducer #IndieArtist #NewArtist #IndieArtist"
+  },
+  {
+    "title": "Street Gospel",
+    "genre": "hip-hop",
+    "tone": "edgy",
+    "bpm": 75,
+    "key": "C minor",
+    "lyric_hook": "I been on the grind since day one, nobody saw me coming",
+    "beat_description": "Edgy hip-hop beat, 75 BPM, C minor, layered 808s with melodic top line",
+    "text": "Track: Street Gospel | Genre: hip-hop | BPM: 75 | Key: C minor | Hook: I been on the grind since day one, nobody saw me coming"
+  },
+  {
+    "platform": "Twitter",
+    "hook": "Behind the scenes: recording 'Street Gospel'",
+    "body": "Been working on this for 5 months. Every late night, every early morning went into this. The soul vibes are real on this one. Link in bio to stream.",
+    "cta": "Follow for More",
+    "hashtags": "#MusicProducer #HipHop #RnB #NewArtist #NewArtist #NewArtist",
+    "text": "Behind the scenes: recording 'Street Gospel'\n\nBeen working on this for 5 months. Every late night, every early morning went into this. The soul vibes are real on this one. Link in bio to stream.\n\nFollow for More\n\n#MusicProducer #HipHop #RnB #NewArtist #NewArtist #NewArtist"
+  },
+  {
+    "title": "Midnight Sessions",
+    "genre": "pop",
+    "tone": "energetic",
+    "bpm": 118,
+    "key": "G major",
+    "lyric_hook": "The city lights reflect in my eyes at midnight",
+    "beat_description": "Energetic pop beat, 118 BPM, G major, layered 808s with melodic top line",
+    "text": "Track: Midnight Sessions | Genre: pop | BPM: 118 | Key: G major | Hook: The city lights reflect in my eyes at midnight"
+  },
+  {
+    "title": "Raw Footage",
+    "genre": "pop",
+    "tone": "inspirational",
+    "bpm": 90,
+    "key": "G major",
+    "lyric_hook": "The city lights reflect in my eyes at midnight",
+    "beat_description": "Inspirational pop beat, 90 BPM, G major, layered 808s with melodic top line",
+    "text": "Track: Raw Footage | Genre: pop | BPM: 90 | Key: G major | Hook: The city lights reflect in my eyes at midnight"
+  },
+  {
+    "platform": "YouTube",
+    "hook": "No one talks about this part of being an indie artist",
+    "body": "Been working on this for 18 months. Every late night, every early morning went into this. The R&B vibes are real on this one. Link in bio to stream.",
+    "cta": "Stream Now",
+    "hashtags": "#NewMusic #IndieArtist #HipHop #RnB #NewArtist #NewMusic",
+    "text": "No one talks about this part of being an indie artist\n\nBeen working on this for 18 months. Every late night, every early morning went into this. The R&B vibes are real on this one. Link in bio to stream.\n\nStream Now\n\n#NewMusic #IndieArtist #HipHop #RnB #NewArtist #NewMusic"
+  },
+  {
+    "title": "Frequency",
+    "release_days_out": 15,
+    "platforms": [
+      "Spotify",
+      "Amazon Music",
+      "Apple Music",
+      "Deezer"
+    ],
+    "strategy": "pre-save campaign starting 21 days out",
+    "text": "Release 'Frequency' in 15 days on Spotify, Amazon Music, Apple Music, Deezer. Strategy: pre-save campaign starting 21 days out."
+  },
+  {
+    "title": "The Come Up",
+    "release_days_out": 38,
+    "platforms": [
+      "Amazon Music",
+      "Apple Music",
+      "YouTube Music",
+      "Deezer"
+    ],
+    "strategy": "TikTok pre-release audio leak strategy",
+    "text": "Release 'The Come Up' in 38 days on Amazon Music, Apple Music, YouTube Music, Deezer. Strategy: TikTok pre-release audio leak strategy."
+  },
+  {
+    "title": "Street Gospel",
+    "genre": "soul",
+    "tone": "energetic",
+    "bpm": 108,
+    "key": "G major",
+    "lyric_hook": "We made it out, we ain't going back to nothing",
+    "beat_description": "Energetic soul beat, 108 BPM, G major, layered 808s with melodic top line",
+    "text": "Track: Street Gospel | Genre: soul | BPM: 108 | Key: G major | Hook: We made it out, we ain't going back to nothing"
+  },
+  {
+    "platform": "Twitter",
+    "hook": "How I went from 0 to 10k streams in 30 days",
+    "body": "Been working on this for 13 months. Every late night, every early morning went into this. The R&B vibes are real on this one. Link in bio to stream.",
+    "cta": "Follow for More",
+    "hashtags": "#NewArtist #NewMusic #NewMusic #HipHop #IndieArtist",
+    "text": "How I went from 0 to 10k streams in 30 days\n\nBeen working on this for 13 months. Every late night, every early morning went into this. The R&B vibes are real on this one. Link in bio to stream.\n\nFollow for More\n\n#NewArtist #NewMusic #NewMusic #HipHop #IndieArtist"
+  },
+  {
+    "title": "Street Gospel",
+    "release_days_out": 43,
+    "platforms": [
+      "Amazon Music",
+      "YouTube Music",
+      "Tidal",
+      "Apple Music"
+    ],
+    "strategy": "release day social blitz across all platforms",
+    "text": "Release 'Street Gospel' in 43 days on Amazon Music, YouTube Music, Tidal, Apple Music. Strategy: release day social blitz across all platforms."
+  },
+  {
+    "platform": "Meta",
+    "hook": "The sound everyone's been waiting for",
+    "cta": "Follow for More",
+    "product": "Wavelength Album",
+    "goal": "followers",
+    "audience": [
+      "indie music fans",
+      "urban culture"
+    ],
+    "text": "The sound everyone's been waiting for | Wavelength Album | Follow for More | Target: indie music fans, urban culture"
+  },
+  {
+    "title": "Ascension",
+    "genre": "soul",
+    "tone": "edgy",
+    "bpm": 126,
+    "key": "D minor",
+    "lyric_hook": "The city lights reflect in my eyes at midnight",
+    "beat_description": "Edgy soul beat, 126 BPM, D minor, layered 808s with melodic top line",
+    "text": "Track: Ascension | Genre: soul | BPM: 126 | Key: D minor | Hook: The city lights reflect in my eyes at midnight"
+  },
+  {
+    "platform": "Instagram",
+    "hook": "Real talk \u2014 the music industry doesn't want you to know this",
+    "body": "Been working on this for 6 months. Every late night, every early morning went into this. The hip-hop vibes are real on this one. Link in bio to stream.",
+    "cta": "Share if You Vibe",
+    "hashtags": "#HipHop #MusicProducer #NewMusic #NewArtist #IndieArtist",
+    "text": "Real talk \u2014 the music industry doesn't want you to know this\n\nBeen working on this for 6 months. Every late night, every early morning went into this. The hip-hop vibes are real on this one. Link in bio to stream.\n\nShare if You Vibe\n\n#HipHop #MusicProducer #NewMusic #NewArtist #IndieArtist"
+  },
+  {
+    "title": "Street Gospel",
+    "genre": "soul",
+    "tone": "playful",
+    "bpm": 94,
+    "key": "G major",
+    "lyric_hook": "Every night I pray that I can find my way",
+    "beat_description": "Playful soul beat, 94 BPM, G major, layered 808s with melodic top line",
+    "text": "Track: Street Gospel | Genre: soul | BPM: 94 | Key: G major | Hook: Every night I pray that I can find my way"
+  },
+  {
+    "platform": "Instagram",
+    "hook": "No one talks about this part of being an indie artist",
+    "body": "Been working on this for 10 months. Every late night, every early morning went into this. The pop vibes are real on this one. Link in bio to stream.",
+    "cta": "Stream Now",
+    "hashtags": "#IndieArtist #NewArtist #NewMusic",
+    "text": "No one talks about this part of being an indie artist\n\nBeen working on this for 10 months. Every late night, every early morning went into this. The pop vibes are real on this one. Link in bio to stream.\n\nStream Now\n\n#IndieArtist #NewArtist #NewMusic"
+  },
+  {
+    "platform": "YouTube",
+    "hook": "This song just broke my algorithm",
+    "cta": "Follow for More",
+    "product": "Ascension Single",
+    "goal": "streams",
+    "audience": [
+      "indie music fans",
+      "R&B fans"
+    ],
+    "text": "This song just broke my algorithm | Ascension Single | Follow for More | Target: indie music fans, R&B fans"
+  },
+  {
+    "platform": "YouTube",
+    "hook": "Day 80 of dropping fire until I blow up",
+    "body": "Been working on this for 7 months. Every late night, every early morning went into this. The trap vibes are real on this one. Link in bio to stream.",
+    "cta": "Drop in Comments",
+    "hashtags": "#IndieArtist #RnB #NewMusic #MusicProducer #NewMusic #HipHop",
+    "text": "Day 80 of dropping fire until I blow up\n\nBeen working on this for 7 months. Every late night, every early morning went into this. The trap vibes are real on this one. Link in bio to stream.\n\nDrop in Comments\n\n#IndieArtist #RnB #NewMusic #MusicProducer #NewMusic #HipHop"
+  },
+  {
+    "title": "Midnight Sessions",
+    "release_days_out": 55,
+    "platforms": [
+      "Deezer",
+      "Amazon Music",
+      "Spotify",
+      "Apple Music"
+    ],
+    "strategy": "pitch to editorial playlists 7 days before release",
+    "text": "Release 'Midnight Sessions' in 55 days on Deezer, Amazon Music, Spotify, Apple Music. Strategy: pitch to editorial playlists 7 days before release."
+  },
+  {
+    "platform": "TikTok",
+    "hook": "This song just broke my algorithm",
+    "cta": "Stream Now",
+    "product": "Midnight Sessions Album",
+    "goal": "engagement",
+    "audience": [
+      "playlist listeners",
+      "trap enthusiasts"
+    ],
+    "text": "This song just broke my algorithm | Midnight Sessions Album | Stream Now | Target: playlist listeners, trap enthusiasts"
+  },
+  {
+    "title": "Ascension",
+    "release_days_out": 38,
+    "platforms": [
+      "Apple Music",
+      "Spotify",
+      "YouTube Music",
+      "Tidal"
+    ],
+    "strategy": "pre-save campaign starting 21 days out",
+    "text": "Release 'Ascension' in 38 days on Apple Music, Spotify, YouTube Music, Tidal. Strategy: pre-save campaign starting 21 days out."
+  },
+  {
+    "title": "Wavelength",
+    "release_days_out": 28,
+    "platforms": [
+      "YouTube Music",
+      "Deezer",
+      "Apple Music",
+      "Amazon Music"
+    ],
+    "strategy": "pitch to editorial playlists 7 days before release",
+    "text": "Release 'Wavelength' in 28 days on YouTube Music, Deezer, Apple Music, Amazon Music. Strategy: pitch to editorial playlists 7 days before release."
+  },
+  {
+    "platform": "Meta",
+    "hook": "The sound everyone's been waiting for",
+    "cta": "Follow for More",
+    "product": "Street Gospel Tape",
+    "goal": "streams",
+    "audience": [
+      "trap enthusiasts",
+      "indie music fans"
+    ],
+    "text": "The sound everyone's been waiting for | Street Gospel Tape | Follow for More | Target: trap enthusiasts, indie music fans"
+  },
+  {
+    "title": "Street Gospel",
+    "genre": "electronic",
+    "tone": "playful",
+    "bpm": 136,
+    "key": "G major",
+    "lyric_hook": "I been on the grind since day one, nobody saw me coming",
+    "beat_description": "Playful electronic beat, 136 BPM, G major, layered 808s with melodic top line",
+    "text": "Track: Street Gospel | Genre: electronic | BPM: 136 | Key: G major | Hook: I been on the grind since day one, nobody saw me coming"
+  },
+  {
+    "title": "Overtime",
+    "genre": "pop",
+    "tone": "playful",
+    "bpm": 98,
+    "key": "A major",
+    "lyric_hook": "Every night I pray that I can find my way",
+    "beat_description": "Playful pop beat, 98 BPM, A major, layered 808s with melodic top line",
+    "text": "Track: Overtime | Genre: pop | BPM: 98 | Key: A major | Hook: Every night I pray that I can find my way"
+  },
+  {
+    "platform": "TikTok",
+    "hook": "No one talks about this part of being an indie artist",
+    "body": "Been working on this for 14 months. Every late night, every early morning went into this. The R&B vibes are real on this one. Link in bio to stream.",
+    "cta": "Stream Now",
+    "hashtags": "#HipHop #NewArtist #IndieArtist #HipHop",
+    "text": "No one talks about this part of being an indie artist\n\nBeen working on this for 14 months. Every late night, every early morning went into this. The R&B vibes are real on this one. Link in bio to stream.\n\nStream Now\n\n#HipHop #NewArtist #IndieArtist #HipHop"
+  },
+  {
+    "title": "Raw Footage",
+    "release_days_out": 58,
+    "platforms": [
+      "YouTube Music",
+      "Spotify",
+      "Apple Music",
+      "Deezer"
+    ],
+    "strategy": "pitch to editorial playlists 7 days before release",
+    "text": "Release 'Raw Footage' in 58 days on YouTube Music, Spotify, Apple Music, Deezer. Strategy: pitch to editorial playlists 7 days before release."
+  },
+  {
+    "platform": "Meta",
+    "hook": "POV: your music goes viral overnight",
+    "cta": "Listen Free",
+    "product": "The Come Up EP",
+    "goal": "awareness",
+    "audience": [
+      "trap enthusiasts",
+      "indie music fans"
+    ],
+    "text": "POV: your music goes viral overnight | The Come Up EP | Listen Free | Target: trap enthusiasts, indie music fans"
+  },
+  {
+    "platform": "Twitter",
+    "hook": "No one talks about this part of being an indie artist",
+    "body": "Been working on this for 2 months. Every late night, every early morning went into this. The R&B vibes are real on this one. Link in bio to stream.",
+    "cta": "Listen Free",
+    "hashtags": "#NewMusic #HipHop #IndieArtist #IndieArtist",
+    "text": "No one talks about this part of being an indie artist\n\nBeen working on this for 2 months. Every late night, every early morning went into this. The R&B vibes are real on this one. Link in bio to stream.\n\nListen Free\n\n#NewMusic #HipHop #IndieArtist #IndieArtist"
+  },
+  {
+    "platform": "Instagram",
+    "hook": "Real talk \u2014 the music industry doesn't want you to know this",
+    "body": "Been working on this for 16 months. Every late night, every early morning went into this. The pop vibes are real on this one. Link in bio to stream.",
+    "cta": "Share if You Vibe",
+    "hashtags": "#MusicProducer #IndieArtist #NewArtist #NewMusic #IndieArtist #MusicProducer",
+    "text": "Real talk \u2014 the music industry doesn't want you to know this\n\nBeen working on this for 16 months. Every late night, every early morning went into this. The pop vibes are real on this one. Link in bio to stream.\n\nShare if You Vibe\n\n#MusicProducer #IndieArtist #NewArtist #NewMusic #IndieArtist #MusicProducer"
+  },
+  {
+    "platform": "YouTube",
+    "hook": "The sound everyone's been waiting for",
+    "cta": "Listen Free",
+    "product": "Midnight Sessions Album",
+    "goal": "sales",
+    "audience": [
+      "trap enthusiasts",
+      "urban culture"
+    ],
+    "text": "The sound everyone's been waiting for | Midnight Sessions Album | Listen Free | Target: trap enthusiasts, urban culture"
+  },
+  {
+    "platform": "YouTube",
+    "hook": "Finally. A beat that hits different.",
+    "cta": "Drop in Comments",
+    "product": "Neon Dreams EP",
+    "goal": "engagement",
+    "audience": [
+      "indie music fans",
+      "R&B fans"
+    ],
+    "text": "Finally. A beat that hits different. | Neon Dreams EP | Drop in Comments | Target: indie music fans, R&B fans"
+  },
+  {
+    "title": "Overtime",
+    "release_days_out": 47,
+    "platforms": [
+      "Amazon Music",
+      "Apple Music",
+      "Spotify",
+      "YouTube Music"
+    ],
+    "strategy": "release day social blitz across all platforms",
+    "text": "Release 'Overtime' in 47 days on Amazon Music, Apple Music, Spotify, YouTube Music. Strategy: release day social blitz across all platforms."
+  },
+  {
+    "title": "Neon Dreams",
+    "release_days_out": 40,
+    "platforms": [
+      "Deezer",
+      "Tidal",
+      "Apple Music",
+      "Spotify"
+    ],
+    "strategy": "release day social blitz across all platforms",
+    "text": "Release 'Neon Dreams' in 40 days on Deezer, Tidal, Apple Music, Spotify. Strategy: release day social blitz across all platforms."
+  },
+  {
+    "title": "Midnight Sessions",
+    "release_days_out": 20,
+    "platforms": [
+      "Deezer",
+      "Amazon Music",
+      "Apple Music",
+      "Tidal"
+    ],
+    "strategy": "pitch to editorial playlists 7 days before release",
+    "text": "Release 'Midnight Sessions' in 20 days on Deezer, Amazon Music, Apple Music, Tidal. Strategy: pitch to editorial playlists 7 days before release."
+  },
+  {
+    "platform": "YouTube",
+    "hook": "How I went from 0 to 10k streams in 30 days",
+    "body": "Been working on this for 15 months. Every late night, every early morning went into this. The R&B vibes are real on this one. Link in bio to stream.",
+    "cta": "Listen Free",
+    "hashtags": "#NewArtist #NewMusic #RnB #MusicProducer #NewArtist",
+    "text": "How I went from 0 to 10k streams in 30 days\n\nBeen working on this for 15 months. Every late night, every early morning went into this. The R&B vibes are real on this one. Link in bio to stream.\n\nListen Free\n\n#NewArtist #NewMusic #RnB #MusicProducer #NewArtist"
+  },
+  {
+    "platform": "Meta",
+    "hook": "The sound everyone's been waiting for",
+    "cta": "Drop in Comments",
+    "product": "Wavelength Single",
+    "goal": "sales",
+    "audience": [
+      "urban culture",
+      "music lovers"
+    ],
+    "text": "The sound everyone's been waiting for | Wavelength Single | Drop in Comments | Target: urban culture, music lovers"
+  },
+  {
+    "platform": "LinkedIn",
+    "hook": "Real talk \u2014 the music industry doesn't want you to know this",
+    "body": "Been working on this for 13 months. Every late night, every early morning went into this. The soul vibes are real on this one. Link in bio to stream.",
+    "cta": "Follow for More",
+    "hashtags": "#RnB #HipHop #IndieArtist",
+    "text": "Real talk \u2014 the music industry doesn't want you to know this\n\nBeen working on this for 13 months. Every late night, every early morning went into this. The soul vibes are real on this one. Link in bio to stream.\n\nFollow for More\n\n#RnB #HipHop #IndieArtist"
+  },
+  {
+    "platform": "Instagram",
+    "hook": "Behind the scenes: recording 'Raw Footage'",
+    "body": "Been working on this for 3 months. Every late night, every early morning went into this. The pop vibes are real on this one. Link in bio to stream.",
+    "cta": "Follow for More",
+    "hashtags": "#NewArtist #IndieArtist #HipHop #MusicProducer #NewArtist",
+    "text": "Behind the scenes: recording 'Raw Footage'\n\nBeen working on this for 3 months. Every late night, every early morning went into this. The pop vibes are real on this one. Link in bio to stream.\n\nFollow for More\n\n#NewArtist #IndieArtist #HipHop #MusicProducer #NewArtist"
+  },
+  {
+    "platform": "Meta",
+    "hook": "Finally. A beat that hits different.",
+    "cta": "Listen Free",
+    "product": "Ascension Album",
+    "goal": "sales",
+    "audience": [
+      "R&B fans",
+      "indie music fans"
+    ],
+    "text": "Finally. A beat that hits different. | Ascension Album | Listen Free | Target: R&B fans, indie music fans"
+  },
+  {
+    "title": "Raw Footage",
+    "genre": "soul",
+    "tone": "edgy",
+    "bpm": 152,
+    "key": "F# minor",
+    "lyric_hook": "The city lights reflect in my eyes at midnight",
+    "beat_description": "Edgy soul beat, 152 BPM, F# minor, layered 808s with melodic top line",
+    "text": "Track: Raw Footage | Genre: soul | BPM: 152 | Key: F# minor | Hook: The city lights reflect in my eyes at midnight"
+  },
+  {
+    "platform": "Instagram",
+    "hook": "How I went from 0 to 10k streams in 30 days",
+    "body": "Been working on this for 17 months. Every late night, every early morning went into this. The trap vibes are real on this one. Link in bio to stream.",
+    "cta": "Drop in Comments",
+    "hashtags": "#MusicProducer #NewMusic #NewMusic #RnB #RnB #IndieArtist",
+    "text": "How I went from 0 to 10k streams in 30 days\n\nBeen working on this for 17 months. Every late night, every early morning went into this. The trap vibes are real on this one. Link in bio to stream.\n\nDrop in Comments\n\n#MusicProducer #NewMusic #NewMusic #RnB #RnB #IndieArtist"
+  },
+  {
+    "title": "Ascension",
+    "release_days_out": 46,
+    "platforms": [
+      "Tidal",
+      "YouTube Music",
+      "Apple Music",
+      "Deezer"
+    ],
+    "strategy": "release day social blitz across all platforms",
+    "text": "Release 'Ascension' in 46 days on Tidal, YouTube Music, Apple Music, Deezer. Strategy: release day social blitz across all platforms."
+  },
+  {
+    "platform": "Meta",
+    "hook": "Listen to this before it gets big",
+    "cta": "Stream Now",
+    "product": "Ascension EP",
+    "goal": "sales",
+    "audience": [
+      "urban culture",
+      "R&B fans"
+    ],
+    "text": "Listen to this before it gets big | Ascension EP | Stream Now | Target: urban culture, R&B fans"
+  },
+  {
+    "title": "Neon Dreams",
+    "release_days_out": 44,
+    "platforms": [
+      "Apple Music",
+      "Amazon Music",
+      "Deezer",
+      "Spotify"
+    ],
+    "strategy": "pre-save campaign starting 21 days out",
+    "text": "Release 'Neon Dreams' in 44 days on Apple Music, Amazon Music, Deezer, Spotify. Strategy: pre-save campaign starting 21 days out."
+  },
+  {
+    "title": "Ascension",
+    "genre": "pop",
+    "tone": "inspirational",
+    "bpm": 71,
+    "key": "G major",
+    "lyric_hook": "The city lights reflect in my eyes at midnight",
+    "beat_description": "Inspirational pop beat, 71 BPM, G major, layered 808s with melodic top line",
+    "text": "Track: Ascension | Genre: pop | BPM: 71 | Key: G major | Hook: The city lights reflect in my eyes at midnight"
+  },
+  {
+    "title": "Wavelength",
+    "release_days_out": 27,
+    "platforms": [
+      "Amazon Music",
+      "Apple Music",
+      "Spotify",
+      "Tidal"
+    ],
+    "strategy": "release day social blitz across all platforms",
+    "text": "Release 'Wavelength' in 27 days on Amazon Music, Apple Music, Spotify, Tidal. Strategy: release day social blitz across all platforms."
+  },
+  {
+    "platform": "Twitter",
+    "hook": "POV: you discover your new favorite artist",
+    "body": "Been working on this for 3 months. Every late night, every early morning went into this. The hip-hop vibes are real on this one. Link in bio to stream.",
+    "cta": "Drop in Comments",
+    "hashtags": "#IndieArtist #NewMusic #RnB",
+    "text": "POV: you discover your new favorite artist\n\nBeen working on this for 3 months. Every late night, every early morning went into this. The hip-hop vibes are real on this one. Link in bio to stream.\n\nDrop in Comments\n\n#IndieArtist #NewMusic #RnB"
+  },
+  {
+    "platform": "YouTube",
+    "hook": "Your playlist needs this right now",
+    "cta": "Listen Free",
+    "product": "Ascension EP",
+    "goal": "engagement",
+    "audience": [
+      "indie music fans",
+      "music lovers"
+    ],
+    "text": "Your playlist needs this right now | Ascension EP | Listen Free | Target: indie music fans, music lovers"
+  },
+  {
+    "platform": "YouTube",
+    "hook": "I wasn't ready for this drop",
+    "cta": "Share if You Vibe",
+    "product": "Wavelength Tape",
+    "goal": "followers",
+    "audience": [
+      "indie music fans",
+      "R&B fans"
+    ],
+    "text": "I wasn't ready for this drop | Wavelength Tape | Share if You Vibe | Target: indie music fans, R&B fans"
+  },
+  {
+    "title": "Midnight Sessions",
+    "release_days_out": 51,
+    "platforms": [
+      "Deezer",
+      "Spotify",
+      "YouTube Music",
+      "Tidal"
+    ],
+    "strategy": "pre-save campaign starting 21 days out",
+    "text": "Release 'Midnight Sessions' in 51 days on Deezer, Spotify, YouTube Music, Tidal. Strategy: pre-save campaign starting 21 days out."
+  },
+  {
+    "title": "Wavelength",
+    "genre": "hip-hop",
+    "tone": "chill",
+    "bpm": 154,
+    "key": "C minor",
+    "lyric_hook": "I been on the grind since day one, nobody saw me coming",
+    "beat_description": "Chill hip-hop beat, 154 BPM, C minor, layered 808s with melodic top line",
+    "text": "Track: Wavelength | Genre: hip-hop | BPM: 154 | Key: C minor | Hook: I been on the grind since day one, nobody saw me coming"
+  },
+  {
+    "title": "Overtime",
+    "release_days_out": 19,
+    "platforms": [
+      "Amazon Music",
+      "YouTube Music",
+      "Spotify",
+      "Apple Music"
+    ],
+    "strategy": "pre-save campaign starting 21 days out",
+    "text": "Release 'Overtime' in 19 days on Amazon Music, YouTube Music, Spotify, Apple Music. Strategy: pre-save campaign starting 21 days out."
+  },
+  {
+    "platform": "Meta",
+    "hook": "I wasn't ready for this drop",
+    "cta": "Share if You Vibe",
+    "product": "Raw Footage EP",
+    "goal": "followers",
+    "audience": [
+      "indie music fans",
+      "urban culture"
+    ],
+    "text": "I wasn't ready for this drop | Raw Footage EP | Share if You Vibe | Target: indie music fans, urban culture"
+  },
+  {
+    "title": "Ascension",
+    "genre": "electronic",
+    "tone": "professional",
+    "bpm": 94,
+    "key": "G major",
+    "lyric_hook": "I been on the grind since day one, nobody saw me coming",
+    "beat_description": "Professional electronic beat, 94 BPM, G major, layered 808s with melodic top line",
+    "text": "Track: Ascension | Genre: electronic | BPM: 94 | Key: G major | Hook: I been on the grind since day one, nobody saw me coming"
+  },
+  {
+    "title": "The Come Up",
+    "genre": "trap",
+    "tone": "inspirational",
+    "bpm": 109,
+    "key": "D minor",
+    "lyric_hook": "Every night I pray that I can find my way",
+    "beat_description": "Inspirational trap beat, 109 BPM, D minor, layered 808s with melodic top line",
+    "text": "Track: The Come Up | Genre: trap | BPM: 109 | Key: D minor | Hook: Every night I pray that I can find my way"
+  },
+  {
+    "platform": "YouTube",
+    "hook": "POV: your music goes viral overnight",
+    "cta": "Listen Free",
+    "product": "Midnight Sessions Tape",
+    "goal": "streams",
+    "audience": [
+      "music lovers",
+      "urban culture"
+    ],
+    "text": "POV: your music goes viral overnight | Midnight Sessions Tape | Listen Free | Target: music lovers, urban culture"
+  },
+  {
+    "title": "Ascension",
+    "genre": "afrobeats",
+    "tone": "professional",
+    "bpm": 109,
+    "key": "F# minor",
+    "lyric_hook": "We made it out, we ain't going back to nothing",
+    "beat_description": "Professional afrobeats beat, 109 BPM, F# minor, layered 808s with melodic top line",
+    "text": "Track: Ascension | Genre: afrobeats | BPM: 109 | Key: F# minor | Hook: We made it out, we ain't going back to nothing"
+  },
+  {
+    "platform": "Instagram",
+    "hook": "POV: you discover your new favorite artist",
+    "body": "Been working on this for 4 months. Every late night, every early morning went into this. The R&B vibes are real on this one. Link in bio to stream.",
+    "cta": "Share if You Vibe",
+    "hashtags": "#NewMusic #IndieArtist #HipHop #MusicProducer",
+    "text": "POV: you discover your new favorite artist\n\nBeen working on this for 4 months. Every late night, every early morning went into this. The R&B vibes are real on this one. Link in bio to stream.\n\nShare if You Vibe\n\n#NewMusic #IndieArtist #HipHop #MusicProducer"
+  },
+  {
+    "title": "Overtime",
+    "release_days_out": 53,
+    "platforms": [
+      "Apple Music",
+      "Amazon Music",
+      "YouTube Music",
+      "Tidal"
+    ],
+    "strategy": "TikTok pre-release audio leak strategy",
+    "text": "Release 'Overtime' in 53 days on Apple Music, Amazon Music, YouTube Music, Tidal. Strategy: TikTok pre-release audio leak strategy."
+  },
+  {
+    "platform": "TikTok",
+    "hook": "My most personal song yet just dropped",
+    "body": "Been working on this for 15 months. Every late night, every early morning went into this. The electronic vibes are real on this one. Link in bio to stream.",
+    "cta": "Stream Now",
+    "hashtags": "#RnB #HipHop #HipHop #HipHop",
+    "text": "My most personal song yet just dropped\n\nBeen working on this for 15 months. Every late night, every early morning went into this. The electronic vibes are real on this one. Link in bio to stream.\n\nStream Now\n\n#RnB #HipHop #HipHop #HipHop"
+  },
+  {
+    "title": "Overtime",
+    "release_days_out": 43,
+    "platforms": [
+      "Apple Music",
+      "YouTube Music",
+      "Spotify",
+      "Tidal"
+    ],
+    "strategy": "pre-save campaign starting 21 days out",
+    "text": "Release 'Overtime' in 43 days on Apple Music, YouTube Music, Spotify, Tidal. Strategy: pre-save campaign starting 21 days out."
+  },
+  {
+    "platform": "YouTube",
+    "hook": "Listen to this before it gets big",
+    "cta": "Follow for More",
+    "product": "Street Gospel EP",
+    "goal": "awareness",
+    "audience": [
+      "R&B fans",
+      "playlist listeners"
+    ],
+    "text": "Listen to this before it gets big | Street Gospel EP | Follow for More | Target: R&B fans, playlist listeners"
+  },
+  {
+    "platform": "Meta",
+    "hook": "The sound everyone's been waiting for",
+    "cta": "Share if You Vibe",
+    "product": "Raw Footage Tape",
+    "goal": "sales",
+    "audience": [
+      "urban culture",
+      "R&B fans"
+    ],
+    "text": "The sound everyone's been waiting for | Raw Footage Tape | Share if You Vibe | Target: urban culture, R&B fans"
+  },
+  {
+    "platform": "Meta",
+    "hook": "Finally. A beat that hits different.",
+    "cta": "Share if You Vibe",
+    "product": "Street Gospel Tape",
+    "goal": "sales",
+    "audience": [
+      "trap enthusiasts",
+      "playlist listeners"
+    ],
+    "text": "Finally. A beat that hits different. | Street Gospel Tape | Share if You Vibe | Target: trap enthusiasts, playlist listeners"
+  },
+  {
+    "platform": "Twitter",
+    "hook": "POV: you discover your new favorite artist",
+    "body": "Been working on this for 8 months. Every late night, every early morning went into this. The electronic vibes are real on this one. Link in bio to stream.",
+    "cta": "Drop in Comments",
+    "hashtags": "#MusicProducer #NewArtist #MusicProducer #NewArtist",
+    "text": "POV: you discover your new favorite artist\n\nBeen working on this for 8 months. Every late night, every early morning went into this. The electronic vibes are real on this one. Link in bio to stream.\n\nDrop in Comments\n\n#MusicProducer #NewArtist #MusicProducer #NewArtist"
+  },
+  {
+    "platform": "YouTube",
+    "hook": "Finally. A beat that hits different.",
+    "cta": "Listen Free",
+    "product": "The Come Up Tape",
+    "goal": "engagement",
+    "audience": [
+      "hip-hop fans",
+      "R&B fans"
+    ],
+    "text": "Finally. A beat that hits different. | The Come Up Tape | Listen Free | Target: hip-hop fans, R&B fans"
+  },
+  {
+    "platform": "Facebook",
+    "hook": "Real talk \u2014 the music industry doesn't want you to know this",
+    "body": "Been working on this for 12 months. Every late night, every early morning went into this. The pop vibes are real on this one. Link in bio to stream.",
+    "cta": "Share if You Vibe",
+    "hashtags": "#NewArtist #RnB #RnB #HipHop",
+    "text": "Real talk \u2014 the music industry doesn't want you to know this\n\nBeen working on this for 12 months. Every late night, every early morning went into this. The pop vibes are real on this one. Link in bio to stream.\n\nShare if You Vibe\n\n#NewArtist #RnB #RnB #HipHop"
+  },
+  {
+    "platform": "LinkedIn",
+    "hook": "POV: you discover your new favorite artist",
+    "body": "Been working on this for 13 months. Every late night, every early morning went into this. The trap vibes are real on this one. Link in bio to stream.",
+    "cta": "Follow for More",
+    "hashtags": "#NewMusic #NewArtist #MusicProducer #MusicProducer",
+    "text": "POV: you discover your new favorite artist\n\nBeen working on this for 13 months. Every late night, every early morning went into this. The trap vibes are real on this one. Link in bio to stream.\n\nFollow for More\n\n#NewMusic #NewArtist #MusicProducer #MusicProducer"
+  },
+  {
+    "title": "Neon Dreams",
+    "release_days_out": 51,
+    "platforms": [
+      "Tidal",
+      "Amazon Music",
+      "Apple Music",
+      "YouTube Music"
+    ],
+    "strategy": "release day social blitz across all platforms",
+    "text": "Release 'Neon Dreams' in 51 days on Tidal, Amazon Music, Apple Music, YouTube Music. Strategy: release day social blitz across all platforms."
+  },
+  {
+    "title": "Street Gospel",
+    "genre": "pop",
+    "tone": "professional",
+    "bpm": 137,
+    "key": "F# minor",
+    "lyric_hook": "We made it out, we ain't going back to nothing",
+    "beat_description": "Professional pop beat, 137 BPM, F# minor, layered 808s with melodic top line",
+    "text": "Track: Street Gospel | Genre: pop | BPM: 137 | Key: F# minor | Hook: We made it out, we ain't going back to nothing"
+  },
+  {
+    "title": "Wavelength",
+    "release_days_out": 27,
+    "platforms": [
+      "Apple Music",
+      "Spotify",
+      "Tidal",
+      "YouTube Music"
+    ],
+    "strategy": "TikTok pre-release audio leak strategy",
+    "text": "Release 'Wavelength' in 27 days on Apple Music, Spotify, Tidal, YouTube Music. Strategy: TikTok pre-release audio leak strategy."
+  },
+  {
+    "title": "Frequency",
+    "genre": "pop",
+    "tone": "energetic",
+    "bpm": 98,
+    "key": "F# minor",
+    "lyric_hook": "Every night I pray that I can find my way",
+    "beat_description": "Energetic pop beat, 98 BPM, F# minor, layered 808s with melodic top line",
+    "text": "Track: Frequency | Genre: pop | BPM: 98 | Key: F# minor | Hook: Every night I pray that I can find my way"
+  },
+  {
+    "title": "The Come Up",
+    "release_days_out": 49,
+    "platforms": [
+      "Apple Music",
+      "Spotify",
+      "Tidal",
+      "Amazon Music"
+    ],
+    "strategy": "release day social blitz across all platforms",
+    "text": "Release 'The Come Up' in 49 days on Apple Music, Spotify, Tidal, Amazon Music. Strategy: release day social blitz across all platforms."
+  },
+  {
+    "title": "Frequency",
+    "release_days_out": 50,
+    "platforms": [
+      "Apple Music",
+      "YouTube Music",
+      "Deezer",
+      "Spotify"
+    ],
+    "strategy": "pitch to editorial playlists 7 days before release",
+    "text": "Release 'Frequency' in 50 days on Apple Music, YouTube Music, Deezer, Spotify. Strategy: pitch to editorial playlists 7 days before release."
+  },
+  {
+    "title": "Frequency",
+    "release_days_out": 46,
+    "platforms": [
+      "Apple Music",
+      "Tidal",
+      "Deezer",
+      "YouTube Music"
+    ],
+    "strategy": "release day social blitz across all platforms",
+    "text": "Release 'Frequency' in 46 days on Apple Music, Tidal, Deezer, YouTube Music. Strategy: release day social blitz across all platforms."
+  },
+  {
+    "title": "Overtime",
+    "release_days_out": 35,
+    "platforms": [
+      "Spotify",
+      "Deezer",
+      "YouTube Music",
+      "Tidal"
+    ],
+    "strategy": "pre-save campaign starting 21 days out",
+    "text": "Release 'Overtime' in 35 days on Spotify, Deezer, YouTube Music, Tidal. Strategy: pre-save campaign starting 21 days out."
+  },
+  {
+    "title": "Frequency",
+    "release_days_out": 31,
+    "platforms": [
+      "Deezer",
+      "Spotify",
+      "Tidal",
+      "Apple Music"
+    ],
+    "strategy": "TikTok pre-release audio leak strategy",
+    "text": "Release 'Frequency' in 31 days on Deezer, Spotify, Tidal, Apple Music. Strategy: TikTok pre-release audio leak strategy."
+  },
+  {
+    "platform": "LinkedIn",
+    "hook": "Behind the scenes: recording 'Street Gospel'",
+    "body": "Been working on this for 12 months. Every late night, every early morning went into this. The electronic vibes are real on this one. Link in bio to stream.",
+    "cta": "Follow for More",
+    "hashtags": "#NewMusic #NewMusic #RnB #IndieArtist",
+    "text": "Behind the scenes: recording 'Street Gospel'\n\nBeen working on this for 12 months. Every late night, every early morning went into this. The electronic vibes are real on this one. Link in bio to stream.\n\nFollow for More\n\n#NewMusic #NewMusic #RnB #IndieArtist"
+  },
+  {
+    "title": "Midnight Sessions",
+    "release_days_out": 43,
+    "platforms": [
+      "Tidal",
+      "YouTube Music",
+      "Deezer",
+      "Apple Music"
+    ],
+    "strategy": "release day social blitz across all platforms",
+    "text": "Release 'Midnight Sessions' in 43 days on Tidal, YouTube Music, Deezer, Apple Music. Strategy: release day social blitz across all platforms."
+  },
+  {
+    "title": "Ascension",
+    "genre": "trap",
+    "tone": "professional",
+    "bpm": 87,
+    "key": "Bb major",
+    "lyric_hook": "Every night I pray that I can find my way",
+    "beat_description": "Professional trap beat, 87 BPM, Bb major, layered 808s with melodic top line",
+    "text": "Track: Ascension | Genre: trap | BPM: 87 | Key: Bb major | Hook: Every night I pray that I can find my way"
+  },
+  {
+    "platform": "TikTok",
+    "hook": "Your playlist needs this right now",
+    "cta": "Listen Free",
+    "product": "Midnight Sessions EP",
+    "goal": "followers",
+    "audience": [
+      "R&B fans",
+      "indie music fans"
+    ],
+    "text": "Your playlist needs this right now | Midnight Sessions EP | Listen Free | Target: R&B fans, indie music fans"
+  },
+  {
+    "platform": "TikTok",
+    "hook": "Stop scrolling \u2014 you need to hear this",
+    "cta": "Listen Free",
+    "product": "Overtime EP",
+    "goal": "followers",
+    "audience": [
+      "indie music fans",
+      "trap enthusiasts"
+    ],
+    "text": "Stop scrolling \u2014 you need to hear this | Overtime EP | Listen Free | Target: indie music fans, trap enthusiasts"
+  },
+  {
+    "platform": "Twitter",
+    "hook": "Behind the scenes: recording 'Gold Rush'",
+    "body": "Been working on this for 12 months. Every late night, every early morning went into this. The afrobeats vibes are real on this one. Link in bio to stream.",
+    "cta": "Share if You Vibe",
+    "hashtags": "#HipHop #IndieArtist #NewArtist #NewMusic #NewArtist #HipHop",
+    "text": "Behind the scenes: recording 'Gold Rush'\n\nBeen working on this for 12 months. Every late night, every early morning went into this. The afrobeats vibes are real on this one. Link in bio to stream.\n\nShare if You Vibe\n\n#HipHop #IndieArtist #NewArtist #NewMusic #NewArtist #HipHop"
+  },
+  {
+    "title": "Neon Dreams",
+    "release_days_out": 50,
+    "platforms": [
+      "Apple Music",
+      "YouTube Music",
+      "Tidal",
+      "Deezer"
+    ],
+    "strategy": "pitch to editorial playlists 7 days before release",
+    "text": "Release 'Neon Dreams' in 50 days on Apple Music, YouTube Music, Tidal, Deezer. Strategy: pitch to editorial playlists 7 days before release."
+  },
+  {
+    "title": "Raw Footage",
+    "release_days_out": 18,
+    "platforms": [
+      "Deezer",
+      "Tidal",
+      "Spotify",
+      "Apple Music"
+    ],
+    "strategy": "release day social blitz across all platforms",
+    "text": "Release 'Raw Footage' in 18 days on Deezer, Tidal, Spotify, Apple Music. Strategy: release day social blitz across all platforms."
+  },
+  {
+    "title": "Frequency",
+    "genre": "trap",
+    "tone": "energetic",
+    "bpm": 113,
+    "key": "D minor",
+    "lyric_hook": "They never believed until the whole world was watching",
+    "beat_description": "Energetic trap beat, 113 BPM, D minor, layered 808s with melodic top line",
+    "text": "Track: Frequency | Genre: trap | BPM: 113 | Key: D minor | Hook: They never believed until the whole world was watching"
+  },
+  {
+    "title": "Frequency",
+    "genre": "afrobeats",
+    "tone": "professional",
+    "bpm": 116,
+    "key": "F# minor",
+    "lyric_hook": "The city lights reflect in my eyes at midnight",
+    "beat_description": "Professional afrobeats beat, 116 BPM, F# minor, layered 808s with melodic top line",
+    "text": "Track: Frequency | Genre: afrobeats | BPM: 116 | Key: F# minor | Hook: The city lights reflect in my eyes at midnight"
+  },
+  {
+    "title": "Ascension",
+    "release_days_out": 25,
+    "platforms": [
+      "YouTube Music",
+      "Deezer",
+      "Amazon Music",
+      "Tidal"
+    ],
+    "strategy": "release day social blitz across all platforms",
+    "text": "Release 'Ascension' in 25 days on YouTube Music, Deezer, Amazon Music, Tidal. Strategy: release day social blitz across all platforms."
+  },
+  {
+    "title": "Gold Rush",
+    "genre": "electronic",
+    "tone": "edgy",
+    "bpm": 83,
+    "key": "G major",
+    "lyric_hook": "They never believed until the whole world was watching",
+    "beat_description": "Edgy electronic beat, 83 BPM, G major, layered 808s with melodic top line",
+    "text": "Track: Gold Rush | Genre: electronic | BPM: 83 | Key: G major | Hook: They never believed until the whole world was watching"
+  },
+  {
+    "platform": "YouTube",
+    "hook": "The beat I made at 3am just hit different",
+    "body": "Been working on this for 8 months. Every late night, every early morning went into this. The pop vibes are real on this one. Link in bio to stream.",
+    "cta": "Follow for More",
+    "hashtags": "#NewArtist #NewMusic #MusicProducer",
+    "text": "The beat I made at 3am just hit different\n\nBeen working on this for 8 months. Every late night, every early morning went into this. The pop vibes are real on this one. Link in bio to stream.\n\nFollow for More\n\n#NewArtist #NewMusic #MusicProducer"
+  },
+  {
+    "title": "Wavelength",
+    "genre": "electronic",
+    "tone": "playful",
+    "bpm": 83,
+    "key": "D minor",
+    "lyric_hook": "The city lights reflect in my eyes at midnight",
+    "beat_description": "Playful electronic beat, 83 BPM, D minor, layered 808s with melodic top line",
+    "text": "Track: Wavelength | Genre: electronic | BPM: 83 | Key: D minor | Hook: The city lights reflect in my eyes at midnight"
+  },
+  {
+    "platform": "Facebook",
+    "hook": "No one talks about this part of being an indie artist",
+    "body": "Been working on this for 3 months. Every late night, every early morning went into this. The hip-hop vibes are real on this one. Link in bio to stream.",
+    "cta": "Stream Now",
+    "hashtags": "#IndieArtist #NewMusic #HipHop",
+    "text": "No one talks about this part of being an indie artist\n\nBeen working on this for 3 months. Every late night, every early morning went into this. The hip-hop vibes are real on this one. Link in bio to stream.\n\nStream Now\n\n#IndieArtist #NewMusic #HipHop"
+  },
+  {
+    "platform": "TikTok",
+    "hook": "Listen to this before it gets big",
+    "cta": "Listen Free",
+    "product": "Ascension Tape",
+    "goal": "streams",
+    "audience": [
+      "trap enthusiasts",
+      "playlist listeners"
+    ],
+    "text": "Listen to this before it gets big | Ascension Tape | Listen Free | Target: trap enthusiasts, playlist listeners"
+  },
+  {
+    "title": "Ascension",
+    "genre": "afrobeats",
+    "tone": "chill",
+    "bpm": 119,
+    "key": "D minor",
+    "lyric_hook": "I been on the grind since day one, nobody saw me coming",
+    "beat_description": "Chill afrobeats beat, 119 BPM, D minor, layered 808s with melodic top line",
+    "text": "Track: Ascension | Genre: afrobeats | BPM: 119 | Key: D minor | Hook: I been on the grind since day one, nobody saw me coming"
+  },
+  {
+    "platform": "TikTok",
+    "hook": "POV: your music goes viral overnight",
+    "cta": "Share if You Vibe",
+    "product": "Ascension EP",
+    "goal": "engagement",
+    "audience": [
+      "playlist listeners",
+      "indie music fans"
+    ],
+    "text": "POV: your music goes viral overnight | Ascension EP | Share if You Vibe | Target: playlist listeners, indie music fans"
+  },
+  {
+    "platform": "Meta",
+    "hook": "This song just broke my algorithm",
+    "cta": "Stream Now",
+    "product": "Street Gospel Album",
+    "goal": "streams",
+    "audience": [
+      "playlist listeners",
+      "indie music fans"
+    ],
+    "text": "This song just broke my algorithm | Street Gospel Album | Stream Now | Target: playlist listeners, indie music fans"
+  },
+  {
+    "title": "Frequency",
+    "genre": "electronic",
+    "tone": "playful",
+    "bpm": 160,
+    "key": "F# minor",
+    "lyric_hook": "The city lights reflect in my eyes at midnight",
+    "beat_description": "Playful electronic beat, 160 BPM, F# minor, layered 808s with melodic top line",
+    "text": "Track: Frequency | Genre: electronic | BPM: 160 | Key: F# minor | Hook: The city lights reflect in my eyes at midnight"
+  },
+  {
+    "title": "Midnight Sessions",
+    "genre": "afrobeats",
+    "tone": "playful",
+    "bpm": 79,
+    "key": "A major",
+    "lyric_hook": "The city lights reflect in my eyes at midnight",
+    "beat_description": "Playful afrobeats beat, 79 BPM, A major, layered 808s with melodic top line",
+    "text": "Track: Midnight Sessions | Genre: afrobeats | BPM: 79 | Key: A major | Hook: The city lights reflect in my eyes at midnight"
+  },
+  {
+    "title": "Neon Dreams",
+    "genre": "soul",
+    "tone": "edgy",
+    "bpm": 90,
+    "key": "C minor",
+    "lyric_hook": "Every night I pray that I can find my way",
+    "beat_description": "Edgy soul beat, 90 BPM, C minor, layered 808s with melodic top line",
+    "text": "Track: Neon Dreams | Genre: soul | BPM: 90 | Key: C minor | Hook: Every night I pray that I can find my way"
+  },
+  {
+    "platform": "YouTube",
+    "hook": "My most personal song yet just dropped",
+    "body": "Been working on this for 10 months. Every late night, every early morning went into this. The hip-hop vibes are real on this one. Link in bio to stream.",
+    "cta": "Stream Now",
+    "hashtags": "#HipHop #IndieArtist #MusicProducer",
+    "text": "My most personal song yet just dropped\n\nBeen working on this for 10 months. Every late night, every early morning went into this. The hip-hop vibes are real on this one. Link in bio to stream.\n\nStream Now\n\n#HipHop #IndieArtist #MusicProducer"
+  },
+  {
+    "title": "Ascension",
+    "release_days_out": 39,
+    "platforms": [
+      "Apple Music",
+      "Deezer",
+      "YouTube Music",
+      "Amazon Music"
+    ],
+    "strategy": "pre-save campaign starting 21 days out",
+    "text": "Release 'Ascension' in 39 days on Apple Music, Deezer, YouTube Music, Amazon Music. Strategy: pre-save campaign starting 21 days out."
+  },
+  {
+    "platform": "TikTok",
+    "hook": "Finally. A beat that hits different.",
+    "cta": "Listen Free",
+    "product": "Midnight Sessions Album",
+    "goal": "streams",
+    "audience": [
+      "R&B fans",
+      "urban culture"
+    ],
+    "text": "Finally. A beat that hits different. | Midnight Sessions Album | Listen Free | Target: R&B fans, urban culture"
+  },
+  {
+    "platform": "YouTube",
+    "hook": "I wasn't ready for this drop",
+    "cta": "Follow for More",
+    "product": "Street Gospel Single",
+    "goal": "streams",
+    "audience": [
+      "urban culture",
+      "trap enthusiasts"
+    ],
+    "text": "I wasn't ready for this drop | Street Gospel Single | Follow for More | Target: urban culture, trap enthusiasts"
+  },
+  {
+    "platform": "YouTube",
+    "hook": "POV: you discover your new favorite artist",
+    "body": "Been working on this for 2 months. Every late night, every early morning went into this. The afrobeats vibes are real on this one. Link in bio to stream.",
+    "cta": "Share if You Vibe",
+    "hashtags": "#HipHop #NewArtist #HipHop",
+    "text": "POV: you discover your new favorite artist\n\nBeen working on this for 2 months. Every late night, every early morning went into this. The afrobeats vibes are real on this one. Link in bio to stream.\n\nShare if You Vibe\n\n#HipHop #NewArtist #HipHop"
+  },
+  {
+    "title": "Midnight Sessions",
+    "genre": "trap",
+    "tone": "chill",
+    "bpm": 129,
+    "key": "C minor",
+    "lyric_hook": "The city lights reflect in my eyes at midnight",
+    "beat_description": "Chill trap beat, 129 BPM, C minor, layered 808s with melodic top line",
+    "text": "Track: Midnight Sessions | Genre: trap | BPM: 129 | Key: C minor | Hook: The city lights reflect in my eyes at midnight"
+  },
+  {
+    "platform": "Instagram",
+    "hook": "Day 38 of dropping fire until I blow up",
+    "body": "Been working on this for 6 months. Every late night, every early morning went into this. The afrobeats vibes are real on this one. Link in bio to stream.",
+    "cta": "Follow for More",
+    "hashtags": "#MusicProducer #IndieArtist #NewArtist #NewMusic #NewArtist #RnB",
+    "text": "Day 38 of dropping fire until I blow up\n\nBeen working on this for 6 months. Every late night, every early morning went into this. The afrobeats vibes are real on this one. Link in bio to stream.\n\nFollow for More\n\n#MusicProducer #IndieArtist #NewArtist #NewMusic #NewArtist #RnB"
+  },
+  {
+    "platform": "Facebook",
+    "hook": "How I went from 0 to 10k streams in 30 days",
+    "body": "Been working on this for 2 months. Every late night, every early morning went into this. The trap vibes are real on this one. Link in bio to stream.",
+    "cta": "Follow for More",
+    "hashtags": "#RnB #NewArtist #NewArtist #IndieArtist #RnB",
+    "text": "How I went from 0 to 10k streams in 30 days\n\nBeen working on this for 2 months. Every late night, every early morning went into this. The trap vibes are real on this one. Link in bio to stream.\n\nFollow for More\n\n#RnB #NewArtist #NewArtist #IndieArtist #RnB"
+  },
+  {
+    "platform": "YouTube",
+    "hook": "I wasn't ready for this drop",
+    "cta": "Listen Free",
+    "product": "Midnight Sessions EP",
+    "goal": "awareness",
+    "audience": [
+      "urban culture",
+      "music lovers"
+    ],
+    "text": "I wasn't ready for this drop | Midnight Sessions EP | Listen Free | Target: urban culture, music lovers"
+  },
+  {
+    "platform": "TikTok",
+    "hook": "I wasn't ready for this drop",
+    "cta": "Share if You Vibe",
+    "product": "Wavelength Tape",
+    "goal": "awareness",
+    "audience": [
+      "music lovers",
+      "trap enthusiasts"
+    ],
+    "text": "I wasn't ready for this drop | Wavelength Tape | Share if You Vibe | Target: music lovers, trap enthusiasts"
+  },
+  {
+    "title": "Midnight Sessions",
+    "genre": "trap",
+    "tone": "inspirational",
+    "bpm": 102,
+    "key": "G major",
+    "lyric_hook": "We made it out, we ain't going back to nothing",
+    "beat_description": "Inspirational trap beat, 102 BPM, G major, layered 808s with melodic top line",
+    "text": "Track: Midnight Sessions | Genre: trap | BPM: 102 | Key: G major | Hook: We made it out, we ain't going back to nothing"
+  },
+  {
+    "platform": "Meta",
+    "hook": "Your playlist needs this right now",
+    "cta": "Drop in Comments",
+    "product": "Raw Footage EP",
+    "goal": "sales",
+    "audience": [
+      "hip-hop fans",
+      "music lovers"
+    ],
+    "text": "Your playlist needs this right now | Raw Footage EP | Drop in Comments | Target: hip-hop fans, music lovers"
+  },
+  {
+    "platform": "TikTok",
+    "hook": "How I went from 0 to 10k streams in 30 days",
+    "body": "Been working on this for 12 months. Every late night, every early morning went into this. The afrobeats vibes are real on this one. Link in bio to stream.",
+    "cta": "Listen Free",
+    "hashtags": "#NewMusic #IndieArtist #RnB #MusicProducer",
+    "text": "How I went from 0 to 10k streams in 30 days\n\nBeen working on this for 12 months. Every late night, every early morning went into this. The afrobeats vibes are real on this one. Link in bio to stream.\n\nListen Free\n\n#NewMusic #IndieArtist #RnB #MusicProducer"
+  },
+  {
+    "platform": "Instagram",
+    "hook": "POV: you discover your new favorite artist",
+    "body": "Been working on this for 7 months. Every late night, every early morning went into this. The trap vibes are real on this one. Link in bio to stream.",
+    "cta": "Follow for More",
+    "hashtags": "#RnB #MusicProducer #NewMusic #HipHop #NewMusic",
+    "text": "POV: you discover your new favorite artist\n\nBeen working on this for 7 months. Every late night, every early morning went into this. The trap vibes are real on this one. Link in bio to stream.\n\nFollow for More\n\n#RnB #MusicProducer #NewMusic #HipHop #NewMusic"
+  },
+  {
+    "title": "Raw Footage",
+    "release_days_out": 29,
+    "platforms": [
+      "Apple Music",
+      "YouTube Music",
+      "Spotify",
+      "Tidal"
+    ],
+    "strategy": "TikTok pre-release audio leak strategy",
+    "text": "Release 'Raw Footage' in 29 days on Apple Music, YouTube Music, Spotify, Tidal. Strategy: TikTok pre-release audio leak strategy."
+  }
+]
