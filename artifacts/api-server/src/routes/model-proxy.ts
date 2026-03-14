@@ -100,6 +100,46 @@ router.post("/training/schedule", async (req, res) => {
   await proxyRequest(req, res, "/training/schedule");
 });
 
+// ─── Continuous Training ───────────────────────────────────────────────────
+
+router.get("/training/continuous/status", async (req, res) => {
+  await proxyRequest(req, res, "/training/continuous/status");
+});
+
+router.post("/training/continuous/start", async (req, res) => {
+  await proxyRequest(req, res, "/training/continuous/start");
+});
+
+router.post("/training/continuous/stop", async (req, res) => {
+  await proxyRequest(req, res, "/training/continuous/stop");
+});
+
+router.get("/training/continuous/history", async (req, res) => {
+  await proxyRequest(req, res, "/training/continuous/history");
+});
+
+// ─── Data Puller ───────────────────────────────────────────────────────────
+
+router.get("/training/puller/status", async (req, res) => {
+  await proxyRequest(req, res, "/training/puller/status");
+});
+
+router.get("/training/puller/sources", async (req, res) => {
+  await proxyRequest(req, res, "/training/puller/sources");
+});
+
+router.post("/training/puller/pull", async (req, res) => {
+  await proxyRequest(req, res, "/training/puller/pull");
+});
+
+router.post("/training/puller/start", async (req, res) => {
+  await proxyRequest(req, res, `/training/puller/start${req.query.interval_minutes ? `?interval_minutes=${req.query.interval_minutes}` : ""}`);
+});
+
+router.post("/training/puller/stop", async (req, res) => {
+  await proxyRequest(req, res, "/training/puller/stop");
+});
+
 router.post("/content/generate", async (req, res) => {
   await proxyRequest(req, res, "/content/generate");
 });

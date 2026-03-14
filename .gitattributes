@@ -1,1 +1,2 @@
 artifacts/ai-training-server/ai_model/weights/model.pt filter=lfs diff=lfs merge=lfs -text
+artifacts/ai-training-server/ai_model/weights/weights_v4.npz filter=lfs diff=lfs merge=lfs -text

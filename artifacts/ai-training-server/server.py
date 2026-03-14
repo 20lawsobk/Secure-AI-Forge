@@ -188,6 +188,12 @@ _model_config = {}
 
 _model_lock = threading.Lock()
 
+# ─── Workers (DataPuller + ContinuousTrainer) ────────────────────────────────
+
+_data_puller = None
+_continuous_trainer = None
+_workers_lock = threading.Lock()
+
 def _init_ai_model():
     global _model_ready, _tokenizer, _creative_model, _script_agent
     global _visual_spec_agent, _distribution_agent, _optimization_agent
@@ -397,7 +403,8 @@ async def on_startup():
 
 
 def _init_storage():
-    """Connect to storage server and auto-load the latest trained checkpoint."""
+    """Connect to storage server, load checkpoint, and start workers."""
+    global _data_puller, _continuous_trainer
     from storage_client import get_storage, get_checkpoint_client
     storage = get_storage()
     ok = storage.ping()
@@ -406,6 +413,73 @@ def _init_storage():
         _load_checkpoint_from_storage()
     else:
         print("[Storage] Storage server offline — using in-process fallback")
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from workers.data_puller import DataPuller
+    from workers.continuous_trainer import ContinuousTrainer
+
+    with _workers_lock:
+        _data_puller = DataPuller(storage)
+        _continuous_trainer = ContinuousTrainer(
+            storage=storage,
+            data_puller=_data_puller,
+            run_training_fn=_training_bridge,
+            curriculum_phases=CURRICULUM_PHASES,
+        )
+    print("[Workers] DataPuller and ContinuousTrainer initialized")
+
+
+def _training_bridge(texts: list, epochs: int, phase_label: str,
+                     loss_target: float = None) -> dict:
+    """
+    Called by ContinuousTrainer to run a training pass.
+    Writes data to a temp file, builds dataset, runs the trainer, returns loss.
+    """
+    import math
+    from ai_model.training.dataset import CreativeDataset
+    from ai_model.training.trainer import train as run_train
+    from ai_model.training.config import TrainConfig
+
+    if not _model_ready or _creative_model is None or _tokenizer is None:
+        return {"loss": None, "error": "model_not_ready"}
+
+    data_dir = Path(__file__).parent / "training"
+    data_dir.mkdir(exist_ok=True)
+    data_path = str(data_dir / f"continuous_{phase_label}.json")
+
+    import json as _json
+    Path(data_path).write_text(_json.dumps(texts, ensure_ascii=False))
+
+    _tokenizer.unfreeze()
+    train_max_len = min(256, _creative_model.model.pos_emb.num_embeddings)
+    dataset = CreativeDataset(data_path, _tokenizer, max_len=train_max_len)
+
+    dim = _creative_model.model.token_emb.embedding_dim
+    n_layers = len(_creative_model.model.layers)
+    cfg = TrainConfig({
+        "model": {"dim": dim, "layers": n_layers, "heads": 8, "max_len": train_max_len},
+        "train": {"lr": 3e-4, "batch_size": 4, "epochs": epochs, "data_path": data_path},
+    })
+    cfg.gradient_accumulation_steps = 1
+    _creative_model.resize_embeddings()
+
+    result = run_train(_creative_model.model, dataset, _tokenizer, cfg, device="cpu")
+    _tokenizer.freeze()
+
+    final_loss = result.get("final_loss", 999)
+
+    # Save checkpoint
+    weights_dir = Path(__file__).parent / "ai_model" / "weights"
+    weights_dir.mkdir(exist_ok=True)
+    import torch, numpy as np
+    torch.save({
+        "model_state_dict": _creative_model.model.state_dict(),
+        "_model_config": _model_config,
+    }, str(weights_dir / "model.pt"))
+    np_weights = {k: v.cpu().numpy() for k, v in _creative_model.model.state_dict().items()}
+    np.savez_compressed(str(weights_dir / "weights_v4.npz"), **np_weights)
+
+    return {"loss": round(final_loss, 4), "samples": len(dataset), "epochs": epochs}
 
 
 def _load_checkpoint_from_storage():
@@ -992,6 +1066,116 @@ def _run_curriculum(phases: list, req: ScheduleRequest, job_id: str):
         _training_state["elapsed_seconds"] = time.time() - _training_state.get("started_at", time.time())
 
     log_training(f"[Curriculum] Job {job_id} complete — {session_count} sessions, best loss: {_training_state.get('best_loss')}", job_id=job_id)
+
+
+# ─── Continuous Training & Data Puller Endpoints ─────────────────────────────
+
+class ContinuousStartRequest(BaseModel):
+    interval_minutes: int = 60
+    phases: list = []
+    epochs_per_phase: int = 1
+    pull_every_n_cycles: int = 2
+
+
+@app.get("/training/continuous/status")
+async def continuous_status(_key = Depends(require_scope("read"))):
+    with _workers_lock:
+        ct = _continuous_trainer
+    if ct is None:
+        return {"running": False, "status": "not_initialized"}
+    return ct.get_state()
+
+
+@app.post("/training/continuous/start")
+async def continuous_start(req: ContinuousStartRequest, _key = Depends(require_scope("train"))):
+    with _workers_lock:
+        ct = _continuous_trainer
+        dp = _data_puller
+    if ct is None or dp is None:
+        raise HTTPException(status_code=503, detail="Workers not initialized yet — try again in a few seconds")
+    if not dp.state.get("status") == "pulling" and not dp._running:
+        dp.start(interval_minutes=req.interval_minutes * req.pull_every_n_cycles)
+    return ct.start(
+        interval_minutes=req.interval_minutes,
+        phases=req.phases or None,
+        epochs_per_phase=req.epochs_per_phase,
+        pull_every_n=req.pull_every_n_cycles,
+    )
+
+
+@app.post("/training/continuous/stop")
+async def continuous_stop(_key = Depends(require_scope("train"))):
+    with _workers_lock:
+        ct = _continuous_trainer
+        dp = _data_puller
+    if ct is None:
+        return {"success": False, "message": "Workers not initialized"}
+    if dp:
+        dp.stop()
+    return ct.stop()
+
+
+@app.get("/training/continuous/history")
+async def continuous_history(_key = Depends(require_scope("read"))):
+    from storage_client import get_storage
+    storage = get_storage()
+    history = storage.lrange("mb:training:continuous:history", 0, 49) if storage.is_available() else []
+    return {"history": history or [], "count": len(history or [])}
+
+
+@app.get("/training/puller/status")
+async def puller_status(_key = Depends(require_scope("read"))):
+    with _workers_lock:
+        dp = _data_puller
+    if dp is None:
+        return {"status": "not_initialized"}
+    state = dp.get_state()
+    state["local_files"] = len(list(
+        (Path(__file__).parent / "ai_model" / "training_data").glob("pull_*.json")
+    ))
+    return state
+
+
+@app.get("/training/puller/sources")
+async def puller_sources(_key = Depends(require_scope("read"))):
+    from workers.data_puller import PUBLIC_SOURCES
+    return {
+        "public_sources": [{"id": s["id"], "name": s["name"], "category": s["category"]} for s in PUBLIC_SOURCES],
+        "pdim_patterns": [
+            "mbs:data", "mbs:downloads", "mbs_training",
+            "mb:ads:*:peaks", "mb:social:posts:*", "mb:analytics:*",
+            "mb:content:*", "mb:dataset:*:chunk:*",
+        ],
+    }
+
+
+@app.post("/training/puller/pull")
+async def puller_pull(background_tasks: BackgroundTasks, _key = Depends(require_scope("train"))):
+    with _workers_lock:
+        dp = _data_puller
+    if dp is None:
+        raise HTTPException(status_code=503, detail="DataPuller not initialized yet")
+    background_tasks.add_task(dp.pull_now)
+    return {"success": True, "message": "Data pull triggered in background"}
+
+
+@app.post("/training/puller/start")
+async def puller_start_auto(interval_minutes: int = 30, _key = Depends(require_scope("train"))):
+    with _workers_lock:
+        dp = _data_puller
+    if dp is None:
+        raise HTTPException(status_code=503, detail="DataPuller not initialized yet")
+    return dp.start(interval_minutes=interval_minutes)
+
+
+@app.post("/training/puller/stop")
+async def puller_stop_auto(_key = Depends(require_scope("train"))):
+    with _workers_lock:
+        dp = _data_puller
+    if dp is None:
+        return {"success": False, "message": "DataPuller not initialized"}
+    dp.stop()
+    return {"success": True, "message": "DataPuller auto-pull stopped"}
 
 
 # ─── Content Generation ───────────────────────────────────────────────────────
