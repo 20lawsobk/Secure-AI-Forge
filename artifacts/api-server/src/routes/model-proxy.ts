@@ -144,4 +144,30 @@ router.post("/training/start-from-storage", async (req, res) => {
   await proxyRequest(req, res, "/training/start-from-storage");
 });
 
+// ─── Platform API Routes — Main Music Platform Integration ───────────────────
+
+router.post("/platform/social/generate", async (req, res) => {
+  await proxyRequest(req, res, "/platform/social/generate");
+});
+
+router.post("/platform/social/autopilot", async (req, res) => {
+  await proxyRequest(req, res, "/platform/social/autopilot");
+});
+
+router.post("/platform/daw/generate", async (req, res) => {
+  await proxyRequest(req, res, "/platform/daw/generate");
+});
+
+router.post("/platform/distribution/plan", async (req, res) => {
+  await proxyRequest(req, res, "/platform/distribution/plan");
+});
+
+router.get("/platform/model/info", async (req, res) => {
+  await proxyRequest(req, res, "/platform/model/info");
+});
+
+router.post("/platform/model/reload", async (req, res) => {
+  await proxyRequest(req, res, "/platform/model/reload");
+});
+
 export default router;
