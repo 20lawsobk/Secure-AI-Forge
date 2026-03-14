@@ -170,4 +170,31 @@ router.post("/platform/model/reload", async (req, res) => {
   await proxyRequest(req, res, "/platform/model/reload");
 });
 
+// ─── AI Ad System & Autopilot ────────────────────────────────────────────────
+
+router.post("/platform/ads/record", async (req, res) => {
+  await proxyRequest(req, res, "/platform/ads/record");
+});
+
+router.post("/platform/ads/generate", async (req, res) => {
+  await proxyRequest(req, res, "/platform/ads/generate");
+});
+
+router.post("/platform/ads/autopilot", async (req, res) => {
+  await proxyRequest(req, res, "/platform/ads/autopilot");
+});
+
+router.post("/platform/ads/audience", async (req, res) => {
+  await proxyRequest(req, res, "/platform/ads/audience");
+});
+
+router.get("/platform/ads/performance/:userId", async (req, res) => {
+  const query = req.query.platform ? `?platform=${req.query.platform}` : "";
+  await proxyRequest(req, res, `/platform/ads/performance/${req.params.userId}${query}`);
+});
+
+router.post("/platform/ads/optimize", async (req, res) => {
+  await proxyRequest(req, res, "/platform/ads/optimize");
+});
+
 export default router;

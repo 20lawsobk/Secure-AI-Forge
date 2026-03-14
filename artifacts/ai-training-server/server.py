@@ -1379,6 +1379,636 @@ async def platform_model_reload(_admin = Depends(verify_admin)):
     }
 
 
+# ─── AI Ad System & Autopilot ─────────────────────────────────────────────────
+#
+# Replicates peak performance of paid ads across Meta, TikTok, YouTube, Google.
+# Every ad run is stored; peak performers (high ROAS/CTR/low CPC) are extracted
+# into pattern signatures the AI uses to generate the next winning creative set.
+
+AD_PLATFORMS = {"meta", "facebook", "instagram", "tiktok", "youtube", "google", "twitter", "snapchat"}
+AD_TYPES = {"video", "image", "carousel", "story", "reel", "search", "display", "ugc"}
+
+AD_HOOKS_BY_PLATFORM = {
+    "tiktok":    ["POV:", "The secret nobody tells you about", "Stop scrolling —",
+                  "I tested this for 30 days and", "This changed everything"],
+    "meta":      ["Introducing", "Finally.", "The #1 reason artists fail at ads:",
+                  "If you're not doing this", "We tested 47 creatives. This won."],
+    "youtube":   ["I spent $10,000 on ads so you don't have to", "The ad formula that",
+                  "Why every musician needs", "What the top 1% of artists do differently"],
+    "google":    ["Best", "Top-rated", "Award-winning", "Trusted by", "Save"],
+    "instagram": ["Real results.", "No filters.", "This is what growth looks like.",
+                  "Artist secret:", "Before vs After:"],
+}
+
+AD_CTAS_BY_GOAL = {
+    "streams":       ["Stream Now", "Listen Free", "Add to Playlist", "Presave Today"],
+    "merch":         ["Shop Now", "Get Yours", "Limited Drop", "Claim 20% Off"],
+    "fanbase":       ["Follow for More", "Join the Movement", "Be First", "Subscribe"],
+    "tickets":       ["Get Tickets", "Reserve Your Spot", "Doors Open Soon", "Book Now"],
+    "downloads":     ["Download Free", "Get the Track", "Free Download Today"],
+    "conversions":   ["Start Free Trial", "Book a Session", "Claim Your Spot", "Apply Now"],
+}
+
+AUDIENCE_SEGMENTS = {
+    "music_fan":     ["music lovers", "playlist listeners", "concert-goers", "spotify users"],
+    "hip_hop":       ["hip-hop fans", "trap music", "rap enthusiasts", "urban culture"],
+    "rb":            ["R&B fans", "soul music", "neo-soul", "smooth jazz adjacent"],
+    "pop":           ["pop music fans", "top 40 listeners", "mainstream music"],
+    "producer":      ["music producers", "beatmakers", "DAW users", "FL Studio", "Ableton"],
+    "artist":        ["independent artists", "musicians", "singer-songwriters", "bands"],
+    "brand_deal":    ["content creators", "influencers", "brand collaboration seekers"],
+}
+
+
+class AdRecordRequest(BaseModel):
+    user_id: str
+    platform: str
+    ad_type: str = "video"
+    hook: str = ""
+    headline: str = ""
+    body: str = ""
+    cta: str = ""
+    audience_tags: List[str] = []
+    ctr: float = Field(0.0, ge=0)
+    cpc: float = Field(0.0, ge=0)
+    roas: float = Field(0.0, ge=0)
+    conversions: int = 0
+    impressions: int = 0
+    clicks: int = 0
+    spend: float = 0.0
+    run_id: Optional[str] = None
+
+
+class AdGenerateRequest(BaseModel):
+    user_id: str
+    platform: str = "meta"
+    ad_type: str = "video"
+    product: str
+    goal: str = "streams"
+    budget_daily: Optional[float] = None
+    num_creatives: int = Field(3, ge=1, le=10)
+    replicate_peak: bool = True
+    genre: Optional[str] = None
+    artist_name: Optional[str] = None
+
+
+class AdAutopilotRequest(BaseModel):
+    user_id: str
+    platform: Optional[str] = None
+    budget_total: Optional[float] = None
+    goal: str = "streams"
+    current_campaigns: List[dict] = []
+
+
+class AdAudienceRequest(BaseModel):
+    user_id: str
+    platform: str = "meta"
+    product: str
+    genre: Optional[str] = None
+    goal: str = "streams"
+
+
+def _generate_ad_creative(
+    platform: str,
+    ad_type: str,
+    product: str,
+    goal: str,
+    peak_formula: Optional[dict],
+    artist_name: Optional[str],
+    genre: Optional[str],
+    variant_idx: int,
+) -> dict:
+    """
+    Core creative generator. Uses the peak performer formula if available,
+    otherwise falls back to platform-optimised templates.
+    The AI model enhances the hook and body copy.
+    """
+    plat_key  = platform.lower().replace("facebook", "meta").replace("instagram", "meta")
+    hook_pool = AD_HOOKS_BY_PLATFORM.get(plat_key, AD_HOOKS_BY_PLATFORM["meta"])
+    cta_pool  = AD_CTAS_BY_GOAL.get(goal, ["Learn More", "Discover More"])
+    artist    = artist_name or "the artist"
+    genre_tag = f" #{genre}" if genre else ""
+
+    # If we have a peak formula, start from what already worked
+    if peak_formula and peak_formula.get("top_hooks"):
+        base_hook = peak_formula["top_hooks"][variant_idx % len(peak_formula["top_hooks"])]
+        base_cta  = (peak_formula.get("top_ctas") or cta_pool)[0]
+        source    = "peak_replicated"
+    else:
+        base_hook = hook_pool[variant_idx % len(hook_pool)]
+        base_cta  = cta_pool[variant_idx % len(cta_pool)]
+        source    = "template"
+
+    # AI model enhancement of hook and body
+    hook = base_hook
+    body = ""
+    headline = ""
+    if _model_ready and _script_agent:
+        try:
+            from ai_model.agents.script_agent import ScriptRequest
+            script = _script_agent.run(ScriptRequest(
+                idea=f"{product} — {genre or 'music'} ad for {artist}",
+                platform=platform,
+                goal=goal,
+                tone="direct",
+            ))
+            if script.hook and len(script.hook) > 5:
+                hook = script.hook
+                source = "model_enhanced"
+            body     = script.body
+            headline = script.cta[:50] if script.cta else base_cta
+        except Exception:
+            pass
+
+    if not body:
+        body = (
+            f"🎵 {artist} drops something you've never heard before. "
+            f"{product} is live now.{genre_tag}"
+        )
+    if not headline:
+        headline = f"{product} — {''.join(w.capitalize() + ' ' for w in goal.split()).strip()}"
+
+    # Platform-specific creative specs
+    specs = {
+        "tiktok":    {"ratio": "9:16", "duration": "15-60s", "format": "vertical video"},
+        "meta":      {"ratio": "1:1 or 4:5", "duration": "15-30s", "format": "feed video"},
+        "youtube":   {"ratio": "16:9", "duration": "6-15s skippable", "format": "pre-roll"},
+        "instagram": {"ratio": "9:16", "duration": "up to 60s", "format": "reel"},
+        "google":    {"ratio": "N/A", "format": "text/display", "duration": "N/A"},
+    }.get(plat_key, {"ratio": "1:1", "format": "standard", "duration": "15-30s"})
+
+    return {
+        "variant": variant_idx + 1,
+        "hook": hook,
+        "headline": headline,
+        "body": body,
+        "cta": base_cta,
+        "creative_brief": {
+            "format": specs.get("format"),
+            "aspect_ratio": specs.get("ratio"),
+            "duration": specs.get("duration"),
+            "opening_3s": hook,
+            "visual_direction": f"Show {artist} in action — raw, authentic, high-energy",
+            "text_overlay": headline,
+        },
+        "source": source,
+    }
+
+
+@app.post("/platform/ads/record")
+async def ads_record_run(req: AdRecordRequest, _key = Depends(require_scope("write"))):
+    """
+    Record a completed ad run's performance metrics.
+    Peak performers (ROAS ≥ 3, CTR ≥ 2.5%) are automatically extracted
+    as patterns the autopilot uses to generate the next winning creative.
+    """
+    from storage_client import get_ads_client
+    ads = get_ads_client()
+    record = ads.record_ad_run(req.user_id, req.dict())
+    return {
+        "status": "recorded",
+        "run_id": record["run_id"],
+        "is_peak": record["is_peak"],
+        "message": (
+            "Peak performer flagged — pattern extracted for replication"
+            if record["is_peak"] else
+            "Run recorded. Build more history to unlock peak replication."
+        ),
+    }
+
+
+@app.post("/platform/ads/generate")
+async def ads_generate(req: AdGenerateRequest, _key = Depends(require_scope("generate"))):
+    """
+    Generate a full ad creative set using peak performer replication.
+
+    How it works:
+    1. Pull the user's peak performer formula for this platform/ad_type from storage
+    2. Extract the winning hook patterns, CTA formulas, audience signals
+    3. Use the AI model to vary and enhance those patterns into new creatives
+    4. Return N ready-to-launch ad creatives + audience targeting + budget split
+    """
+    start = time.time()
+    from storage_client import get_ads_client, get_curriculum_client
+
+    ads      = get_ads_client()
+    plat     = req.platform.lower()
+    ad_type  = req.ad_type.lower()
+
+    # Pull peak formula (user-specific, then global fallback)
+    peak_formula = None
+    if req.replicate_peak:
+        peak_formula = ads.get_winning_formula(req.user_id, plat, ad_type)
+
+    # Pull organic engagement signals to cross-enrich targeting
+    try:
+        curriculum = get_curriculum_client()
+        top_organic = curriculum.get_top_performers(req.user_id, platform=plat, top_n=5)
+        organic_tags = list({t for p in top_organic for t in p.get("style_tags", [])})
+    except Exception:
+        organic_tags = []
+
+    # Generate N creatives
+    creatives = []
+    for i in range(req.num_creatives):
+        creative = _generate_ad_creative(
+            platform=plat,
+            ad_type=ad_type,
+            product=req.product,
+            goal=req.goal,
+            peak_formula=peak_formula,
+            artist_name=req.artist_name,
+            genre=req.genre,
+            variant_idx=i,
+        )
+        creatives.append(creative)
+
+    # Audience targeting recommendations
+    genre_key = (req.genre or "music_fan").lower().replace("-", "_").replace(" ", "_")
+    base_audience = AUDIENCE_SEGMENTS.get(genre_key) or AUDIENCE_SEGMENTS["music_fan"]
+    peak_audience = []
+    if peak_formula:
+        peak_audience = peak_formula.get("top_audience_tags", [])
+
+    targeting = {
+        "primary_interests": list(dict.fromkeys(peak_audience + base_audience + organic_tags))[:8],
+        "lookalike_source": "existing fans and buyers (1-3%)",
+        "retargeting_pool": "website visitors, video viewers (75%+), engagers last 30 days",
+        "exclusions": ["existing buyers", "low-quality traffic countries"],
+        "age_range": "18-35",
+        "placements": {
+            "tiktok":    ["TikTok Feed", "TikTok Search"],
+            "meta":      ["Instagram Feed", "Instagram Reels", "Facebook Feed", "Meta Audience Network"],
+            "youtube":   ["YouTube In-Stream", "YouTube Shorts"],
+            "google":    ["Google Search", "Display Network", "Performance Max"],
+            "instagram": ["Instagram Feed", "Instagram Reels", "Instagram Stories"],
+        }.get(plat, ["Feed", "Stories"]),
+    }
+
+    # Budget allocation across creatives (A/B test split)
+    budget_split = []
+    if req.budget_daily and req.num_creatives > 0:
+        test_budget   = round(req.budget_daily * 0.7 / req.num_creatives, 2)
+        winner_budget = round(req.budget_daily * 0.3, 2)
+        for i in range(req.num_creatives):
+            budget_split.append({"variant": i + 1, "daily_budget": test_budget, "phase": "test"})
+        budget_split.append({
+            "variant": "winner",
+            "daily_budget": winner_budget,
+            "phase": "scale (set after 3-day test)",
+        })
+
+    # Performance benchmarks for this platform
+    benchmarks = {
+        "tiktok":    {"avg_ctr": "1.5-3%",  "avg_cpc": "$0.50-1.20",  "good_roas": "3-6x"},
+        "meta":      {"avg_ctr": "0.9-2%",  "avg_cpc": "$0.80-2.50",  "good_roas": "2-5x"},
+        "youtube":   {"avg_ctr": "0.4-1%",  "avg_cpc": "$0.10-0.30",  "good_roas": "2-4x"},
+        "google":    {"avg_ctr": "2-6%",    "avg_cpc": "$0.50-3.00",  "good_roas": "4-8x"},
+        "instagram": {"avg_ctr": "0.8-1.5%","avg_cpc": "$1.00-3.00",  "good_roas": "2-4x"},
+    }.get(plat, {"avg_ctr": "1-2%", "avg_cpc": "$1.00", "good_roas": "2-4x"})
+
+    return {
+        "success": True,
+        "user_id": req.user_id,
+        "platform": plat,
+        "ad_type": ad_type,
+        "product": req.product,
+        "goal": req.goal,
+        "peak_replication": {
+            "enabled": req.replicate_peak,
+            "formula_found": peak_formula is not None,
+            "avg_roas_of_peaks": peak_formula.get("avg_roas") if peak_formula else None,
+            "avg_ctr_of_peaks": peak_formula.get("avg_ctr") if peak_formula else None,
+        },
+        "creatives": creatives,
+        "targeting": targeting,
+        "budget_split": budget_split if budget_split else None,
+        "platform_benchmarks": benchmarks,
+        "launch_checklist": [
+            "Upload creative assets in the correct format for " + plat + " (MP4 for video, PNG/JPG for image)",
+            "Set campaign objective to match goal: " + req.goal,
+            "Enable auto-bidding (lowest cost) for first 3 days",
+            "Set frequency cap: 3 impressions/user/day",
+            "Run A/B test for minimum 3 days before scaling winner",
+            "Record results in /platform/ads/record to improve future generations",
+        ],
+        "processing_time_ms": round((time.time() - start) * 1000, 1),
+    }
+
+
+@app.post("/platform/ads/autopilot")
+async def ads_autopilot(req: AdAutopilotRequest, _key = Depends(require_scope("generate"))):
+    """
+    Full ad autopilot.
+    - Analyses the entire ad portfolio for this user
+    - Classifies every ad as: SCALE | MAINTAIN | TEST | KILL
+    - Identifies peak performer patterns across all platforms
+    - Generates the next campaign recommendations with budget allocation
+    - Uses both ad performance data AND organic engagement signals
+    """
+    start = time.time()
+    from storage_client import get_ads_client, get_curriculum_client
+
+    ads = get_ads_client()
+
+    # Portfolio analysis
+    portfolio = ads.analyse_portfolio(req.user_id, platform=req.platform)
+    peaks     = ads.get_peak_performers(req.user_id, limit=10, platform=req.platform)
+
+    # Cross-enrich with organic engagement signals
+    try:
+        curriculum   = get_curriculum_client()
+        organic_tops = curriculum.get_top_performers(req.user_id, limit=10)
+        organic_tags = list({t for p in organic_tops for t in p.get("style_tags", [])})
+    except Exception:
+        organic_tops = []
+        organic_tags = []
+
+    # Determine what platforms to recommend based on what's working
+    active_platforms = list({p.get("platform") for p in peaks if p.get("platform")})
+    if not active_platforms:
+        active_platforms = ["meta", "tiktok"]
+
+    # Generate next campaign recommendations using the model
+    next_campaigns = []
+    for plat in (active_platforms or ["meta", "tiktok"])[:3]:
+        formula = ads.get_winning_formula(req.user_id, plat, "video")
+        ad_idea = f"{req.goal} campaign on {plat}"
+        hook = ""
+        cta  = AD_CTAS_BY_GOAL.get(req.goal, ["Learn More"])[0]
+
+        if _model_ready and _script_agent:
+            try:
+                from ai_model.agents.script_agent import ScriptRequest
+                script = _script_agent.run(ScriptRequest(
+                    idea=ad_idea, platform=plat, goal=req.goal, tone="direct",
+                ))
+                hook = script.hook
+            except Exception:
+                pass
+
+        if not hook:
+            hook_pool = AD_HOOKS_BY_PLATFORM.get(plat, AD_HOOKS_BY_PLATFORM["meta"])
+            hook = hook_pool[0]
+
+        budget_rec = None
+        if req.budget_total and len(active_platforms) > 0:
+            # Allocate more to platforms with proven peaks
+            plat_peaks = [p for p in peaks if p.get("platform") == plat]
+            weight     = 1.5 if plat_peaks else 1.0
+            total_w    = sum(1.5 if [p for p in peaks if p.get("platform") == ap] else 1.0
+                            for ap in active_platforms)
+            budget_rec = round(req.budget_total * (weight / total_w), 2)
+
+        next_campaigns.append({
+            "platform": plat,
+            "recommended_hook": hook,
+            "recommended_cta": cta,
+            "ad_type": "video",
+            "daily_budget": budget_rec,
+            "audience": (formula.get("top_audience_tags", [])[:4]
+                         if formula else organic_tags[:4]),
+            "peak_formula_available": formula is not None,
+            "expected_roas": formula.get("avg_roas") if formula else "unknown",
+            "expected_ctr": formula.get("avg_ctr") if formula else "unknown",
+        })
+
+    # Kill list — what to pause immediately
+    kill_recommendations = []
+    for run_id in portfolio.get("kill", [])[:5]:
+        kill_recommendations.append({
+            "run_id": run_id,
+            "action": "PAUSE",
+            "reason": "Below performance threshold (ROAS < 2.0, CTR < 1.5%)",
+        })
+
+    # Scale list — what to double budget on
+    scale_recommendations = []
+    for run_id in portfolio.get("scale", [])[:5]:
+        scale_recommendations.append({
+            "run_id": run_id,
+            "action": "SCALE",
+            "reason": "Peak performer — ROAS ≥ 3.0 AND CTR ≥ 2.5%",
+            "budget_multiplier": 2.0,
+        })
+
+    return {
+        "success": True,
+        "user_id": req.user_id,
+        "portfolio_summary": {
+            "total_ad_runs": portfolio["total_runs"],
+            "scale_count":   portfolio["scale_count"],
+            "kill_count":    portfolio["kill_count"],
+            "avg_roas":      portfolio["avg_roas"],
+            "total_spend":   portfolio["total_spend"],
+            "total_conversions": portfolio["total_conversions"],
+        },
+        "autopilot_actions": {
+            "scale_immediately":  scale_recommendations,
+            "pause_immediately":  kill_recommendations,
+            "test_next":         [{"run_id": r, "action": "TEST"} for r in portfolio.get("test", [])[:3]],
+        },
+        "next_campaigns": next_campaigns,
+        "peak_patterns_extracted": len(portfolio.get("peak_patterns", {})),
+        "organic_signal_enrichment": {
+            "organic_top_tags": organic_tags[:5],
+            "cross_platform_signals": len(organic_tops),
+        },
+        "autopilot_confidence": (
+            "high"   if portfolio["total_runs"] >= 10 else
+            "medium" if portfolio["total_runs"] >= 3  else
+            "low — record more ad runs to improve accuracy"
+        ),
+        "processing_time_ms": round((time.time() - start) * 1000, 1),
+    }
+
+
+@app.post("/platform/ads/audience")
+async def ads_audience(req: AdAudienceRequest, _key = Depends(require_scope("generate"))):
+    """
+    AI-generated audience targeting for paid ads.
+    Merges peak performer audience data from storage with organic engagement signals.
+    """
+    start = time.time()
+    from storage_client import get_ads_client, get_curriculum_client
+
+    ads = get_ads_client()
+    plat = req.platform.lower()
+
+    # Pull what audiences worked in peak ad runs
+    peaks = ads.get_peak_performers(req.user_id, limit=20, platform=plat)
+    ad_audiences = list({t for p in peaks for t in p.get("audience_tags", [])})
+
+    # Pull what content resonated organically
+    try:
+        curriculum   = get_curriculum_client()
+        organic_tops = curriculum.get_top_performers(req.user_id, platform=plat, top_n=10)
+        organic_tags = list({t for p in organic_tops for t in p.get("style_tags", [])})
+    except Exception:
+        organic_tags = []
+
+    genre_key = (req.genre or "music_fan").lower().replace("-", "_").replace(" ", "_")
+    base_segs = AUDIENCE_SEGMENTS.get(genre_key) or AUDIENCE_SEGMENTS["music_fan"]
+
+    cold_audience = list(dict.fromkeys(ad_audiences + organic_tags + base_segs))[:10]
+
+    lookalikes = []
+    if peaks:
+        lookalikes = [
+            {"source": "peak ad engagers", "percentage": "1%",   "priority": "highest"},
+            {"source": "video viewers 75%+", "percentage": "2%", "priority": "high"},
+            {"source": "website visitors 30d", "percentage": "3%","priority": "medium"},
+        ]
+    else:
+        lookalikes = [
+            {"source": "interest-based cold",  "percentage": "N/A", "priority": "start here"},
+            {"source": "video viewers 75%+",   "percentage": "2%",  "priority": "after first campaign"},
+        ]
+
+    retargeting_windows = {
+        "tiktok":    ["Profile visitors 30d", "Video viewers 50%+ 30d", "Followers"],
+        "meta":      ["Page engagers 30d", "Video viewers 75%+ 30d", "Website visitors 30d",
+                      "Instagram story openers 7d"],
+        "youtube":   ["Channel subscribers", "Video viewers last 30d", "Similar YouTube channels"],
+        "google":    ["Website visitors", "Customer list upload", "Similar audiences"],
+        "instagram": ["Post engagers 30d", "Story viewers 14d", "Profile visitors 7d"],
+    }.get(plat, ["Engagers 30d", "Website visitors"])
+
+    return {
+        "success": True,
+        "user_id": req.user_id,
+        "platform": plat,
+        "product": req.product,
+        "cold_audience": {
+            "interests": cold_audience,
+            "age_range": "18-34 primary, 35-44 secondary",
+            "gender": "all",
+            "source": "peak_ad_data + organic_signals" if peaks else "genre_defaults",
+        },
+        "lookalike_audiences": lookalikes,
+        "retargeting_audiences": retargeting_windows,
+        "campaign_funnel": {
+            "top_of_funnel":    "Cold interest targeting + lookalikes — awareness",
+            "middle_of_funnel": "Video viewers 25%+ + page engagers — consideration",
+            "bottom_of_funnel": "Website visitors + past purchasers — conversion",
+        },
+        "data_quality": {
+            "peak_ad_data_points": len(peaks),
+            "organic_signal_count": len(organic_tops) if organic_tags else 0,
+            "confidence": "high" if len(peaks) >= 5 else "building — record more runs",
+        },
+        "processing_time_ms": round((time.time() - start) * 1000, 1),
+    }
+
+
+@app.get("/platform/ads/performance/{user_id}")
+async def ads_performance(user_id: str, platform: Optional[str] = None,
+                          _key = Depends(verify_api_key)):
+    """Full ad performance dashboard for a user."""
+    from storage_client import get_ads_client
+    ads = get_ads_client()
+
+    runs  = ads.get_ad_runs(user_id, limit=50)
+    peaks = ads.get_peak_performers(user_id, limit=10, platform=platform)
+    stats = ads.get_stats(user_id)
+    portfolio = ads.analyse_portfolio(user_id, platform=platform)
+
+    return {
+        "user_id": user_id,
+        "stats": stats,
+        "portfolio_summary": {
+            "total_runs":      portfolio["total_runs"],
+            "scale_count":     portfolio["scale_count"],
+            "kill_count":      portfolio["kill_count"],
+            "avg_roas":        portfolio["avg_roas"],
+            "total_spend":     portfolio["total_spend"],
+            "total_conversions": portfolio["total_conversions"],
+        },
+        "peak_performers": peaks[:5],
+        "recent_runs": runs[:10],
+        "extracted_patterns": portfolio.get("peak_patterns", {}),
+    }
+
+
+@app.post("/platform/ads/optimize")
+async def ads_optimize(
+    body: dict,
+    _key = Depends(require_scope("generate")),
+):
+    """
+    Given live campaign metrics, tell the platform exactly what to do:
+    scale, adjust, pause, or A/B test a new angle.
+    Body: {user_id, platform, campaigns: [{run_id, ctr, cpc, roas, spend, conversions}]}
+    """
+    start = time.time()
+    from storage_client import get_ads_client
+
+    user_id   = body.get("user_id", "unknown")
+    platform  = body.get("platform", "meta")
+    campaigns = body.get("campaigns", [])
+    ads       = get_ads_client()
+
+    actions   = []
+    for camp in campaigns:
+        roas = float(camp.get("roas", 0))
+        ctr  = float(camp.get("ctr", 0))
+        cpc  = float(camp.get("cpc", 999))
+        run_id = camp.get("run_id", "unknown")
+
+        if roas >= 3.0 and ctr >= 2.5:
+            action = "SCALE"
+            detail = f"Peak performer. Double budget. ROAS={roas}x CTR={ctr}%"
+        elif roas >= 2.0 or ctr >= 1.5:
+            action = "MAINTAIN"
+            detail = f"Solid performance. Hold budget. Consider testing new angle."
+        elif roas >= 1.0:
+            action = "OPTIMISE"
+            detail = f"Borderline. Try new hook/audience. ROAS={roas}x CTR={ctr}%"
+        elif ctr < 0.5:
+            action = "KILL"
+            detail = f"CTR too low ({ctr}%). Pause and replace creative immediately."
+        else:
+            action = "TEST"
+            detail = f"Insufficient data. Run for 3 more days before deciding."
+
+        # Generate a replacement hook if killing
+        new_hook = None
+        if action in ("KILL", "OPTIMISE") and _model_ready and _script_agent:
+            try:
+                from ai_model.agents.script_agent import ScriptRequest
+                s = _script_agent.run(ScriptRequest(
+                    idea=f"new angle for {camp.get('product', 'music')} ad",
+                    platform=platform, goal="conversions", tone="direct",
+                ))
+                new_hook = s.hook
+            except Exception:
+                pass
+
+        result = {"run_id": run_id, "action": action, "detail": detail}
+        if new_hook:
+            result["replacement_hook"] = new_hook
+        actions.append(result)
+
+    # Record any peak performers automatically
+    for camp in campaigns:
+        if float(camp.get("roas", 0)) >= 3.0 or float(camp.get("ctr", 0)) >= 2.5:
+            ads.record_ad_run(user_id, {**camp, "platform": platform})
+
+    return {
+        "success": True,
+        "user_id": user_id,
+        "platform": platform,
+        "optimizations": actions,
+        "summary": {
+            "scale":    sum(1 for a in actions if a["action"] == "SCALE"),
+            "maintain": sum(1 for a in actions if a["action"] == "MAINTAIN"),
+            "kill":     sum(1 for a in actions if a["action"] == "KILL"),
+            "test":     sum(1 for a in actions if a["action"] == "TEST"),
+        },
+        "processing_time_ms": round((time.time() - start) * 1000, 1),
+    }
+
+
 # ─── Storage Pipeline Endpoints ───────────────────────────────────────────────
 
 @app.get("/storage/session")

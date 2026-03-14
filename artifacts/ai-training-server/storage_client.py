@@ -539,6 +539,236 @@ class CurriculumStateClient:
         return self.storage.hgetall(f"mb:curriculum:{user_id}:stats")
 
 
+class AdsClient:
+    """
+    AI Ad System — stores and retrieves ad performance records.
+    Identifies peak-performing ad patterns so the model can replicate them.
+
+    Storage keys:
+      mb:ads:{user_id}:runs          — list of all ad run records
+      mb:ads:{user_id}:peaks         — list of peak performer records (top 20%)
+      mb:ads:{user_id}:patterns      — dict of extracted winning patterns
+      mb:ads:{user_id}:stats         — aggregate stats hash
+      mb:ads:global:patterns         — cross-user peak patterns for cold-start
+    """
+
+    PEAK_ROAS_THRESHOLD = 3.0    # ROAS above this = peak performer
+    PEAK_CTR_THRESHOLD  = 2.5    # CTR % above this = peak performer
+    PEAK_CPC_CEILING    = 1.50   # CPC below this = efficient
+
+    def __init__(self, storage: StorageClient):
+        self.storage = storage
+
+    # ── Record & Store ──────────────────────────────────────────────────────
+
+    def record_ad_run(self, user_id: str, record: dict) -> dict:
+        """
+        Store a completed ad run. Automatically flags peak performers.
+        record fields: platform, ad_type, hook, body, cta, headline,
+                       audience_tags, ctr, cpc, roas, conversions,
+                       spend, impressions, clicks, run_id (optional)
+        """
+        record = dict(record)
+        record.setdefault("recorded_at", time.time())
+        record.setdefault("user_id", user_id)
+        record.setdefault("run_id", f"run-{int(time.time() * 1000)}")
+
+        ctr   = float(record.get("ctr", 0))
+        roas  = float(record.get("roas", 0))
+        cpc   = float(record.get("cpc", 999))
+
+        is_peak = (
+            roas >= self.PEAK_ROAS_THRESHOLD or
+            ctr  >= self.PEAK_CTR_THRESHOLD  or
+            (cpc <= self.PEAK_CPC_CEILING and ctr >= 1.5)
+        )
+        record["is_peak"] = is_peak
+
+        # Store run
+        self.storage.lpush(f"mb:ads:{user_id}:runs", record)
+        self.storage.ltrim(f"mb:ads:{user_id}:runs", 0, 499)
+
+        # Store in peaks list
+        if is_peak:
+            self.storage.lpush(f"mb:ads:{user_id}:peaks", record)
+            self.storage.ltrim(f"mb:ads:{user_id}:peaks", 0, 99)
+            # Also feed into global cross-user peaks
+            self.storage.lpush("mb:ads:global:peaks", record)
+            self.storage.ltrim("mb:ads:global:peaks", 0, 199)
+            self._update_patterns(user_id, record)
+
+        # Update stats
+        self.storage.hset(f"mb:ads:{user_id}:stats", "last_run_at", time.time())
+        self.storage.hset(f"mb:ads:{user_id}:stats", "total_runs",
+                          self.storage.llen(f"mb:ads:{user_id}:runs"))
+        self.storage.hset(f"mb:ads:{user_id}:stats", "total_peaks",
+                          self.storage.llen(f"mb:ads:{user_id}:peaks"))
+
+        logger.info(f"[Ads] Recorded run {record['run_id']} for {user_id} "
+                    f"(peak={is_peak}, ROAS={roas}, CTR={ctr}%)")
+        return record
+
+    def _update_patterns(self, user_id: str, peak: dict):
+        """Extract and persist winning pattern signatures from a peak performer."""
+        existing = self.storage.get(f"mb:ads:{user_id}:patterns") or {}
+        if isinstance(existing, str):
+            try:
+                existing = json.loads(existing)
+            except Exception:
+                existing = {}
+
+        platform = peak.get("platform", "unknown")
+        ad_type  = peak.get("ad_type", "unknown")
+        key = f"{platform}:{ad_type}"
+
+        entry = existing.get(key, {
+            "platform": platform,
+            "ad_type": ad_type,
+            "samples": [],
+            "avg_roas": 0.0,
+            "avg_ctr": 0.0,
+            "top_hooks": [],
+            "top_ctas": [],
+            "top_audience_tags": [],
+        })
+
+        # Add this sample
+        entry["samples"].append({
+            "hook": peak.get("hook", ""),
+            "cta":  peak.get("cta", ""),
+            "headline": peak.get("headline", ""),
+            "roas": peak.get("roas", 0),
+            "ctr":  peak.get("ctr", 0),
+            "audience_tags": peak.get("audience_tags", []),
+        })
+        if len(entry["samples"]) > 20:
+            entry["samples"] = entry["samples"][:20]
+
+        # Update aggregates
+        samples = entry["samples"]
+        entry["avg_roas"] = round(sum(s.get("roas", 0) for s in samples) / len(samples), 2)
+        entry["avg_ctr"]  = round(sum(s.get("ctr", 0) for s in samples) / len(samples), 2)
+        entry["top_hooks"] = list({s["hook"] for s in samples if s.get("hook")})[:5]
+        entry["top_ctas"]  = list({s["cta"] for s in samples if s.get("cta")})[:5]
+        all_tags = [t for s in samples for t in s.get("audience_tags", [])]
+        entry["top_audience_tags"] = list({t: all_tags.count(t) for t in all_tags}.items())
+        entry["top_audience_tags"].sort(key=lambda x: x[1], reverse=True)
+        entry["top_audience_tags"] = [t for t, _ in entry["top_audience_tags"][:8]]
+
+        existing[key] = entry
+        self.storage.set(f"mb:ads:{user_id}:patterns", json.dumps(existing))
+
+    # ── Read ────────────────────────────────────────────────────────────────
+
+    def get_ad_runs(self, user_id: str, limit: int = 50) -> list[dict]:
+        return self.storage.lrange(f"mb:ads:{user_id}:runs", 0, limit - 1)
+
+    def get_peak_performers(self, user_id: str, limit: int = 20,
+                            platform: Optional[str] = None) -> list[dict]:
+        peaks = self.storage.lrange(f"mb:ads:{user_id}:peaks", 0, limit * 2)
+        if platform:
+            peaks = [p for p in peaks if p.get("platform") == platform]
+        peaks.sort(key=lambda x: float(x.get("roas", 0)) + float(x.get("ctr", 0)) * 0.5,
+                   reverse=True)
+        return peaks[:limit]
+
+    def get_global_peaks(self, limit: int = 20,
+                         platform: Optional[str] = None) -> list[dict]:
+        peaks = self.storage.lrange("mb:ads:global:peaks", 0, limit * 2)
+        if platform:
+            peaks = [p for p in peaks if p.get("platform") == platform]
+        peaks.sort(key=lambda x: float(x.get("roas", 0)) + float(x.get("ctr", 0)) * 0.5,
+                   reverse=True)
+        return peaks[:limit]
+
+    def get_patterns(self, user_id: str) -> dict:
+        raw = self.storage.get(f"mb:ads:{user_id}:patterns")
+        if raw:
+            try:
+                return json.loads(raw) if isinstance(raw, str) else raw
+            except Exception:
+                pass
+        return {}
+
+    def get_stats(self, user_id: str) -> dict:
+        return self.storage.hgetall(f"mb:ads:{user_id}:stats")
+
+    # ── Analysis ─────────────────────────────────────────────────────────────
+
+    def analyse_portfolio(self, user_id: str,
+                          platform: Optional[str] = None) -> dict:
+        """
+        Classify every ad run as: scale | maintain | test | kill
+        Based on ROAS, CTR, and CPC benchmarks.
+        """
+        runs = self.get_ad_runs(user_id, limit=200)
+        if platform:
+            runs = [r for r in runs if r.get("platform") == platform]
+
+        scale    = []
+        maintain = []
+        test     = []
+        kill     = []
+
+        for run in runs:
+            roas = float(run.get("roas", 0))
+            ctr  = float(run.get("ctr", 0))
+            cpc  = float(run.get("cpc", 999))
+
+            if roas >= self.PEAK_ROAS_THRESHOLD and ctr >= self.PEAK_CTR_THRESHOLD:
+                scale.append(run)
+            elif roas >= 2.0 or ctr >= 1.5:
+                maintain.append(run)
+            elif roas == 0 and ctr == 0:
+                test.append(run)
+            else:
+                kill.append(run)
+
+        total_spend       = sum(float(r.get("spend", 0)) for r in runs)
+        total_conversions = sum(int(r.get("conversions", 0)) for r in runs)
+        avg_roas = (sum(float(r.get("roas", 0)) for r in runs) / len(runs)) if runs else 0
+
+        return {
+            "total_runs": len(runs),
+            "scale":    [r.get("run_id") for r in scale[:5]],
+            "maintain": [r.get("run_id") for r in maintain[:5]],
+            "test":     [r.get("run_id") for r in test[:5]],
+            "kill":     [r.get("run_id") for r in kill[:5]],
+            "scale_count":    len(scale),
+            "maintain_count": len(maintain),
+            "kill_count":     len(kill),
+            "total_spend":       round(total_spend, 2),
+            "total_conversions": total_conversions,
+            "avg_roas":          round(avg_roas, 2),
+            "peak_patterns":     self.get_patterns(user_id),
+        }
+
+    def get_winning_formula(self, user_id: str,
+                            platform: str, ad_type: str) -> Optional[dict]:
+        """Return the extracted peak-performer formula for a platform/ad_type combo."""
+        patterns = self.get_patterns(user_id)
+        key = f"{platform}:{ad_type}"
+        if key in patterns:
+            return patterns[key]
+        # Fall back to global patterns
+        global_peaks = self.get_global_peaks(limit=50, platform=platform)
+        if global_peaks:
+            return {
+                "platform": platform,
+                "ad_type": ad_type,
+                "top_hooks": list({p.get("hook", "") for p in global_peaks if p.get("hook")})[:5],
+                "top_ctas":  list({p.get("cta", "") for p in global_peaks if p.get("cta")})[:5],
+                "avg_roas":  round(sum(float(p.get("roas", 0)) for p in global_peaks)
+                                   / len(global_peaks), 2),
+                "avg_ctr":   round(sum(float(p.get("ctr", 0)) for p in global_peaks)
+                                   / len(global_peaks), 2),
+                "top_audience_tags": list({t for p in global_peaks
+                                          for t in p.get("audience_tags", [])}),
+                "source": "global",
+            }
+        return None
+
+
 # ─── Singletons ──────────────────────────────────────────────────────────────
 
 _storage_client: Optional[StorageClient] = None
@@ -546,6 +776,7 @@ _dataset_client: Optional[DatasetStreamClient] = None
 _checkpoint_client: Optional[ModelCheckpointClient] = None
 _curriculum_client: Optional[CurriculumStateClient] = None
 _pipeline: Optional[TrainingDataPipeline] = None
+_ads_client: Optional[AdsClient] = None
 
 
 def get_storage() -> StorageClient:
@@ -581,3 +812,10 @@ def get_pipeline() -> TrainingDataPipeline:
     if _pipeline is None:
         _pipeline = TrainingDataPipeline(get_storage())
     return _pipeline
+
+
+def get_ads_client() -> AdsClient:
+    global _ads_client
+    if _ads_client is None:
+        _ads_client = AdsClient(get_storage())
+    return _ads_client
