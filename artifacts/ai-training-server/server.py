@@ -910,6 +910,207 @@ async def list_checkpoints(_admin = Depends(verify_admin)):
     return {"checkpoints": get_checkpoint_client().list_checkpoints()}
 
 
+# ─── Storage Pipeline Endpoints ───────────────────────────────────────────────
+
+@app.get("/storage/session")
+async def get_storage_session(_key = Depends(verify_api_key)):
+    """Read the active training session from the 7TB storage server."""
+    from storage_client import get_pipeline, get_storage
+    pipeline = get_pipeline()
+    session = pipeline.get_session()
+    storage_status = pipeline.get_status()
+    raw_keys = get_storage().keys("*")
+    return {
+        "session": session,
+        "storage_status": storage_status,
+        "available_keys": raw_keys,
+        "pipeline": pipeline.pipeline_status(),
+    }
+
+
+@app.get("/storage/pipeline/status")
+async def pipeline_status(_key = Depends(verify_api_key)):
+    """Return current training pipeline progress."""
+    from storage_client import get_pipeline
+    return get_pipeline().pipeline_status()
+
+
+class StorageTrainRequest(BaseModel):
+    epochs: int = Field(1, ge=1, le=20)
+    batch_size: int = Field(64, ge=8, le=512)
+    learning_rate: float = Field(3e-4, gt=0)
+    max_batches: Optional[int] = None
+    save_checkpoint: bool = True
+
+
+def _run_storage_training(req: StorageTrainRequest, job_id: str):
+    """Background task: pull batches from the 7TB storage server and train the model."""
+    import math
+    from storage_client import get_pipeline, get_checkpoint_client
+
+    pipeline = get_pipeline()
+    log_training(f"[StorageTrain] Job {job_id} — pulling from 7TB storage session", job_id=job_id)
+
+    with _training_lock:
+        _training_state["state"] = "running"
+        _training_state["source"] = "storage"
+
+    try:
+        if not _model_ready:
+            log_training("Waiting for model to initialize...", job_id=job_id)
+            for _ in range(60):
+                time.sleep(1)
+                if _model_ready:
+                    break
+            if not _model_ready:
+                raise RuntimeError("Model not ready after 60s")
+
+        sys.path.insert(0, str(Path(__file__).parent))
+        import torch
+        from ai_model.training.dataset import CreativeDataset
+        from ai_model.training.trainer import train as run_train, evaluate
+        from ai_model.training.config import TrainConfig
+
+        total_loss = 0.0
+        batch_count = 0
+        samples_written = []
+
+        log_training(f"[StorageTrain] Streaming batches from storage...", job_id=job_id)
+
+        for text_batch in pipeline.stream_batches(batch_size=req.batch_size):
+            if req.max_batches and batch_count >= req.max_batches:
+                break
+            samples_written.extend(text_batch)
+
+            # Feed to trainer every 50 samples
+            if len(samples_written) >= 50 or (req.max_batches and batch_count == req.max_batches - 1):
+                data_path = f"training/storage_batch_{job_id}.json"
+                os.makedirs("training", exist_ok=True)
+                with open(data_path, "w") as f:
+                    json.dump([{"text": t} for t in samples_written], f)
+
+                config = TrainConfig(
+                    epochs=1,
+                    batch_size=min(req.batch_size, len(samples_written)),
+                    lr=req.learning_rate,
+                    grad_clip=1.0,
+                )
+                with _model_lock:
+                    model = _creative_model.model if _creative_model else None
+
+                if model:
+                    result = run_train(model, _tokenizer, data_path, config)
+                    loss = result.get("final_loss", result.get("loss", 0.0))
+                    if not math.isnan(loss):
+                        total_loss += loss
+                        batch_count += 1
+                        avg_loss = round(total_loss / batch_count, 4)
+                        with _training_lock:
+                            _training_state["loss"] = avg_loss
+                            _training_state["step"] = batch_count
+                            _training_state["batches_from_storage"] = batch_count
+
+                        if batch_count % 5 == 0:
+                            log_training(
+                                f"[StorageTrain] batch={batch_count} loss={avg_loss}",
+                                job_id=job_id
+                            )
+
+                samples_written = []
+
+        with _training_lock:
+            _training_state["state"] = "complete"
+            _training_state["completed_at"] = time.time()
+            _training_state["final_loss"] = round(total_loss / max(batch_count, 1), 4)
+            _training_state["total_storage_batches"] = batch_count
+
+        log_training(
+            f"[StorageTrain] Job {job_id} complete — {batch_count} batches, "
+            f"loss={_training_state['final_loss']}",
+            job_id=job_id
+        )
+
+        if req.save_checkpoint and _creative_model:
+            try:
+                weights_dir = Path(__file__).parent / "ai_model" / "weights"
+                weights_dir.mkdir(parents=True, exist_ok=True)
+                state_dict = _creative_model.model.state_dict()
+                checkpoint = {
+                    "model_state_dict": state_dict,
+                    "vocab": _tokenizer.vocab,
+                    "inv_vocab": _tokenizer.inv_vocab,
+                    "next_id": _tokenizer.next_id,
+                    "config": _model_config,
+                    "job_id": job_id,
+                    "source": "storage",
+                    "final_loss": _training_state.get("final_loss"),
+                }
+                torch.save(checkpoint, str(weights_dir / "model.pt"))
+                get_checkpoint_client().save_checkpoint(
+                    model_id="maxbooster-v1",
+                    state={"job_id": job_id, "batches": batch_count,
+                           "final_loss": _training_state.get("final_loss")},
+                    metadata={"source": "storage", "session": pipeline._session},
+                )
+                log_training(f"[StorageTrain] Checkpoint saved to storage", job_id=job_id)
+            except Exception as e:
+                log_training(f"[StorageTrain] Checkpoint error: {e}", job_id=job_id, level="error")
+
+    except Exception as e:
+        with _training_lock:
+            _training_state["state"] = "error"
+            _training_state["error"] = str(e)
+        log_training(f"[StorageTrain] Job {job_id} failed: {e}", job_id=job_id, level="error")
+        import traceback
+        traceback.print_exc()
+    finally:
+        pipeline._active = False
+
+
+@app.post("/training/start-from-storage")
+async def start_training_from_storage(
+    req: StorageTrainRequest,
+    background_tasks: BackgroundTasks,
+    _admin = Depends(verify_admin),
+):
+    """
+    Start a training run that pulls data directly from the 7TB storage server.
+    Streams batches from the storage session and trains the main MaxBooster model.
+    """
+    from storage_client import get_pipeline
+
+    with _training_lock:
+        if _training_state.get("state") == "running":
+            return {"status": "already_running", "training_state": dict(_training_state)}
+
+    pipeline = get_pipeline()
+    session = pipeline.get_session()
+    if not session:
+        raise HTTPException(status_code=503, detail="No training session found in storage server. "
+                            "Check /storage/session for details.")
+
+    job_id = str(uuid.uuid4())[:8]
+    with _training_lock:
+        _training_state["state"] = "starting"
+        _training_state["job_id"] = job_id
+        _training_state["source"] = "storage"
+        _training_state["session_id"] = session.get("id")
+        _training_state["total_bytes"] = session.get("bytes", 0)
+        _training_state["started_at"] = time.time()
+        _training_state["step"] = 0
+        _training_state["batches_from_storage"] = 0
+
+    background_tasks.add_task(_run_storage_training, req, job_id)
+    return {
+        "status": "started",
+        "job_id": job_id,
+        "session": session,
+        "epochs": req.epochs,
+        "max_batches": req.max_batches,
+        "message": f"Training job {job_id} started — pulling from 7TB storage session",
+    }
+
+
 # ─── Entry Point ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

@@ -2,6 +2,8 @@
 MaxBooster Storage Client
 Connects to the storage server via its Redis-like HTTP exec API.
 Falls back gracefully if the storage server is unreachable.
+
+API format: POST /exec  body: {"cmd": "SET", "args": ["key", "value"]}
 """
 
 import os
@@ -9,8 +11,6 @@ import json
 import time
 import logging
 import threading
-import hashlib
-import pickle
 from typing import Any, Optional
 from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
@@ -26,9 +26,9 @@ KEY_PREFIX = "mb:"
 
 class StorageClient:
     """
-    Redis-like storage client using the MaxBooster storage server HTTP exec API.
-    All keys are namespaced under 'mb:' to avoid collisions with other services.
-    Falls back to an in-process dict if the storage server is unavailable.
+    Redis-like storage client for the MaxBooster storage server.
+    Uses HTTP exec API: {"cmd": "SET", "args": ["key", "value"]}
+    Falls back to an in-process dict if unreachable.
     """
 
     def __init__(self):
@@ -42,15 +42,19 @@ class StorageClient:
         )
         self._check_thread.start()
 
-    def _exec(self, *args) -> Any:
-        """Execute a Redis command against the storage server."""
+    def _exec(self, cmd: str, *args) -> Any:
+        """Execute a Redis command via HTTP exec API."""
         if not self._url or not self._token:
             return None
 
-        payload = json.dumps({"command": list(args)}).encode("utf-8")
+        payload: dict = {"cmd": cmd}
+        if args:
+            payload["args"] = [str(a) for a in args]
+
+        data = json.dumps(payload).encode("utf-8")
         req = Request(
             self._url,
-            data=payload,
+            data=data,
             headers={
                 "Authorization": f"Bearer {self._token}",
                 "Content-Type": "application/json",
@@ -58,24 +62,30 @@ class StorageClient:
             method="POST",
         )
         try:
-            with urlopen(req, timeout=5) as resp:
+            with urlopen(req, timeout=8) as resp:
                 body = resp.read().decode("utf-8").strip()
                 if not body:
                     return None
-                try:
-                    return json.loads(body)
-                except json.JSONDecodeError:
-                    return body
+                parsed = json.loads(body)
+                if isinstance(parsed, dict):
+                    if "error" in parsed:
+                        logger.debug(f"[Storage] {cmd} error: {parsed['error']}")
+                        return None
+                    return parsed.get("result")
+                return parsed
         except (URLError, HTTPError, Exception) as e:
-            logger.debug(f"[Storage] exec failed: {e}")
+            logger.debug(f"[Storage] exec {cmd} failed: {e}")
             return None
 
     def _ns(self, key: str) -> str:
+        """Namespace a key under mb:"""
+        if key.startswith(KEY_PREFIX) or key.startswith("mbs:") or key.startswith("mbs_"):
+            return key
         return f"{KEY_PREFIX}{key}"
 
     def ping(self) -> bool:
         result = self._exec("PING")
-        return result == "PONG" or result == {"result": "PONG"} or str(result).upper() == "PONG"
+        return str(result).upper() == "PONG"
 
     def _periodic_health_check(self):
         while True:
@@ -99,10 +109,10 @@ class StorageClient:
         serialized = json.dumps(value) if not isinstance(value, str) else value
         ns_key = self._ns(key)
         if self.is_available:
-            args = ["SET", ns_key, serialized]
             if ex:
-                args += ["EX", str(ex)]
-            result = self._exec(*args)
+                result = self._exec("SET", ns_key, serialized, "EX", ex)
+            else:
+                result = self._exec("SET", ns_key, serialized)
             if result is not None:
                 return True
         with self._lock:
@@ -140,20 +150,20 @@ class StorageClient:
 
     def lpush(self, key: str, *values: Any) -> int:
         ns_key = self._ns(key)
-        serialized = [json.dumps(v) if not isinstance(v, str) else v for v in values]
         if self.is_available:
+            serialized = [json.dumps(v) if not isinstance(v, str) else v for v in values]
             result = self._exec("LPUSH", ns_key, *serialized)
             return int(result) if result else 0
         with self._lock:
             lst = self._fallback.setdefault(ns_key, [])
             for v in reversed(values):
                 lst.insert(0, v)
-        return len(self._fallback[ns_key])
+        return len(self._fallback.get(ns_key, []))
 
     def lrange(self, key: str, start: int, stop: int) -> list:
         ns_key = self._ns(key)
         if self.is_available:
-            result = self._exec("LRANGE", ns_key, str(start), str(stop))
+            result = self._exec("LRANGE", ns_key, start, stop)
             if result and isinstance(result, list):
                 parsed = []
                 for item in result:
@@ -167,10 +177,18 @@ class StorageClient:
             end = stop + 1 if stop != -1 else None
             return lst[start:end]
 
+    def llen(self, key: str) -> int:
+        ns_key = self._ns(key)
+        if self.is_available:
+            result = self._exec("LLEN", ns_key)
+            return int(result) if result else 0
+        with self._lock:
+            return len(self._fallback.get(ns_key, []))
+
     def ltrim(self, key: str, start: int, stop: int):
         ns_key = self._ns(key)
         if self.is_available:
-            self._exec("LTRIM", ns_key, str(start), str(stop))
+            self._exec("LTRIM", ns_key, start, stop)
         else:
             with self._lock:
                 lst = self._fallback.get(ns_key, [])
@@ -204,13 +222,9 @@ class StorageClient:
         if self.is_available:
             result = self._exec("HGETALL", ns_key)
             if result and isinstance(result, dict):
-                parsed = {}
-                for k, v in result.items():
-                    try:
-                        parsed[k] = json.loads(v) if isinstance(v, str) else v
-                    except (json.JSONDecodeError, TypeError):
-                        parsed[k] = v
-                return parsed
+                return {k: (json.loads(v) if isinstance(v, str) else v)
+                        for k, v in result.items()
+                        if not (isinstance(v, str) and _safe_json_fail(v))}
         with self._lock:
             return dict(self._fallback.get(ns_key, {}))
 
@@ -225,20 +239,24 @@ class StorageClient:
             return val
 
     def keys(self, pattern: str = "*") -> list[str]:
-        ns_pattern = self._ns(pattern)
         if self.is_available:
-            result = self._exec("KEYS", ns_pattern)
+            result = self._exec("KEYS", pattern)
             if result and isinstance(result, list):
-                prefix_len = len(KEY_PREFIX)
-                return [k[prefix_len:] if k.startswith(KEY_PREFIX) else k for k in result]
+                return result
         with self._lock:
-            prefix_len = len(KEY_PREFIX)
-            return [k[prefix_len:] for k in self._fallback if k.startswith(KEY_PREFIX)]
+            return list(self._fallback.keys())
 
     def expire(self, key: str, seconds: int):
         ns_key = self._ns(key)
         if self.is_available:
-            self._exec("EXPIRE", ns_key, str(seconds))
+            self._exec("EXPIRE", ns_key, seconds)
+
+    def type(self, key: str) -> str:
+        ns_key = self._ns(key)
+        if self.is_available:
+            result = self._exec("TYPE", ns_key)
+            return str(result) if result else "none"
+        return "string"
 
     def status(self) -> dict:
         return {
@@ -249,26 +267,159 @@ class StorageClient:
         }
 
 
+def _safe_json_fail(s: str) -> bool:
+    try:
+        json.loads(s)
+        return False
+    except Exception:
+        return True
+
+
+class TrainingDataPipeline:
+    """
+    Pulls the 7TB training dataset from the MaxBooster storage server.
+    Reads session metadata from mbs:training:session, streams content
+    from mbs:data and mbs:downloads lists, and feeds batches to the trainer.
+    """
+
+    SESSION_KEY = "mbs:training:session"
+    DATA_KEYS = ["mbs:data", "mbs:downloads", "mbs_training", "mbs_downloads", "mbs:session"]
+    STATUS_KEY = "mbs:status"
+
+    def __init__(self, storage: "StorageClient"):
+        self.storage = storage
+        self._active = False
+        self._session: Optional[dict] = None
+        self._bytes_pulled: int = 0
+        self._batches_processed: int = 0
+
+    def get_session(self) -> Optional[dict]:
+        """Read the active training session from storage."""
+        items = self.storage.lrange(self.SESSION_KEY, 0, 0)
+        if items:
+            return items[0] if isinstance(items[0], dict) else None
+        return None
+
+    def get_status(self) -> dict:
+        """Read the storage status blob."""
+        raw = self.storage.get(self.STATUS_KEY)
+        if raw:
+            try:
+                return json.loads(raw) if isinstance(raw, str) else raw
+            except Exception:
+                pass
+        return {"state": "unknown", "bytes": 0}
+
+    def acknowledge_session(self, session_id: str):
+        """Mark the training session as active in storage."""
+        self.storage.set(self.STATUS_KEY, json.dumps({
+            "state": "downloading",
+            "session_id": session_id,
+            "bytes": self._session.get("bytes", 0) if self._session else 0,
+            "bytes_pulled": self._bytes_pulled,
+            "ts": int(time.time() * 1000),
+        }))
+        logger.info(f"[Pipeline] Session {session_id} acknowledged — state: downloading")
+
+    def stream_batches(self, batch_size: int = 64):
+        """
+        Generator — yields training batches pulled from all data keys.
+        Each batch is a list of text strings for the model to train on.
+        """
+        self._session = self.get_session()
+        if not self._session:
+            logger.warning("[Pipeline] No training session found in storage")
+            return
+
+        session_id = self._session.get("id", "unknown")
+        total_bytes = self._session.get("bytes", 0)
+        logger.info(f"[Pipeline] Starting dataset pull — session {session_id}, "
+                    f"size {total_bytes / 1e12:.2f} TB")
+
+        self.acknowledge_session(session_id)
+        self._active = True
+
+        for data_key in self.DATA_KEYS:
+            if not self._active:
+                break
+            length = self.storage.llen(data_key)
+            if length == 0:
+                continue
+            logger.info(f"[Pipeline] Pulling {length} records from {data_key}")
+            offset = 0
+            while offset < length and self._active:
+                chunk = self.storage.lrange(data_key, offset, offset + batch_size - 1)
+                if not chunk:
+                    break
+                batch = self._normalize_batch(chunk)
+                if batch:
+                    self._batches_processed += 1
+                    self._bytes_pulled += sum(len(str(t).encode()) for t in batch)
+                    yield batch
+                offset += batch_size
+
+        self._mark_complete(session_id)
+
+    def _normalize_batch(self, raw_items: list) -> list[str]:
+        """Convert raw storage items into text strings for training."""
+        texts = []
+        for item in raw_items:
+            if isinstance(item, str):
+                texts.append(item)
+            elif isinstance(item, dict):
+                # Flatten dict to text for language model training
+                parts = []
+                for k, v in item.items():
+                    if isinstance(v, str) and len(v) > 2:
+                        parts.append(f"{k}: {v}")
+                if parts:
+                    texts.append(" | ".join(parts))
+            elif isinstance(item, list):
+                texts.extend(str(x) for x in item if x)
+        return [t for t in texts if t and len(t) > 3]
+
+    def _mark_complete(self, session_id: str):
+        self.storage.set(self.STATUS_KEY, json.dumps({
+            "state": "complete",
+            "session_id": session_id,
+            "bytes_pulled": self._bytes_pulled,
+            "batches_processed": self._batches_processed,
+            "ts": int(time.time() * 1000),
+        }))
+        logger.info(f"[Pipeline] Dataset pull complete — "
+                    f"{self._batches_processed} batches, "
+                    f"{self._bytes_pulled / 1e6:.1f} MB processed")
+
+    def stop(self):
+        self._active = False
+
+    def pipeline_status(self) -> dict:
+        return {
+            "active": self._active,
+            "session": self._session,
+            "bytes_pulled": self._bytes_pulled,
+            "batches_processed": self._batches_processed,
+            "storage_status": self.get_status(),
+        }
+
+
 class DatasetStreamClient:
-    """
-    Streams datasets from the 7TB storage pool for training.
-    Datasets are stored in storage as chunked lists under 'dataset:<name>:chunks'.
-    """
+    """Registers and streams named dataset chunks from storage."""
 
     def __init__(self, storage: StorageClient):
         self.storage = storage
 
     def list_datasets(self) -> list[dict]:
-        keys = self.storage.keys("dataset:*:meta")
+        all_keys = self.storage.keys("mb:dataset:*:meta")
         datasets = []
-        for key in keys:
+        for key in all_keys:
             meta = self.storage.get(key)
             if meta:
-                datasets.append(meta)
+                datasets.append(meta if isinstance(meta, dict) else json.loads(meta))
         return datasets
 
     def get_dataset_meta(self, name: str) -> Optional[dict]:
-        return self.storage.get(f"dataset:{name}:meta")
+        return self.storage.get(f"mb:dataset:{name}:meta")
 
     def register_dataset(self, name: str, description: str, size_bytes: int,
                          num_chunks: int, content_type: str = "text"):
@@ -280,22 +431,19 @@ class DatasetStreamClient:
             "content_type": content_type,
             "registered_at": time.time(),
         }
-        self.storage.set(f"dataset:{name}:meta", meta)
+        self.storage.set(f"mb:dataset:{name}:meta", meta)
         logger.info(f"[Dataset] Registered '{name}' ({size_bytes / 1e9:.2f} GB, {num_chunks} chunks)")
 
     def stream_chunk(self, name: str, chunk_idx: int) -> Optional[list]:
-        chunk = self.storage.get(f"dataset:{name}:chunk:{chunk_idx}")
-        if chunk is not None:
-            logger.debug(f"[Dataset] Streamed chunk {chunk_idx} from '{name}'")
-        return chunk
+        return self.storage.get(f"mb:dataset:{name}:chunk:{chunk_idx}")
 
     def write_chunk(self, name: str, chunk_idx: int, data: list):
-        self.storage.set(f"dataset:{name}:chunk:{chunk_idx}", data)
+        self.storage.set(f"mb:dataset:{name}:chunk:{chunk_idx}", data)
 
     def stream_all_chunks(self, name: str, max_chunks: Optional[int] = None):
         meta = self.get_dataset_meta(name)
         if not meta:
-            logger.warning(f"[Dataset] Dataset '{name}' not found in storage")
+            logger.warning(f"[Dataset] '{name}' not found in storage")
             return
         total = meta.get("num_chunks", 0)
         limit = min(total, max_chunks) if max_chunks else total
@@ -306,15 +454,13 @@ class DatasetStreamClient:
 
 
 class ModelCheckpointClient:
-    """
-    Saves and loads model weight checkpoints to/from storage.
-    Checkpoints are stored as JSON-serialized state under 'checkpoint:<model_id>'.
-    """
+    """Saves and loads model weight checkpoints to/from storage."""
 
     def __init__(self, storage: StorageClient):
         self.storage = storage
 
     def save_checkpoint(self, model_id: str, state: dict, metadata: Optional[dict] = None) -> bool:
+        import hashlib
         checkpoint = {
             "model_id": model_id,
             "saved_at": time.time(),
@@ -323,40 +469,36 @@ class ModelCheckpointClient:
                 json.dumps(state, default=str, sort_keys=True).encode()
             ).hexdigest()[:16],
         }
-        ok1 = self.storage.set(f"checkpoint:{model_id}:meta", checkpoint)
-        ok2 = self.storage.set(f"checkpoint:{model_id}:state", state)
-        self.storage.lpush("checkpoint:history", {
+        ok1 = self.storage.set(f"mb:checkpoint:{model_id}:meta", checkpoint)
+        ok2 = self.storage.set(f"mb:checkpoint:{model_id}:state", state)
+        self.storage.lpush("mb:checkpoint:history", {
             "model_id": model_id,
             "saved_at": checkpoint["saved_at"],
             "hash": checkpoint["state_hash"],
         })
-        self.storage.ltrim("checkpoint:history", 0, 49)
+        self.storage.ltrim("mb:checkpoint:history", 0, 49)
         logger.info(f"[Checkpoint] Saved '{model_id}' (hash: {checkpoint['state_hash']})")
         return ok1 or ok2
 
     def load_checkpoint(self, model_id: str) -> Optional[dict]:
-        state = self.storage.get(f"checkpoint:{model_id}:state")
+        state = self.storage.get(f"mb:checkpoint:{model_id}:state")
         if state:
             logger.info(f"[Checkpoint] Loaded '{model_id}' from storage")
         return state
 
     def list_checkpoints(self) -> list[dict]:
-        return self.storage.lrange("checkpoint:history", 0, 49)
+        return self.storage.lrange("mb:checkpoint:history", 0, 49)
 
     def get_checkpoint_meta(self, model_id: str) -> Optional[dict]:
-        return self.storage.get(f"checkpoint:{model_id}:meta")
+        return self.storage.get(f"mb:checkpoint:{model_id}:meta")
 
     def delete_checkpoint(self, model_id: str) -> bool:
-        self.storage.delete(f"checkpoint:{model_id}:meta", f"checkpoint:{model_id}:state")
-        logger.info(f"[Checkpoint] Deleted checkpoint '{model_id}'")
+        self.storage.delete(f"mb:checkpoint:{model_id}:meta", f"mb:checkpoint:{model_id}:state")
         return True
 
 
 class CurriculumStateClient:
-    """
-    Stores per-user curriculum training state in storage.
-    The autopilot writes engagement signals here; the trainer reads them on next run.
-    """
+    """Per-user autopilot engagement signals for curriculum-guided training."""
 
     def __init__(self, storage: StorageClient):
         self.storage = storage
@@ -371,37 +513,39 @@ class CurriculumStateClient:
             "style_tags": style_tags,
             "timestamp": time.time(),
         }
-        self.storage.lpush(f"curriculum:{user_id}:feedback", entry)
-        self.storage.ltrim(f"curriculum:{user_id}:feedback", 0, 199)
-        self.storage.hset(f"curriculum:{user_id}:stats", "last_feedback_at", time.time())
-        self.storage.hset(f"curriculum:{user_id}:stats", "total_signals",
-                          self.storage.incr(f"curriculum:{user_id}:signal_count"))
+        self.storage.lpush(f"mb:curriculum:{user_id}:feedback", entry)
+        self.storage.ltrim(f"mb:curriculum:{user_id}:feedback", 0, 199)
+        self.storage.hset(f"mb:curriculum:{user_id}:stats", "last_feedback_at", time.time())
+        self.storage.incr(f"mb:curriculum:{user_id}:signal_count")
 
     def get_user_curriculum(self, user_id: str, limit: int = 50) -> list[dict]:
-        return self.storage.lrange(f"curriculum:{user_id}:feedback", 0, limit - 1)
+        return self.storage.lrange(f"mb:curriculum:{user_id}:feedback", 0, limit - 1)
 
     def get_top_performers(self, user_id: str, platform: Optional[str] = None,
                            top_n: int = 10) -> list[dict]:
-        all_feedback = self.get_user_curriculum(user_id, limit=200)
+        all_fb = self.get_user_curriculum(user_id, limit=200)
         if platform:
-            all_feedback = [f for f in all_feedback if f.get("platform") == platform]
-        all_feedback.sort(key=lambda x: x.get("engagement_rate", 0), reverse=True)
-        return all_feedback[:top_n]
+            all_fb = [f for f in all_fb if f.get("platform") == platform]
+        all_fb.sort(key=lambda x: x.get("engagement_rate", 0), reverse=True)
+        return all_fb[:top_n]
 
     def save_user_model_state(self, user_id: str, state: dict):
-        self.storage.set(f"user:{user_id}:model_state", state, ex=86400 * 30)
+        self.storage.set(f"mb:user:{user_id}:model_state", state, ex=86400 * 30)
 
     def load_user_model_state(self, user_id: str) -> Optional[dict]:
-        return self.storage.get(f"user:{user_id}:model_state")
+        return self.storage.get(f"mb:user:{user_id}:model_state")
 
     def get_user_stats(self, user_id: str) -> dict:
-        return self.storage.hgetall(f"curriculum:{user_id}:stats")
+        return self.storage.hgetall(f"mb:curriculum:{user_id}:stats")
 
+
+# ─── Singletons ──────────────────────────────────────────────────────────────
 
 _storage_client: Optional[StorageClient] = None
 _dataset_client: Optional[DatasetStreamClient] = None
 _checkpoint_client: Optional[ModelCheckpointClient] = None
 _curriculum_client: Optional[CurriculumStateClient] = None
+_pipeline: Optional[TrainingDataPipeline] = None
 
 
 def get_storage() -> StorageClient:
@@ -430,3 +574,10 @@ def get_curriculum_client() -> CurriculumStateClient:
     if _curriculum_client is None:
         _curriculum_client = CurriculumStateClient(get_storage())
     return _curriculum_client
+
+
+def get_pipeline() -> TrainingDataPipeline:
+    global _pipeline
+    if _pipeline is None:
+        _pipeline = TrainingDataPipeline(get_storage())
+    return _pipeline

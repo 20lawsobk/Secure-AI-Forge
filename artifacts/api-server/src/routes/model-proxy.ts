@@ -132,4 +132,16 @@ router.get("/storage/checkpoint/:modelId", async (req, res) => {
   await proxyRequest(req, res, `/storage/checkpoint/${req.params.modelId}`);
 });
 
+router.get("/storage/session", async (req, res) => {
+  await proxyRequest(req, res, "/storage/session");
+});
+
+router.get("/storage/pipeline/status", async (req, res) => {
+  await proxyRequest(req, res, "/storage/pipeline/status");
+});
+
+router.post("/training/start-from-storage", async (req, res) => {
+  await proxyRequest(req, res, "/training/start-from-storage");
+});
+
 export default router;
