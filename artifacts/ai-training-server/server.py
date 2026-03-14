@@ -661,15 +661,17 @@ def _run_training(req: StartTrainingRequest, job_id: str):
             generate_synthetic_samples(data_path, n=req.synthetic_count)
 
         _tokenizer.unfreeze()
-        dataset = CreativeDataset(data_path, _tokenizer, max_len=_creative_model.model.pos_emb.num_embeddings)
+        train_max_len = min(256, _creative_model.model.pos_emb.num_embeddings)
+        dataset = CreativeDataset(data_path, _tokenizer, max_len=train_max_len)
         if len(dataset) == 0:
             raise ValueError("Empty dataset")
 
         dim = _creative_model.model.token_emb.embedding_dim
         cfg = TrainConfig({
-            "model": {"dim": dim, "layers": len(_creative_model.model.layers), "heads": 8, "max_len": _model_config.get("max_len", 1024)},
+            "model": {"dim": dim, "layers": len(_creative_model.model.layers), "heads": 8, "max_len": train_max_len},
             "train": {"lr": req.learning_rate, "batch_size": req.batch_size, "epochs": req.epochs, "data_path": data_path},
         })
+        cfg.gradient_accumulation_steps = 1
 
         _creative_model.resize_embeddings()
 
