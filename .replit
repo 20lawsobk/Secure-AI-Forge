@@ -30,10 +30,6 @@ args = "AI Training Server"
 task = "workflow.run"
 args = "Start application"
 
-[[workflows.workflow.tasks]]
-task = "workflow.run"
-args = "API Server"
-
 [[workflows.workflow]]
 name = "AI Training Server"
 author = "agent"
@@ -58,18 +54,6 @@ task = "shell.exec"
 args = "PORT=3000 BASE_PATH=/ pnpm --filter @workspace/ai-dashboard run dev"
 waitForPort = 3000
 
-[[workflows.workflow]]
-name = "API Server"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "PORT=8080 pnpm --filter @workspace/api-server run dev"
-waitForPort = 8080
-
-[workflows.workflow.metadata]
-outputType = "console"
-
 [agent]
 stack = "PNPM_WORKSPACE"
 expertMode = true
@@ -84,8 +68,8 @@ channel = "stable-25_05"
 [userenv]
 
 [userenv.shared]
-STORAGE_HTTP_URL = "https://pocketdimensionstorage.replit.app/api/redis/instances/e50d64e610d37dd52ce85711/exec"
 STORAGE_BEARER_TOKEN = "ed5ff25a3ad7b54d58f063190723df8b41f08b4a5b8bbc041f4cfa0ea13d9f46"
 STORAGE_INSTANCE = "max-booster-training"
 ADMIN_KEY = "mbs_8a3edbac97ff333dda5068410227267e6d85b14a4c9caee279fbb18ddfb47edc"
-STORAGE_CONNECTION_URL = "pdim://ed5ff25a3ad7b54d58f063190723df8b41f08b4a5b8bbc041f4cfa0ea13d9f46@pocketdimensionstorage.replit.app/api/redis/instances/e50d64e610d37dd52ce85711"
+STORAGE_HTTP_URL = "https://pocketdimensionstorage.replit.app/api/redis/instances/f26378c8b4faf9f237a0f816/exec"
+STORAGE_CONNECTION_URL = "pdim://ed5ff25a3ad7b54d58f063190723df8b41f08b4a5b8bbc041f4cfa0ea13d9f46@pocketdimensionstorage.replit.app/api/redis/instances/f26378c8b4faf9f237a0f816"
