@@ -158,7 +158,7 @@ All routes accessible via Express proxy at `/api/...`:
 ## Storage Server Credentials
 
 - **URL**: `https://pocketdimensionstorage.replit.app/api/redis/instances/f26378c8b4faf9f237a0f816/exec`
-- **Token**: `ed5ff25a3ad7b54d58f063190723df8b41f08b4a5b8bbc041f4cfa0ea13d9f46`
+- **Token**: `mbs_373a1368ba359b15860701559d3a7c8f91e04f3afc44577de0c8efa0430bb982`
 - **Exec format**: `{"cmd": "KEYS", "args": ["*"]}` (not `{"command": [...]}`)
 - **Session**: `sess-1773450967978` — 7TB (`7,696,581,394,432 bytes`), state: `pending`
 - Env vars: `STORAGE_HTTP_URL`, `STORAGE_BEARER_TOKEN`, `STORAGE_CONNECTION_URL`
