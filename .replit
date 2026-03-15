@@ -68,8 +68,8 @@ channel = "stable-25_05"
 [userenv]
 
 [userenv.shared]
-STORAGE_BEARER_TOKEN = "ed5ff25a3ad7b54d58f063190723df8b41f08b4a5b8bbc041f4cfa0ea13d9f46"
 STORAGE_INSTANCE = "max-booster-training"
 ADMIN_KEY = "mbs_8a3edbac97ff333dda5068410227267e6d85b14a4c9caee279fbb18ddfb47edc"
 STORAGE_HTTP_URL = "https://pocketdimensionstorage.replit.app/api/redis/instances/f26378c8b4faf9f237a0f816/exec"
-STORAGE_CONNECTION_URL = "pdim://ed5ff25a3ad7b54d58f063190723df8b41f08b4a5b8bbc041f4cfa0ea13d9f46@pocketdimensionstorage.replit.app/api/redis/instances/f26378c8b4faf9f237a0f816"
+STORAGE_CONNECTION_URL = "pdim://mbs_373a1368ba359b15860701559d3a7c8f91e04f3afc44577de0c8efa0430bb982@pocketdimensionstorage.replit.app/api/redis/instances/f26378c8b4faf9f237a0f816"
+STORAGE_BEARER_TOKEN = "mbs_373a1368ba359b15860701559d3a7c8f91e04f3afc44577de0c8efa0430bb982"
