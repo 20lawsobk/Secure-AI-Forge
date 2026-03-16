@@ -152,6 +152,7 @@ export default function ApiKeys() {
               <TableHead className="text-white">Name</TableHead>
               <TableHead className="text-white">Prefix</TableHead>
               <TableHead className="text-white">Scopes</TableHead>
+              <TableHead className="text-white">Requests</TableHead>
               <TableHead className="text-white">Created</TableHead>
               <TableHead className="text-white">Last Used</TableHead>
               <TableHead className="text-white text-right">Actions</TableHead>
@@ -164,6 +165,7 @@ export default function ApiKeys() {
                   <TableCell><Skeleton className="h-5 w-32 bg-white/5" /></TableCell>
                   <TableCell><Skeleton className="h-5 w-24 bg-white/5" /></TableCell>
                   <TableCell><Skeleton className="h-5 w-40 bg-white/5" /></TableCell>
+                  <TableCell><Skeleton className="h-5 w-16 bg-white/5" /></TableCell>
                   <TableCell><Skeleton className="h-5 w-24 bg-white/5" /></TableCell>
                   <TableCell><Skeleton className="h-5 w-24 bg-white/5" /></TableCell>
                   <TableCell><Skeleton className="h-8 w-20 bg-white/5 ml-auto" /></TableCell>
@@ -171,7 +173,7 @@ export default function ApiKeys() {
               ))
             ) : data?.keys.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={6} className="h-32 text-center text-muted-foreground">
+                <TableCell colSpan={7} className="h-32 text-center text-muted-foreground">
                   No API keys found. Create one to get started.
                 </TableCell>
               </TableRow>
@@ -188,6 +190,9 @@ export default function ApiKeys() {
                         </Badge>
                       ))}
                     </div>
+                  </TableCell>
+                  <TableCell className="text-muted-foreground text-sm font-mono">
+                    {(key as any).request_count != null ? ((key as any).request_count as number).toLocaleString() : "—"}
                   </TableCell>
                   <TableCell className="text-muted-foreground text-sm">
                     {format(new Date(key.created_at), "MMM d, yyyy")}

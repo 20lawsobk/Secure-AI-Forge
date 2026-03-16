@@ -5,8 +5,68 @@ const router: IRouter = Router();
 const MODEL_API_PORT = process.env.MODEL_API_PORT || "9878";
 const MODEL_API_BASE = `http://localhost:${MODEL_API_PORT}`;
 
+// ─── TTL Cache for hot read-only endpoints ─────────────────────────────────
+
+interface CacheEntry {
+  data: unknown;
+  status: number;
+  expiry: number;
+}
+
+const _cache = new Map<string, CacheEntry>();
+
+const CACHE_TTL_MS: Record<string, number> = {
+  "/dashboard/stats":           5_000,
+  "/health":                    8_000,
+  "/model/status":              8_000,
+  "/gpu/status":                6_000,
+  "/gpu/hyper/status":          6_000,
+  "/gpu/capabilities":         15_000,
+  "/storage/status":           10_000,
+  "/watchdog/status":          10_000,
+  "/training/continuous/status": 4_000,
+  "/training/puller/status":    8_000,
+  "/training/puller/sources":  30_000,
+};
+
+function getCached(path: string): CacheEntry | null {
+  const entry = _cache.get(path);
+  if (entry && entry.expiry > Date.now()) return entry;
+  _cache.delete(path);
+  return null;
+}
+
+function setCached(path: string, status: number, data: unknown): void {
+  const ttl = CACHE_TTL_MS[path];
+  if (ttl) _cache.set(path, { data, status, expiry: Date.now() + ttl });
+}
+
+// ─── Safe JSON parsing (handles non-JSON upstream error bodies) ─────────────
+
+async function parseResponseBody(response: globalThis.Response): Promise<unknown> {
+  const text = await response.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { error: "Upstream returned non-JSON", detail: text.slice(0, 300) };
+  }
+}
+
+// ─── Core proxy function ────────────────────────────────────────────────────
+
 async function proxyRequest(req: Request, res: Response, path: string) {
+  const isGet = req.method === "GET" || req.method === "HEAD";
   const startTime = Date.now();
+
+  // Serve from cache for cacheable GETs
+  if (isGet) {
+    const cached = getCached(path);
+    if (cached) {
+      res.setHeader("X-Cache", "HIT");
+      return res.status(cached.status).json(cached.data);
+    }
+  }
+
   try {
     const url = `${MODEL_API_BASE}${path}`;
 
@@ -14,22 +74,36 @@ async function proxyRequest(req: Request, res: Response, path: string) {
       method: req.method,
       headers: {
         "Content-Type": "application/json",
-        ...(req.headers["x-admin-key"] ? { "X-Admin-Key": req.headers["x-admin-key"] as string } : {}),
-        ...(req.headers["x-api-key"] ? { "X-Api-Key": req.headers["x-api-key"] as string } : {}),
+        ...(req.headers["x-admin-key"]
+          ? { "X-Admin-Key": req.headers["x-admin-key"] as string }
+          : {}),
+        ...(req.headers["x-api-key"]
+          ? { "X-Api-Key": req.headers["x-api-key"] as string }
+          : {}),
       },
     };
 
-    if (req.method !== "GET" && req.method !== "HEAD" && req.body) {
+    if (!isGet && req.body) {
       fetchOptions.body = JSON.stringify(req.body);
     }
 
     const response = await fetch(url, fetchOptions);
-    const data = await response.json();
+    const data = await parseResponseBody(response);
+
+    // Populate cache for successful GET responses
+    if (isGet && response.ok) {
+      setCached(path, response.status, data);
+    }
+
+    res.setHeader("X-Cache", "MISS");
     res.status(response.status).json(data);
   } catch (err) {
     const elapsed = Date.now() - startTime;
     console.error(`[Proxy] Error proxying to ${path} (${elapsed}ms):`, err);
-    if ((err as any).code === "ECONNREFUSED" || (err as any).cause?.code === "ECONNREFUSED") {
+    if (
+      (err as NodeJS.ErrnoException).code === "ECONNREFUSED" ||
+      (err as any).cause?.code === "ECONNREFUSED"
+    ) {
       res.status(503).json({
         error: "AI model server unavailable",
         detail: "The Python AI training server is not running or still initializing.",
@@ -39,6 +113,8 @@ async function proxyRequest(req: Request, res: Response, path: string) {
     }
   }
 }
+
+// ─── Routes ─────────────────────────────────────────────────────────────────
 
 router.get("/health", async (req, res) => {
   await proxyRequest(req, res, "/health");
@@ -133,7 +209,11 @@ router.post("/training/puller/pull", async (req, res) => {
 });
 
 router.post("/training/puller/start", async (req, res) => {
-  await proxyRequest(req, res, `/training/puller/start${req.query.interval_minutes ? `?interval_minutes=${req.query.interval_minutes}` : ""}`);
+  await proxyRequest(
+    req,
+    res,
+    `/training/puller/start${req.query.interval_minutes ? `?interval_minutes=${req.query.interval_minutes}` : ""}`,
+  );
 });
 
 router.post("/training/puller/stop", async (req, res) => {

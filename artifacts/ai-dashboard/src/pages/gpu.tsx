@@ -1,8 +1,23 @@
 import { useGetGpuStatus, useGetHyperGpuStatus } from "@workspace/api-client-react";
-import { Cpu, Server, Activity, ArrowUpRight } from "lucide-react";
+import { Cpu, Server, Activity, ArrowUpRight, Zap } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Progress } from "@/components/ui/progress";
 import { Card } from "@/components/ui/card";
+
+function formatOps(ops: number | undefined): string {
+  if (ops == null) return "—";
+  if (ops >= 1e12) return `${(ops / 1e12).toFixed(2)}T`;
+  if (ops >= 1e9) return `${(ops / 1e9).toFixed(2)}G`;
+  if (ops >= 1e6) return `${(ops / 1e6).toFixed(2)}M`;
+  return String(ops);
+}
+
+function formatUptime(seconds: number | undefined): string {
+  if (seconds == null) return "—";
+  if (seconds >= 3600) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+  if (seconds >= 60) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  return `${seconds}s`;
+}
 
 export default function GpuStatus() {
   const { data: gpu, isLoading: gpuLoading } = useGetGpuStatus();
@@ -32,7 +47,7 @@ export default function GpuStatus() {
               {gpu?.available ? 'Online' : 'Offline'}
             </div>
           </div>
-          
+
           <div className="p-6 space-y-6">
             {gpuLoading ? (
               <Skeleton className="h-32 w-full bg-white/5" />
@@ -45,7 +60,7 @@ export default function GpuStatus() {
                   </div>
                   <Progress value={gpu?.utilization || 0} className="h-2 bg-white/5 [&>div]:bg-blue-500" />
                 </div>
-                
+
                 <div className="grid grid-cols-2 gap-4">
                   <div className="bg-black/30 p-4 rounded-xl">
                     <p className="text-xs text-muted-foreground">SIMD Lanes</p>
@@ -56,6 +71,25 @@ export default function GpuStatus() {
                     <p className="text-xl font-mono text-white mt-1">{gpu?.vram_mb || 0} MB</p>
                   </div>
                 </div>
+
+                {(gpu?.total_ops != null || gpu?.uptime_s != null) && (
+                  <div className="grid grid-cols-2 gap-4 pt-2 border-t border-white/5">
+                    {gpu?.total_ops != null && (
+                      <div className="bg-black/20 p-3 rounded-xl">
+                        <p className="text-xs text-muted-foreground flex items-center gap-1">
+                          <Zap className="w-3 h-3" /> Total Ops
+                        </p>
+                        <p className="text-lg font-mono text-white mt-1">{formatOps(gpu.total_ops)}</p>
+                      </div>
+                    )}
+                    {gpu?.uptime_s != null && (
+                      <div className="bg-black/20 p-3 rounded-xl">
+                        <p className="text-xs text-muted-foreground">Uptime</p>
+                        <p className="text-lg font-mono text-white mt-1">{formatUptime(gpu.uptime_s)}</p>
+                      </div>
+                    )}
+                  </div>
+                )}
               </>
             )}
           </div>
@@ -64,7 +98,7 @@ export default function GpuStatus() {
         {/* Hyper GPU Card */}
         <Card className="glass-panel border-white/10 overflow-hidden relative">
           <div className="absolute top-0 right-0 p-32 bg-primary/10 blur-[100px] pointer-events-none rounded-full" />
-          
+
           <div className="p-6 border-b border-white/5 bg-white/5 flex justify-between items-center relative z-10">
             <div className="flex items-center gap-3">
               <div className="p-2 bg-primary/20 rounded-lg">
@@ -79,7 +113,7 @@ export default function GpuStatus() {
               <Activity className="w-3 h-3" /> Active
             </div>
           </div>
-          
+
           <div className="p-6 space-y-6 relative z-10">
             {hyperLoading ? (
               <Skeleton className="h-48 w-full bg-white/5" />
@@ -99,7 +133,7 @@ export default function GpuStatus() {
                     </p>
                   </div>
                 </div>
-                
+
                 <div className="grid grid-cols-3 gap-2">
                   <div className="bg-black/30 p-3 rounded-lg border border-white/5">
                     <p className="text-[10px] uppercase text-muted-foreground">Lanes</p>
@@ -114,8 +148,27 @@ export default function GpuStatus() {
                     <p className="text-sm font-mono text-primary-foreground mt-1">{hyper?.precision}</p>
                   </div>
                 </div>
-                
-                <div className="pt-4 border-t border-white/5 flex items-center justify-between text-xs text-muted-foreground">
+
+                {(hyper?.total_ops != null || hyper?.uptime_s != null) && (
+                  <div className="grid grid-cols-2 gap-3 pt-2 border-t border-white/5">
+                    {hyper?.total_ops != null && (
+                      <div className="bg-black/20 p-3 rounded-lg border border-white/5">
+                        <p className="text-[10px] uppercase text-muted-foreground flex items-center gap-1">
+                          <Zap className="w-3 h-3" /> Total Ops
+                        </p>
+                        <p className="text-sm font-mono text-white mt-1">{formatOps(hyper.total_ops)}</p>
+                      </div>
+                    )}
+                    {hyper?.uptime_s != null && (
+                      <div className="bg-black/20 p-3 rounded-lg border border-white/5">
+                        <p className="text-[10px] uppercase text-muted-foreground">Uptime</p>
+                        <p className="text-sm font-mono text-white mt-1">{formatUptime(hyper.uptime_s)}</p>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="pt-2 border-t border-white/5 flex items-center justify-between text-xs text-muted-foreground">
                   <span>Engine: {hyper?.engine}</span>
                   <span className="flex items-center gap-1 text-primary-foreground cursor-pointer hover:text-primary transition-colors">
                     View Architecture <ArrowUpRight className="w-3 h-3" />

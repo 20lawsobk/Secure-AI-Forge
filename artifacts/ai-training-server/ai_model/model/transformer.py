@@ -133,6 +133,10 @@ class TransformerLM(nn.Module):
         self.register_buffer("rope_cos", rope_cos)
         self.register_buffer("rope_sin", rope_sin)
 
+        # Pre-compute causal mask once — sliced to [T,T] on each forward pass
+        causal_mask = torch.triu(torch.full((max_len, max_len), float('-inf')), diagonal=1)
+        self.register_buffer("causal_mask", causal_mask)
+
         self._init_weights(n_layers)
 
     def _init_weights(self, n_layers: int):
@@ -157,9 +161,8 @@ class TransformerLM(nn.Module):
 
         h = self.emb_dropout(self.token_emb(x))
 
-        # Causal attention mask
-        mask = torch.full((T, T), float('-inf'), device=x.device)
-        mask = torch.triu(mask, diagonal=1)
+        # Slice pre-computed causal mask — no recomputation per forward pass
+        mask = self.causal_mask[:T, :T]
 
         cos = self.rope_cos[:T]
         sin = self.rope_sin[:T]

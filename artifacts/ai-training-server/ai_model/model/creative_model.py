@@ -9,7 +9,7 @@ class CreativeModel:
     """
     Wrapper around TransformerLM that provides:
     - Nucleus (top-p) + top-k sampling with temperature
-    - Repetition penalty
+    - Repetition penalty (vectorized)
     - Beam search (contrastive decoding)
     - Min/max length control
     """
@@ -34,6 +34,26 @@ class CreativeModel:
             new_head.weight = new_emb.weight
             self.model.head = new_head
 
+    def _apply_repetition_penalty(
+        self,
+        logits: torch.Tensor,
+        token_window: list[int],
+        penalty: float,
+        special_ids: tuple[int, ...],
+    ) -> torch.Tensor:
+        """
+        Vectorized repetition penalty — replaces the Python loop with a
+        single scatter operation. Logits shape: [1, vocab].
+        """
+        seen_ids = [t for t in set(token_window) if t not in special_ids]
+        if not seen_ids:
+            return logits
+        idx = torch.tensor(seen_ids, device=self.device, dtype=torch.long)
+        lv = logits[0, idx]
+        penalized = torch.where(lv > 0, lv / penalty, lv * penalty)
+        logits[0, idx] = penalized
+        return logits
+
     # ── Sampling generation ───────────────────────────────────────────────────
 
     def generate(
@@ -55,6 +75,7 @@ class CreativeModel:
         eos_id = self.tokenizer.token_to_id("<EOS>")
         pad_id = self.tokenizer.token_to_id("<PAD>")
         unk_id = self.tokenizer.token_to_id("<UNK>")
+        special_ids = (pad_id, unk_id, eos_id)
         max_ctx = getattr(self.model, 'max_len', 1024)
 
         generated_ids: list[int] = []
@@ -70,15 +91,11 @@ class CreativeModel:
                 if step < min_length:
                     next_logits[:, eos_id] = float('-inf')
 
-                # Repetition penalty (token-level, not sequence-level)
+                # Vectorized repetition penalty
                 if generated_ids:
-                    seen = set(generated_ids[-64:])  # window of last 64 tokens
-                    for token_id in seen:
-                        if token_id not in (pad_id, unk_id, eos_id):
-                            lv = next_logits[0, token_id]
-                            next_logits[0, token_id] = (
-                                lv / repetition_penalty if lv > 0 else lv * repetition_penalty
-                            )
+                    next_logits = self._apply_repetition_penalty(
+                        next_logits, generated_ids[-64:], repetition_penalty, special_ids
+                    )
 
                 # Temperature scaling
                 next_logits = next_logits / max(temperature, 1e-8)
@@ -133,6 +150,7 @@ class CreativeModel:
         eos_id = self.tokenizer.token_to_id("<EOS>")
         pad_id = self.tokenizer.token_to_id("<PAD>")
         unk_id = self.tokenizer.token_to_id("<UNK>")
+        special_ids = (pad_id, unk_id, eos_id)
         max_ctx = getattr(self.model, 'max_len', 1024)
         vocab_size = self.model.token_emb.num_embeddings
 
@@ -153,26 +171,23 @@ class CreativeModel:
 
                     x = torch.tensor([beam_ids[-max_ctx:]], device=self.device)
                     logits = self.model(x)
-                    next_logits = logits[0, -1, :].clone()
+                    next_logits = logits[0, -1, :].clone().unsqueeze(0)
 
                     # Suppress specials
-                    next_logits[pad_id] = float('-inf')
-                    next_logits[unk_id] = float('-inf')
+                    next_logits[0, pad_id] = float('-inf')
+                    next_logits[0, unk_id] = float('-inf')
                     if len(beam_ids) - len(ids) < min_length:
-                        next_logits[eos_id] = float('-inf')
+                        next_logits[0, eos_id] = float('-inf')
 
-                    # Repetition penalty
-                    seen = set(beam_ids[-64:])
-                    for tid in seen:
-                        if tid not in (pad_id, unk_id, eos_id):
-                            lv = next_logits[tid]
-                            next_logits[tid] = lv / repetition_penalty if lv > 0 else lv * repetition_penalty
+                    # Vectorized repetition penalty
+                    next_logits = self._apply_repetition_penalty(
+                        next_logits, beam_ids[-64:], repetition_penalty, special_ids
+                    )
 
                     if temperature != 1.0:
                         next_logits = next_logits / max(temperature, 1e-8)
 
-                    log_probs = F.log_softmax(next_logits, dim=-1)
-                    # Take top-k tokens to expand
+                    log_probs = F.log_softmax(next_logits[0], dim=-1)
                     topk = min(num_beams * 2, vocab_size)
                     top_vals, top_idxs = torch.topk(log_probs, topk)
 
@@ -184,16 +199,10 @@ class CreativeModel:
                 if not all_candidates:
                     break
 
-                # Apply length penalty and keep top beams
-                def normalized_score(s: float, ids: list) -> float:
-                    gen_len = len(ids) - len(ids) + 1  # relative length
-                    return s / (max(1, len(ids)) ** length_penalty)
-
                 all_candidates.sort(key=lambda c: c[0] / max(1, len(c[1])) ** length_penalty,
                                     reverse=True)
                 beams = all_candidates[:num_beams]
 
-            # Add remaining beams to completed
             completed.extend(beams)
 
         if not completed:
@@ -219,8 +228,6 @@ class CreativeModel:
         under a smaller/amateur model (simulated by a shallower forward pass).
         Falls back to nucleus sampling when contrastive signal is weak.
         """
-        # For simplicity without a separate smaller model, use top-k with
-        # an anti-repetition contrastive score based on recent context.
         return self.generate(
             prompt,
             max_new_tokens=max_new_tokens,
