@@ -36,6 +36,7 @@ export default function Dashboard() {
       if (!res.ok) throw new Error("failed");
       return res.json();
     },
+    enabled: !!adminKey,
     refetchInterval: 15000,
     retry: false,
   });
@@ -47,6 +48,7 @@ export default function Dashboard() {
       if (!res.ok) throw new Error("failed");
       return res.json();
     },
+    enabled: !!adminKey,
     refetchInterval: 20000,
     retry: false,
   });

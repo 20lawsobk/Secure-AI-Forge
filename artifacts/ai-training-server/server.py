@@ -45,7 +45,14 @@ def _get_db_pool() -> psycopg2.pool.ThreadedConnectionPool:
         with _db_pool_lock:
             if _db_pool is None:
                 _db_pool = psycopg2.pool.ThreadedConnectionPool(
-                    minconn=1, maxconn=10, dsn=DATABASE_URL
+                    minconn=2,
+                    maxconn=15,
+                    dsn=DATABASE_URL,
+                    # Keep connections alive across long idle periods
+                    keepalives=1,
+                    keepalives_idle=30,
+                    keepalives_interval=5,
+                    keepalives_count=5,
                 )
     return _db_pool
 
@@ -596,10 +603,15 @@ _start_time = time.time()
 @app.get("/api-keys")
 async def list_api_keys(_admin = Depends(verify_admin)):
     conn = _acquire()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute("SELECT id, name, prefix, scopes, is_active, request_count, created_at, last_used_at, expires_at FROM api_keys ORDER BY created_at DESC")
-    rows = cur.fetchall()
-    cur.close(); _release(conn)
+    try:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT id, name, prefix, scopes, is_active, request_count, created_at, last_used_at, expires_at FROM api_keys ORDER BY created_at DESC")
+        rows = cur.fetchall()
+        cur.close()
+    except Exception:
+        _release(conn, error=True)
+        raise
+    _release(conn)
     keys = []
     for r in rows:
         keys.append({
@@ -626,15 +638,20 @@ async def create_api_key(req: CreateApiKeyRequest, _admin = Depends(verify_admin
         expires_at = datetime.now(timezone.utc) + timedelta(days=req.expires_in_days)
 
     conn = _acquire()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute(
-        """INSERT INTO api_keys (name, key_hash, prefix, scopes, expires_at)
-           VALUES (%s, %s, %s, %s, %s) RETURNING id, name, prefix, scopes, created_at""",
-        (req.name, key_hash, prefix, req.scopes, expires_at)
-    )
-    row = cur.fetchone()
-    conn.commit()
-    cur.close(); _release(conn)
+    try:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute(
+            """INSERT INTO api_keys (name, key_hash, prefix, scopes, expires_at)
+               VALUES (%s, %s, %s, %s, %s) RETURNING id, name, prefix, scopes, created_at""",
+            (req.name, key_hash, prefix, req.scopes, expires_at)
+        )
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+    except Exception:
+        _release(conn, error=True)
+        raise
+    _release(conn)
 
     return {
         "id": str(row["id"]),
@@ -648,11 +665,16 @@ async def create_api_key(req: CreateApiKeyRequest, _admin = Depends(verify_admin
 @app.delete("/api-keys/{key_id}")
 async def revoke_api_key(key_id: str, _admin = Depends(verify_admin)):
     conn = _acquire()
-    cur = conn.cursor()
-    cur.execute("UPDATE api_keys SET is_active = FALSE WHERE id = %s", (key_id,))
-    affected = cur.rowcount
-    conn.commit()
-    cur.close(); _release(conn)
+    try:
+        cur = conn.cursor()
+        cur.execute("UPDATE api_keys SET is_active = FALSE WHERE id = %s", (key_id,))
+        affected = cur.rowcount
+        conn.commit()
+        cur.close()
+    except Exception:
+        _release(conn, error=True)
+        raise
+    _release(conn)
     if affected == 0:
         raise HTTPException(status_code=404, detail="API key not found")
     return {"success": True, "message": f"API key {key_id} revoked"}
@@ -664,15 +686,20 @@ async def rotate_api_key(key_id: str, _admin = Depends(verify_admin)):
     prefix = raw_key[:12]
 
     conn = _acquire()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute(
-        """UPDATE api_keys SET key_hash = %s, prefix = %s, request_count = 0, last_used_at = NULL
-           WHERE id = %s RETURNING id, name, scopes, created_at""",
-        (key_hash, prefix, key_id)
-    )
-    row = cur.fetchone()
-    conn.commit()
-    cur.close(); _release(conn)
+    try:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute(
+            """UPDATE api_keys SET key_hash = %s, prefix = %s, request_count = 0, last_used_at = NULL
+               WHERE id = %s RETURNING id, name, scopes, created_at""",
+            (key_hash, prefix, key_id)
+        )
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+    except Exception:
+        _release(conn, error=True)
+        raise
+    _release(conn)
     if not row:
         raise HTTPException(status_code=404, detail="API key not found")
     return {
@@ -765,17 +792,24 @@ async def get_training_status():
 @app.post("/training/start")
 async def start_training(req: StartTrainingRequest, background_tasks: BackgroundTasks,
                          _key = Depends(require_scope("train"))):
-    with _training_lock:
-        if _training_state["state"] == "running":
-            return {"success": False, "message": "Training already in progress", "job_id": _training_state.get("job_id")}
-
     job_id = str(uuid.uuid4())[:8]
     with _training_lock:
+        # Guard both "running" and "starting" to prevent double-start race
+        if _training_state["state"] in ("running", "starting"):
+            return {"success": False, "message": "Training already in progress",
+                    "job_id": _training_state.get("job_id")}
+        # Atomically claim the slot and reset all volatile fields
         _training_state["state"] = "starting"
         _training_state["job_id"] = job_id
         _training_state["epoch"] = 0
         _training_state["total_epochs"] = req.epochs
         _training_state["started_at"] = time.time()
+        _training_state["stop_requested"] = False   # ← always clear before new run
+        _training_state["loss"] = None
+        _training_state["perplexity"] = None
+        _training_state["eta_seconds"] = None
+        _training_state["first_loss"] = None
+        _training_state["elapsed_seconds"] = 0
 
     background_tasks.add_task(_run_training, req, job_id)
     return {"success": True, "message": f"Training job {job_id} started", "job_id": job_id}
@@ -854,7 +888,9 @@ def _run_training(req: StartTrainingRequest, job_id: str):
                 if loss is not None and (_training_state.get("best_loss") is None or loss < _training_state["best_loss"]):
                     _training_state["best_loss"] = loss
 
-            log_training(f"Epoch {epoch+1}/{req.epochs} complete. Loss: {loss:.4f}, PPL: {ppl:.2f}",
+            loss_str = f"{loss:.4f}" if loss is not None else "N/A"
+            ppl_str  = f"{ppl:.2f}"  if ppl  is not None else "N/A"
+            log_training(f"Epoch {epoch+1}/{req.epochs} complete. Loss: {loss_str}, PPL: {ppl_str}",
                         epoch=epoch+1, loss=loss, job_id=job_id)
 
         weights_dir = Path(__file__).parent / "ai_model" / "weights"
@@ -888,13 +924,18 @@ async def get_training_logs(limit: int = 50):
     if not DATABASE_URL:
         return {"logs": [], "total": 0}
     conn = _acquire()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute(
-        "SELECT timestamp, level, message, epoch, loss, job_id FROM training_logs ORDER BY timestamp DESC LIMIT %s",
-        (limit,)
-    )
-    rows = cur.fetchall()
-    cur.close(); _release(conn)
+    try:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute(
+            "SELECT timestamp, level, message, epoch, loss, job_id FROM training_logs ORDER BY timestamp DESC LIMIT %s",
+            (limit,)
+        )
+        rows = cur.fetchall()
+        cur.close()
+    except Exception:
+        _release(conn, error=True)
+        raise
+    _release(conn)
     logs = []
     for r in rows:
         logs.append({

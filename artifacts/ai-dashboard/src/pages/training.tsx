@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { useGetTrainingStatus, useGetTrainingLogs, useStartTraining } from "@workspace/api-client-react";
+import { useGetTrainingStatus, useGetTrainingLogs } from "@workspace/api-client-react";
 import { format } from "date-fns";
 import { Play, Square, Terminal, Zap, RefreshCw, Database, Clock, RotateCcw } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
@@ -37,7 +37,16 @@ export default function Training() {
     query: { refetchInterval: () => isRunning(status?.state) ? 3000 : 10000 },
   });
 
-  const startMut = useStartTraining();
+  const startMut = useMutation({
+    mutationFn: () =>
+      apiFetch("/training/start", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ epochs: 10, batch_size: 8, learning_rate: 0.0005 }),
+      }),
+    onSuccess: () => { toast({ title: "Training started successfully" }); refetchStatus(); },
+    onError: () => toast({ variant: "destructive", title: "Failed to start training" }),
+  });
 
   const stopMut = useMutation({
     mutationFn: () => apiFetch("/training/stop", { method: "POST", headers }),
@@ -47,8 +56,9 @@ export default function Training() {
 
   // ── Continuous Training ──
   const { data: contStatus, refetch: refetchCont } = useQuery({
-    queryKey: ["continuous-status"],
+    queryKey: ["continuous-status", adminKey],
     queryFn: () => apiFetch("/training/continuous/status", { headers }),
+    enabled: !!adminKey,
     refetchInterval: 8000,
   });
 
@@ -66,8 +76,9 @@ export default function Training() {
 
   // ── Data Puller ──
   const { data: pullerStatus, refetch: refetchPuller } = useQuery({
-    queryKey: ["puller-status"],
+    queryKey: ["puller-status", adminKey],
     queryFn: () => apiFetch("/training/puller/status", { headers }),
+    enabled: !!adminKey,
     refetchInterval: 10000,
   });
 
@@ -77,15 +88,7 @@ export default function Training() {
     onError: () => toast({ variant: "destructive", title: "Pull failed" }),
   });
 
-  const handleStart = async () => {
-    try {
-      await startMut.mutateAsync({ data: { epochs: 10, batch_size: 8, learning_rate: 0.0005 } });
-      toast({ title: "Training started successfully" });
-      refetchStatus();
-    } catch {
-      toast({ variant: "destructive", title: "Failed to start training" });
-    }
-  };
+  const handleStart = () => startMut.mutate();
 
   const progress = status?.total_epochs && status?.epoch
     ? (status.epoch / status.total_epochs) * 100

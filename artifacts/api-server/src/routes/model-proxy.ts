@@ -70,8 +70,12 @@ async function proxyRequest(req: Request, res: Response, path: string) {
   try {
     const url = `${MODEL_API_BASE}${path}`;
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 45_000);
+
     const fetchOptions: RequestInit = {
       method: req.method,
+      signal: controller.signal,
       headers: {
         "Content-Type": "application/json",
         ...(req.headers["x-admin-key"]
@@ -87,7 +91,12 @@ async function proxyRequest(req: Request, res: Response, path: string) {
       fetchOptions.body = JSON.stringify(req.body);
     }
 
-    const response = await fetch(url, fetchOptions);
+    let response: globalThis.Response;
+    try {
+      response = await fetch(url, fetchOptions);
+    } finally {
+      clearTimeout(timeoutId);
+    }
     const data = await parseResponseBody(response);
 
     // Populate cache for successful GET responses
@@ -100,9 +109,15 @@ async function proxyRequest(req: Request, res: Response, path: string) {
   } catch (err) {
     const elapsed = Date.now() - startTime;
     console.error(`[Proxy] Error proxying to ${path} (${elapsed}ms):`, err);
-    if (
-      (err as NodeJS.ErrnoException).code === "ECONNREFUSED" ||
-      (err as any).cause?.code === "ECONNREFUSED"
+    const e = err as any;
+    if (e.name === "AbortError" || e.code === "ABORT_ERR") {
+      res.status(504).json({
+        error: "Upstream timeout",
+        detail: `AI training server did not respond within 45 s.`,
+      });
+    } else if (
+      (e as NodeJS.ErrnoException).code === "ECONNREFUSED" ||
+      e.cause?.code === "ECONNREFUSED"
     ) {
       res.status(503).json({
         error: "AI model server unavailable",

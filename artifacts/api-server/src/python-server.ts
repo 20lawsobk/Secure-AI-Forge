@@ -12,6 +12,11 @@ const RETRY_DELAY_MS = 3000;
 
 let pythonProcess: ChildProcess | null = null;
 let retries = 0;
+let lastStartTime = 0;
+
+// If the server ran successfully for at least this long, reset the retry counter
+// so transient long-running crashes don't exhaust the retry budget permanently.
+const MIN_HEALTHY_RUN_MS = 60_000;
 
 function waitForPort(port: number, timeout = 30000): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -40,6 +45,7 @@ function waitForPort(port: number, timeout = 30000): Promise<void> {
 
 function startPythonServer() {
   console.log(`[Python] Starting AI training server (port ${PYTHON_PORT})...`);
+  lastStartTime = Date.now();
 
   pythonProcess = spawn("python3", [PYTHON_SCRIPT], {
     env: {
@@ -63,6 +69,12 @@ function startPythonServer() {
     if (signal === "SIGTERM" || signal === "SIGINT") {
       console.log("[Python] Server shut down gracefully.");
       return;
+    }
+    // If the server was healthy for a sustained period, treat it as a fresh start
+    const uptime = Date.now() - lastStartTime;
+    if (uptime >= MIN_HEALTHY_RUN_MS) {
+      console.log(`[Python] Server ran for ${Math.round(uptime / 1000)}s — resetting retry counter.`);
+      retries = 0;
     }
     retries++;
     if (retries <= MAX_RETRIES) {
