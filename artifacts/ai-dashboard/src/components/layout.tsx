@@ -12,6 +12,7 @@ import {
   ChevronRight
 } from "lucide-react";
 import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "framer-motion";
 import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
@@ -40,6 +41,19 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const { adminKey, setAdminKey, clearAdminKey } = useAuth();
   const [isAuthDialogOpen, setIsAuthDialogOpen] = useState(!adminKey);
   const [keyInput, setKeyInput] = useState("");
+
+  const { data: health } = useQuery({
+    queryKey: ["health"],
+    queryFn: async () => {
+      const res = await fetch("/api/health");
+      if (!res.ok) return null;
+      return res.json();
+    },
+    refetchInterval: 60000,
+    staleTime: 30000,
+  });
+
+  const serverVersion = health?.version ?? "…";
 
   const handleSaveKey = () => {
     setAdminKey(keyInput);
@@ -138,7 +152,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
           <div className="flex items-center gap-3">
             <div className="hidden md:flex items-center gap-2 text-xs font-medium text-muted-foreground bg-secondary/50 px-3 py-1.5 rounded-full border border-border">
               <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
-              v1.0.0 Server Active
+              v{serverVersion} Server Active
             </div>
           </div>
         </header>

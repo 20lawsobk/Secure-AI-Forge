@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { useGenerateContent } from "@workspace/api-client-react";
+import { useMutation } from "@tanstack/react-query";
+import { useAuth } from "@/hooks/use-auth";
 import { PenTool, Check, Copy, Sparkles, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,10 +10,31 @@ import { Card } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
 import { motion, AnimatePresence } from "framer-motion";
 
+const BASE = "/api";
+
 export default function ContentGenerator() {
   const { toast } = useToast();
-  const generateMut = useGenerateContent();
-  
+  const { adminKey } = useAuth();
+
+  const generateMut = useMutation({
+    mutationFn: async (body: {
+      platform: string; topic: string; tone: string; goal: string; include_hashtags: boolean;
+    }) => {
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (adminKey) headers["X-Admin-Key"] = adminKey;
+      const res = await fetch(`${BASE}/content/generate`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `Request failed: ${res.status}`);
+      }
+      return res.json();
+    },
+  });
+
   const [platform, setPlatform] = useState("tiktok");
   const [topic, setTopic] = useState("");
   const [tone, setTone] = useState("energetic");
@@ -25,12 +47,10 @@ export default function ContentGenerator() {
     }
     
     try {
-      await generateMut.mutateAsync({
-        data: { platform, topic, tone, goal, include_hashtags: true }
-      });
+      await generateMut.mutateAsync({ platform, topic, tone, goal, include_hashtags: true });
       toast({ title: "Content generated!" });
-    } catch (e) {
-      toast({ title: "Generation failed", variant: "destructive" });
+    } catch (e: any) {
+      toast({ title: "Generation failed", description: e?.message, variant: "destructive" });
     }
   };
 

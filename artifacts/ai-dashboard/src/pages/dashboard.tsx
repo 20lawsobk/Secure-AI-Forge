@@ -30,7 +30,7 @@ export default function Dashboard() {
   });
 
   const { data: storageStatus } = useQuery({
-    queryKey: ["storage-status"],
+    queryKey: ["storage-status", adminKey],
     queryFn: async () => {
       const res = await fetch(`${BASE}/storage/status`, { headers: authHdr });
       if (!res.ok) throw new Error("failed");
@@ -41,7 +41,7 @@ export default function Dashboard() {
   });
 
   const { data: watchdog } = useQuery({
-    queryKey: ["watchdog-status"],
+    queryKey: ["watchdog-status", adminKey],
     queryFn: async () => {
       const res = await fetch(`${BASE}/watchdog/status`, { headers: authHdr });
       if (!res.ok) throw new Error("failed");

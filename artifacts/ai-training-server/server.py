@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Optional, List
 
 import psycopg2
+import psycopg2.pool
 from psycopg2.extras import RealDictCursor
 from fastapi import FastAPI, HTTPException, Depends, Header, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,16 +36,40 @@ from pydantic import BaseModel, Field
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
+_db_pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
+_db_pool_lock = threading.Lock()
+
+def _get_db_pool() -> psycopg2.pool.ThreadedConnectionPool:
+    global _db_pool
+    if _db_pool is None:
+        with _db_pool_lock:
+            if _db_pool is None:
+                _db_pool = psycopg2.pool.ThreadedConnectionPool(
+                    minconn=1, maxconn=10, dsn=DATABASE_URL
+                )
+    return _db_pool
+
+def _acquire() -> psycopg2.extensions.connection:
+    return _get_db_pool().getconn()
+
+def _release(conn, error: bool = False):
+    try:
+        if error:
+            conn.rollback()
+        _get_db_pool().putconn(conn)
+    except Exception:
+        pass
+
 def get_db():
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = _acquire()
     try:
         yield conn
     finally:
-        conn.close()
+        _release(conn)
 
 def init_db():
     """Initialize database tables."""
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = _acquire()
     cur = conn.cursor()
 
     cur.execute("""
@@ -98,21 +123,19 @@ def init_db():
                VALUES (%s, %s, %s, %s, TRUE)""",
             ("Default Admin Key", key_hash, prefix, ["read", "write", "train", "admin", "generate"])
         )
-        # Write admin key to a file for first-time access
-        key_file = Path(__file__).parent / "admin_key.txt"
-        with open(key_file, "w") as f:
-            f.write(f"ADMIN API KEY (save this - shown only once):\n{admin_key}\n")
-        print(f"[Server] Default admin key created. Key saved to admin_key.txt")
+        # Print admin key once to stdout — do not persist to disk
+        print(f"[Server] *** DEFAULT ADMIN KEY (copy now — not stored) ***")
+        print(f"[Server] {admin_key}")
         print(f"[Server] Admin key prefix: {prefix}...")
 
     conn.commit()
     cur.close()
-    conn.close()
+    _release(conn)
 
 def log_training(message: str, level: str = "info", epoch: int = None,
                  loss: float = None, job_id: str = None):
     try:
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = _acquire()
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO training_logs (level, message, epoch, loss, job_id) VALUES (%s, %s, %s, %s, %s)",
@@ -120,7 +143,7 @@ def log_training(message: str, level: str = "info", epoch: int = None,
         )
         conn.commit()
         cur.close()
-        conn.close()
+        _release(conn)
     except Exception as e:
         print(f"[Server] Failed to log training: {e}")
 
@@ -184,6 +207,7 @@ _repo = None
 _adapter = None
 _render_manager = None
 _hyper_backend = None
+_digital_gpu_backend = None
 _model_config = {}
 
 _model_lock = threading.Lock()
@@ -298,8 +322,9 @@ def verify_api_key(x_api_key: str = Header(None), x_admin_key: str = Header(None
         return {"id": "env-admin", "scopes": ["read", "write", "train", "admin", "generate"]}
 
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    conn = None
     try:
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = _acquire()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute(
             "SELECT * FROM api_keys WHERE key_hash = %s AND is_active = TRUE",
@@ -307,12 +332,14 @@ def verify_api_key(x_api_key: str = Header(None), x_admin_key: str = Header(None
         )
         key_record = cur.fetchone()
         if not key_record:
-            cur.close(); conn.close()
+            cur.close()
+            _release(conn)
             raise HTTPException(status_code=401, detail="Invalid or inactive API key")
 
         expires_at = key_record["expires_at"]
         if expires_at and expires_at < datetime.now(timezone.utc):
-            cur.close(); conn.close()
+            cur.close()
+            _release(conn)
             raise HTTPException(status_code=401, detail="API key expired")
 
         cur.execute(
@@ -321,11 +348,15 @@ def verify_api_key(x_api_key: str = Header(None), x_admin_key: str = Header(None
         )
         conn.commit()
         cur.close()
-        conn.close()
+        _release(conn)
         return dict(key_record)
     except HTTPException:
+        if conn:
+            _release(conn)
         raise
     except Exception as e:
+        if conn:
+            _release(conn, error=True)
         raise HTTPException(status_code=500, detail=f"Auth error: {e}")
 
 def require_scope(scope: str):
@@ -348,15 +379,18 @@ def verify_admin(x_admin_key: str = Header(None)):
         return {"id": "env-admin", "scopes": ["admin"]}
 
     key_hash = hashlib.sha256(x_admin_key.encode()).hexdigest()
+    conn = None
     try:
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = _acquire()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute(
             "SELECT * FROM api_keys WHERE key_hash = %s AND is_active = TRUE",
             (key_hash,)
         )
         key_record = cur.fetchone()
-        cur.close(); conn.close()
+        cur.close()
+        _release(conn)
+        conn = None
         if not key_record:
             raise HTTPException(status_code=401, detail="Invalid admin key")
         scopes = key_record["scopes"] or []
@@ -364,8 +398,12 @@ def verify_admin(x_admin_key: str = Header(None)):
             raise HTTPException(status_code=403, detail="Admin scope required")
         return dict(key_record)
     except HTTPException:
+        if conn:
+            _release(conn)
         raise
     except Exception as e:
+        if conn:
+            _release(conn, error=True)
         raise HTTPException(status_code=500, detail=f"Auth error: {e}")
 
 # ─── Pydantic Schemas ────────────────────────────────────────────────────────
@@ -484,13 +522,16 @@ def _training_bridge(texts: list, epochs: int, phase_label: str,
 
     final_loss = result.get("final_loss", 999)
 
-    # Save checkpoint
+    # Save checkpoint (include tokenizer vocab so _init_ai_model can restore it)
     weights_dir = Path(__file__).parent / "ai_model" / "weights"
     weights_dir.mkdir(exist_ok=True)
     import torch, numpy as np
     torch.save({
         "model_state_dict": _creative_model.model.state_dict(),
-        "_model_config": _model_config,
+        "vocab": _tokenizer.vocab,
+        "inv_vocab": _tokenizer.inv_vocab,
+        "next_id": _tokenizer.next_id,
+        "config": _model_config,
     }, str(weights_dir / "model.pt"))
     np_weights = {k: v.cpu().numpy() for k, v in _creative_model.model.state_dict().items()}
     np.savez_compressed(str(weights_dir / "weights_v4.npz"), **np_weights)
@@ -554,11 +595,11 @@ _start_time = time.time()
 
 @app.get("/api-keys")
 async def list_api_keys(_admin = Depends(verify_admin)):
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = _acquire()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     cur.execute("SELECT id, name, prefix, scopes, is_active, request_count, created_at, last_used_at, expires_at FROM api_keys ORDER BY created_at DESC")
     rows = cur.fetchall()
-    cur.close(); conn.close()
+    cur.close(); _release(conn)
     keys = []
     for r in rows:
         keys.append({
@@ -584,7 +625,7 @@ async def create_api_key(req: CreateApiKeyRequest, _admin = Depends(verify_admin
     if req.expires_in_days:
         expires_at = datetime.now(timezone.utc) + timedelta(days=req.expires_in_days)
 
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = _acquire()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     cur.execute(
         """INSERT INTO api_keys (name, key_hash, prefix, scopes, expires_at)
@@ -593,7 +634,7 @@ async def create_api_key(req: CreateApiKeyRequest, _admin = Depends(verify_admin
     )
     row = cur.fetchone()
     conn.commit()
-    cur.close(); conn.close()
+    cur.close(); _release(conn)
 
     return {
         "id": str(row["id"]),
@@ -606,12 +647,12 @@ async def create_api_key(req: CreateApiKeyRequest, _admin = Depends(verify_admin
 
 @app.delete("/api-keys/{key_id}")
 async def revoke_api_key(key_id: str, _admin = Depends(verify_admin)):
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = _acquire()
     cur = conn.cursor()
     cur.execute("UPDATE api_keys SET is_active = FALSE WHERE id = %s", (key_id,))
     affected = cur.rowcount
     conn.commit()
-    cur.close(); conn.close()
+    cur.close(); _release(conn)
     if affected == 0:
         raise HTTPException(status_code=404, detail="API key not found")
     return {"success": True, "message": f"API key {key_id} revoked"}
@@ -622,7 +663,7 @@ async def rotate_api_key(key_id: str, _admin = Depends(verify_admin)):
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
     prefix = raw_key[:12]
 
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = _acquire()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     cur.execute(
         """UPDATE api_keys SET key_hash = %s, prefix = %s, request_count = 0, last_used_at = NULL
@@ -631,7 +672,7 @@ async def rotate_api_key(key_id: str, _admin = Depends(verify_admin)):
     )
     row = cur.fetchone()
     conn.commit()
-    cur.close(); conn.close()
+    cur.close(); _release(conn)
     if not row:
         raise HTTPException(status_code=404, detail="API key not found")
     return {
@@ -665,11 +706,13 @@ async def model_status():
 
 @app.get("/gpu/status")
 async def gpu_status():
+    global _digital_gpu_backend
     try:
-        sys.path.insert(0, str(Path(__file__).parent))
-        from ai_model.gpu.torch_backend import DigitalGPUBackend
-        backend = DigitalGPUBackend(lanes=32)
-        status = backend.status()
+        if _digital_gpu_backend is None:
+            sys.path.insert(0, str(Path(__file__).parent))
+            from ai_model.gpu.torch_backend import DigitalGPUBackend
+            _digital_gpu_backend = DigitalGPUBackend(lanes=32)
+        status = _digital_gpu_backend.status()
         return {"available": True, "backend": "digital_gpu", **status}
     except Exception as e:
         return {"available": False, "backend": "none", "error": str(e)}
@@ -776,31 +819,40 @@ def _run_training(req: StartTrainingRequest, job_id: str):
             raise ValueError("Empty dataset")
 
         dim = _creative_model.model.token_emb.embedding_dim
+        # epochs=1 here: the outer loop below drives per-epoch iteration
         cfg = TrainConfig({
             "model": {"dim": dim, "layers": len(_creative_model.model.layers), "heads": 8, "max_len": train_max_len},
-            "train": {"lr": req.learning_rate, "batch_size": req.batch_size, "epochs": req.epochs, "data_path": data_path},
+            "train": {"lr": req.learning_rate, "batch_size": req.batch_size, "epochs": 1, "data_path": data_path},
         })
         cfg.gradient_accumulation_steps = 1
 
         _creative_model.resize_embeddings()
 
         for epoch in range(req.epochs):
-            start = time.time()
+            # Check stop signal before each epoch
             with _training_lock:
+                if _training_state.get("stop_requested"):
+                    log_training(f"Training stopped at epoch {epoch+1}", job_id=job_id)
+                    break
                 _training_state["epoch"] = epoch + 1
                 _training_state["samples_trained"] = len(dataset)
 
-            run_train(_creative_model.model, dataset, _tokenizer, cfg, device="cpu")
-            ppl = evaluate(_creative_model.model, dataset, _tokenizer, device="cpu")
+            result = run_train(_creative_model.model, dataset, _tokenizer, cfg, device="cpu")
+            epoch_loss = result.get("final_loss") if result else None
+            ppl = math.exp(min(epoch_loss, 20)) if epoch_loss else evaluate(_creative_model.model, dataset, _tokenizer, device="cpu")
+            loss = epoch_loss if epoch_loss is not None else (math.log(ppl) if ppl else None)
             elapsed = time.time() - _training_state["started_at"]
             eta = (elapsed / (epoch + 1)) * (req.epochs - epoch - 1)
-            loss = math.log(ppl) if ppl else None
 
             with _training_lock:
                 _training_state["loss"] = loss
                 _training_state["perplexity"] = ppl
                 _training_state["elapsed_seconds"] = elapsed
                 _training_state["eta_seconds"] = eta
+                if _training_state.get("first_loss") is None and loss is not None:
+                    _training_state["first_loss"] = loss
+                if loss is not None and (_training_state.get("best_loss") is None or loss < _training_state["best_loss"]):
+                    _training_state["best_loss"] = loss
 
             log_training(f"Epoch {epoch+1}/{req.epochs} complete. Loss: {loss:.4f}, PPL: {ppl:.2f}",
                         epoch=epoch+1, loss=loss, job_id=job_id)
@@ -835,14 +887,14 @@ def _run_training(req: StartTrainingRequest, job_id: str):
 async def get_training_logs(limit: int = 50):
     if not DATABASE_URL:
         return {"logs": [], "total": 0}
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = _acquire()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     cur.execute(
         "SELECT timestamp, level, message, epoch, loss, job_id FROM training_logs ORDER BY timestamp DESC LIMIT %s",
         (limit,)
     )
     rows = cur.fetchall()
-    cur.close(); conn.close()
+    cur.close(); _release(conn)
     logs = []
     for r in rows:
         logs.append({
@@ -1054,7 +1106,7 @@ def _run_curriculum(phases: list, req: ScheduleRequest, job_id: str):
                             "inv_vocab": _tokenizer.inv_vocab, "next_id": _tokenizer.next_id,
                             "config": _model_config, "job_id": job_id, "phase": phase_id,
                             "final_loss": final_loss}, str(weights_dir / "model.pt"))
-                np_weights = {k: v.numpy() for k, v in state_dict.items()}
+                np_weights = {k: v.cpu().numpy() for k, v in state_dict.items()}
                 np.savez_compressed(str(weights_dir / "weights_v4.npz"), **np_weights)
 
                 save_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -1295,7 +1347,7 @@ async def list_boostsheets():
 async def dashboard_stats():
     total_keys = 0; active_keys = 0; total_requests_today = 0; boostsheet_count = 0
     try:
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = _acquire()
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM api_keys")
         total_keys = cur.fetchone()[0]
@@ -1303,7 +1355,7 @@ async def dashboard_stats():
         active_keys = cur.fetchone()[0]
         cur.execute("SELECT COALESCE(SUM(request_count), 0) FROM api_keys WHERE last_used_at > NOW() - INTERVAL '1 day'")
         total_requests_today = cur.fetchone()[0] or 0
-        cur.close(); conn.close()
+        cur.close(); _release(conn)
     except Exception:
         pass
 
