@@ -73,3 +73,4 @@ ADMIN_KEY = "mbs_8a3edbac97ff333dda5068410227267e6d85b14a4c9caee279fbb18ddfb47ed
 STORAGE_HTTP_URL = "https://pocketdimensionstorage.replit.app/api/redis/instances/f26378c8b4faf9f237a0f816/exec"
 STORAGE_CONNECTION_URL = "pdim://mbs_373a1368ba359b15860701559d3a7c8f91e04f3afc44577de0c8efa0430bb982@pocketdimensionstorage.replit.app/api/redis/instances/f26378c8b4faf9f237a0f816"
 STORAGE_BEARER_TOKEN = "mbs_373a1368ba359b15860701559d3a7c8f91e04f3afc44577de0c8efa0430bb982"
+AI_TRAINING_KEY_PROD = "mbs_c6fe3b6e7eb7f4c6957f256ef20ae072c2c6ae75b0c88d5448b35707249f3a0d"
