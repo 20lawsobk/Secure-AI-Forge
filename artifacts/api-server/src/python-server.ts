@@ -4,9 +4,17 @@ import { fileURLToPath } from "url";
 import net from "net";
 
 const PYTHON_PORT = parseInt(process.env.MODEL_API_PORT || "9878", 10);
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const PYTHON_SCRIPT = path.resolve(__dirname, "../../../artifacts/ai-training-server/server.py");
+
+// Resolve the script path safely in both ESM (tsx dev) and CJS (production bundle).
+// In CJS bundles, import.meta.url is undefined; fall back to process.cwd() which
+// is always the monorepo workspace root in both environments.
+const PYTHON_SCRIPT = (() => {
+  const metaUrl = import.meta?.url;
+  if (metaUrl) {
+    return path.resolve(path.dirname(fileURLToPath(metaUrl)), "../../../artifacts/ai-training-server/server.py");
+  }
+  return path.resolve(process.cwd(), "artifacts/ai-training-server/server.py");
+})();
 const MAX_RETRIES = 5;
 const RETRY_DELAY_MS = 3000;
 
