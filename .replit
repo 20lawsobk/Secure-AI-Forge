@@ -64,6 +64,7 @@ timeoutMs = 20000
 
 [nix]
 channel = "stable-25_05"
+packages = ["ffmpeg-full", "freetype", "glibcLocales", "lcms2", "libimagequant", "libjpeg", "libsndfile", "libtiff", "libwebp", "libxcrypt", "openjpeg", "pkg-config", "tcl", "tk", "xsimd", "zlib"]
 
 [userenv]
 
