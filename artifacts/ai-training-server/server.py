@@ -2299,6 +2299,12 @@ async def maxcore_generate_text(req: MaxcoreTextRequest, _key = Depends(require_
         text = hook or f"{topic} — {purpose}"
         tags: list = []
 
+        hook_line = ""
+        body_line = ""
+        cta_line = ""
+        posting_time = ""
+        source = "template"
+
         if _model_ready and _script_agent and _distribution_agent:
             try:
                 from ai_model.agents.script_agent import ScriptRequest
@@ -2306,12 +2312,18 @@ async def maxcore_generate_text(req: MaxcoreTextRequest, _key = Depends(require_
                 script = _script_agent.run(ScriptRequest(
                     idea=topic, platform=platform, goal=intent, tone=tone,
                 ))
+                hook_line = getattr(script, "hook", "") or ""
+                body_line = getattr(script, "body", "") or ""
+                cta_line = getattr(script, "cta", "") or ""
+                source = getattr(script, "source", "template")
+                full_script = f"{hook_line}\n{body_line}\n{cta_line}".strip()
                 dist = _distribution_agent.run(DistributionRequest(
-                    script=f"{script.hook}\n{script.body}", platform=platform, goal=intent,
+                    script=full_script, platform=platform, goal=intent,
                 ))
                 text = dist.caption
+                posting_time = getattr(dist, "posting_time", "") or ""
                 if hashtags_allowed:
-                    tags = dist.hashtags[:max_hashtags]
+                    tags = getattr(dist, "hashtags", [])[:max_hashtags]
             except Exception:
                 pass
 
@@ -2324,7 +2336,17 @@ async def maxcore_generate_text(req: MaxcoreTextRequest, _key = Depends(require_
             "text": text,
             "platform": platform,
             "slotId": slot_id,
-            "meta": {"purpose": purpose, "tone": tone, "length": len(text)},
+            "meta": {
+                "purpose": purpose,
+                "tone": tone,
+                "length": len(text),
+                "hook": hook_line,
+                "body": body_line,
+                "cta": cta_line,
+                "posting_time": posting_time,
+                "hashtags": tags,
+                "source": source,
+            },
         })
 
     return {
@@ -2481,10 +2503,11 @@ async def maxcore_generate_video(req: MaxcoreMediaRequest, _key = Depends(requir
         )
         requires_hook = rules.get("requiresHook", False)
         tone = style_tags[0] if style_tags else "energetic"
-        scene_count = max(2, int(duration) // 5)
 
         hook_line = hook or f"You need to see this — {topic}"
-        script = hook_line
+        body_line = ""
+        cta_line = ""
+        source = "template"
 
         if _model_ready and _script_agent:
             try:
@@ -2495,36 +2518,54 @@ async def maxcore_generate_video(req: MaxcoreMediaRequest, _key = Depends(requir
                     goal="engagement",
                     tone=tone,
                 ))
-                hook_line = res.hook
-                script = f"{res.hook}\n{res.body}\n{res.cta}"
+                hook_line = res.hook or hook_line
+                body_line = getattr(res, "body", "") or ""
+                cta_line = getattr(res, "cta", "") or ""
+                source = getattr(res, "source", "template")
             except Exception:
                 pass
 
-        lines = script.split("\n")
-        scenes = [
-            {
-                "scene": i + 1,
-                "duration_sec": max(1, int(duration) // scene_count),
-                "narration": lines[min(i, len(lines) - 1)],
-                "visual_direction": f"{tone.capitalize()} — {topic}",
-            }
-            for i in range(scene_count)
-        ]
+        # Try cinematic renderer from existing MaxBooster video engine
+        render_url = f"asset://{slot_id}/{aspect_ratio.replace(':', 'x')}.mp4"
+        render_meta: dict = {}
+        try:
+            from ai_model.video.cinematic_engine import render_video_auto
+            result = render_video_auto(
+                hook=hook_line, body=body_line, cta=cta_line,
+                platform=normalize_platform(platform),
+                aspect_ratio=aspect_ratio,
+                duration=float(duration),
+            )
+            if result.success:
+                render_url = f"/uploads/videos/{result.filename}"
+                render_meta = {
+                    "width": result.width,
+                    "height": result.height,
+                    "scenes_rendered": result.scenes_rendered,
+                    "render_time_ms": result.render_time_ms,
+                    "template_name": result.template_name,
+                }
+        except Exception:
+            pass
 
+        script_full = f"{hook_line}\n{body_line}\n{cta_line}".strip()
         outputs.append({
-            "url": f"asset://{slot_id}/{aspect_ratio.replace(':', 'x')}.mp4",
+            "url": render_url,
             "platform": platform,
             "slotId": slot_id,
             "meta": {
                 "hook": hook_line if requires_hook else None,
-                "script": script,
-                "scenes": scenes,
+                "body": body_line,
+                "cta": cta_line,
+                "script": script_full,
                 "aspect_ratio": aspect_ratio,
                 "duration_sec": duration,
                 "requires_hook": requires_hook,
                 "style_tags": style_tags,
+                "source": source,
                 "format": "mp4",
                 "fps": 30,
+                **render_meta,
             },
         })
 
