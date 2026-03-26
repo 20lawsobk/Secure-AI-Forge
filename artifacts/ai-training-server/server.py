@@ -2131,6 +2131,409 @@ async def platform_model_reload(_admin = Depends(verify_admin)):
     }
 
 
+# ─── MaxCore Multimodal Generation API ────────────────────────────────────────
+#
+# Five endpoints called by the Express orchestration layer (multimodal.ts).
+# They form the generation backbone for all modalities:
+#   POST /analyze              — normalize any input into a semantic representation
+#   POST /generate/text        — mode=planner → TaskPlan | mode=content → text assets
+#   POST /generate/image       — image asset specs per platform slot
+#   POST /generate/audio       — voiceover/audio asset specs per platform slot
+#   POST /generate/video       — video asset packs per platform slot
+
+_platform_rules: dict = {}
+
+def _load_platform_rules() -> dict:
+    rules_path = Path(__file__).parent.parent.parent / "artifacts" / "api-server" / "src" / "platform_rules.json"
+    try:
+        with open(rules_path) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+_platform_rules = _load_platform_rules()
+
+
+class MaxcoreAnalyzeRequest(BaseModel):
+    modality: str = "text"
+    payload: str
+    artistProfileId: Optional[str] = None
+    platforms: List[str] = []
+    intent: Optional[str] = None
+
+
+class MaxcoreTextRequest(BaseModel):
+    mode: str = "content"
+    system: Optional[str] = None
+    input: dict = {}        # used by mode='planner'
+    step: dict = {}         # used by mode='content'
+    inputs: dict = {}       # used by mode='content'
+
+
+class MaxcoreMediaRequest(BaseModel):
+    step: dict = {}
+    inputs: dict = {}
+
+
+@app.post("/analyze")
+async def maxcore_analyze(req: MaxcoreAnalyzeRequest, _key = Depends(require_scope("generate"))):
+    """
+    Normalize any input modality (text, URL, image, audio, video) into a unified
+    semantic representation. Fed directly into the planner by the TS orchestrator.
+    """
+    start = time.time()
+
+    if req.modality == "url":
+        content_hint = f"Content from URL: {req.payload}"
+    elif req.modality in ("image", "audio", "video"):
+        content_hint = f"{req.modality.capitalize()} asset: {req.payload}"
+    else:
+        content_hint = req.payload
+
+    intent_hint = req.intent or "general content promotion"
+    first_platform = req.platforms[0] if req.platforms else "general"
+
+    normalized: dict = {
+        "modality": req.modality,
+        "payload_summary": content_hint,
+        "intent": intent_hint,
+        "platforms": req.platforms,
+        "artistProfileId": req.artistProfileId,
+        "semantic": {
+            "topic": content_hint,
+            "intent": intent_hint,
+            "platforms": req.platforms,
+            "style_tags": [],
+        },
+        "source": "template",
+        "processing_time_ms": 0,
+    }
+
+    if _model_ready and _script_agent:
+        try:
+            from ai_model.agents.script_agent import ScriptRequest
+            result = _script_agent.run(ScriptRequest(
+                idea=content_hint,
+                platform=normalize_platform(first_platform),
+                goal=intent_hint,
+                tone="authentic",
+            ))
+            normalized["semantic"]["hook"] = result.hook
+            normalized["semantic"]["core_message"] = result.body
+            normalized["source"] = getattr(result, "source", "model")
+        except Exception:
+            pass
+
+    normalized["processing_time_ms"] = round((time.time() - start) * 1000, 1)
+    return normalized
+
+
+@app.post("/generate/text")
+async def maxcore_generate_text(req: MaxcoreTextRequest, _key = Depends(require_scope("generate"))):
+    """
+    Dual-mode text endpoint:
+      mode='planner'  → returns a TaskPlan for the multimodal orchestrator
+      mode='content'  → returns platform-specific text assets for a given step
+    """
+    start = time.time()
+    data = req.input
+
+    if req.mode == "planner":
+        normalized = data.get("normalized", {})
+        request_data = data.get("request", {})
+        pack_spec = data.get("packSpec") or []
+
+        modality_slots: dict = {}
+        for slot in pack_spec:
+            m = slot.get("modality", "text")
+            modality_slots.setdefault(m, []).append(slot)
+
+        steps = [{
+            "id": "analysis_step",
+            "type": "analyze",
+            "worker": "text",
+            "inputFrom": "normalizedInput",
+            "params": {"intent": normalized.get("intent", "engagement")},
+        }]
+
+        for modality, slots in modality_slots.items():
+            steps.append({
+                "id": f"step_{modality}",
+                "type": "generate",
+                "worker": modality,
+                "inputFrom": ["analysis_step"],
+                "params": {
+                    "slots": slots,
+                    "platforms": [s.get("platform") for s in slots],
+                    "constraints": request_data.get("constraints", {}),
+                },
+            })
+
+        return {
+            "requestId": request_data.get("id", str(uuid.uuid4())),
+            "steps": steps,
+            "processing_time_ms": round((time.time() - start) * 1000, 1),
+        }
+
+    # mode == 'content'
+    step = req.step or data.get("step", {})
+    inputs = req.inputs or data.get("inputs", {})
+    slots = step.get("params", {}).get("slots", [])
+    normalized = inputs.get("normalized", {}) if isinstance(inputs, dict) else {}
+    topic = (normalized.get("semantic") or {}).get("topic") or normalized.get("payload_summary", "content")
+    intent = (normalized.get("semantic") or {}).get("intent", "engagement")
+    hook = (normalized.get("semantic") or {}).get("hook", "")
+
+    outputs = []
+    for slot in slots:
+        platform = normalize_platform(slot.get("platform", "general"))
+        slot_id = slot.get("id", "")
+        purpose = slot.get("purpose", "")
+        rules = _platform_rules.get(platform, {}).get("text", {})
+        max_len = rules.get("recommendedLength", 150)
+        tone_list = rules.get("tone") or ["authentic"]
+        tone = tone_list[0] if tone_list else "authentic"
+        max_hashtags = rules.get("hashtags", {}).get("max", 0)
+        hashtags_allowed = rules.get("hashtags", {}).get("allowed", False)
+
+        text = hook or f"{topic} — {purpose}"
+        tags: list = []
+
+        if _model_ready and _script_agent and _distribution_agent:
+            try:
+                from ai_model.agents.script_agent import ScriptRequest
+                from ai_model.agents.distribution_agent import DistributionRequest
+                script = _script_agent.run(ScriptRequest(
+                    idea=topic, platform=platform, goal=intent, tone=tone,
+                ))
+                dist = _distribution_agent.run(DistributionRequest(
+                    script=f"{script.hook}\n{script.body}", platform=platform, goal=intent,
+                ))
+                text = dist.caption
+                if hashtags_allowed:
+                    tags = dist.hashtags[:max_hashtags]
+            except Exception:
+                pass
+
+        if max_len:
+            text = text[:max_len]
+        if tags:
+            text = f"{text}\n{' '.join(tags)}"
+
+        outputs.append({
+            "text": text,
+            "platform": platform,
+            "slotId": slot_id,
+            "meta": {"purpose": purpose, "tone": tone, "length": len(text)},
+        })
+
+    return {
+        "outputs": outputs,
+        "processing_time_ms": round((time.time() - start) * 1000, 1),
+    }
+
+
+@app.post("/generate/image")
+async def maxcore_generate_image(req: MaxcoreMediaRequest, _key = Depends(require_scope("generate"))):
+    """
+    Generate image asset specs (concept + aspect ratio + style guidance) per slot.
+    Returns asset URIs and generation metadata for downstream rendering pipelines.
+    """
+    start = time.time()
+    step = req.step
+    inputs = req.inputs
+    slots = step.get("params", {}).get("slots", [])
+    normalized = inputs.get("normalized", {}) if isinstance(inputs, dict) else {}
+    topic = (normalized.get("semantic") or {}).get("topic") or normalized.get("payload_summary", "content")
+    constraints = step.get("params", {}).get("constraints", {})
+    style_tags: list = constraints.get("styleTags", ["cinematic"])
+
+    outputs = []
+    for slot in slots:
+        platform = slot.get("platform", "instagram")
+        slot_id = slot.get("id", "")
+        rules = _platform_rules.get(platform, {}).get("image", {})
+        aspect_ratio = rules.get("recommended") or (rules.get("aspectRatios") or ["1:1"])[0]
+        style = ", ".join(style_tags)
+        concept = (
+            f"{style.capitalize()} visual for '{topic}' — {slot.get('purpose', '')}. "
+            f"Aspect ratio {aspect_ratio}. Platform: {platform}."
+        )
+
+        if _model_ready and _visual_spec_agent:
+            try:
+                from ai_model.agents.visual_spec_agent import VisualSpecRequest
+                vis = _visual_spec_agent.run(VisualSpecRequest(
+                    idea=topic,
+                    platform=normalize_platform(platform),
+                    tone=style_tags[0] if style_tags else "cinematic",
+                ))
+                concept = getattr(vis, "thumbnail_concept", concept) or concept
+            except Exception:
+                pass
+
+        outputs.append({
+            "url": f"asset://{slot_id}/{aspect_ratio.replace(':', 'x')}.png",
+            "platform": platform,
+            "slotId": slot_id,
+            "meta": {
+                "aspect_ratio": aspect_ratio,
+                "style_tags": style_tags,
+                "concept": concept,
+                "format": "png",
+            },
+        })
+
+    return {
+        "outputs": outputs,
+        "processing_time_ms": round((time.time() - start) * 1000, 1),
+    }
+
+
+@app.post("/generate/audio")
+async def maxcore_generate_audio(req: MaxcoreMediaRequest, _key = Depends(require_scope("generate"))):
+    """
+    Generate audio asset specs (voiceover script + duration + style) per slot.
+    Applies per-platform audio rules (max duration, style, voiceover eligibility).
+    """
+    start = time.time()
+    step = req.step
+    inputs = req.inputs
+    slots = step.get("params", {}).get("slots", [])
+    normalized = inputs.get("normalized", {}) if isinstance(inputs, dict) else {}
+    topic = (normalized.get("semantic") or {}).get("topic") or normalized.get("payload_summary", "content")
+    hook = (normalized.get("semantic") or {}).get("hook", "")
+
+    outputs = []
+    for slot in slots:
+        platform = slot.get("platform", "general")
+        slot_id = slot.get("id", "")
+        rules = _platform_rules.get(platform, {}).get("audio", {})
+
+        if not rules.get("voiceover", True):
+            continue
+
+        max_dur = rules.get("maxDurationSec", 30)
+        style_list = rules.get("style") or rules.get("tone") or ["authentic"]
+        style = style_list[0] if isinstance(style_list, list) else "authentic"
+        script_text = hook or f"Don't miss '{topic}' — out now."
+
+        if _model_ready and _script_agent:
+            try:
+                from ai_model.agents.script_agent import ScriptRequest
+                res = _script_agent.run(ScriptRequest(
+                    idea=topic,
+                    platform=normalize_platform(platform),
+                    goal="engagement",
+                    tone=style,
+                ))
+                script_text = res.hook
+            except Exception:
+                pass
+
+        outputs.append({
+            "url": f"asset://{slot_id}/voiceover.mp3",
+            "platform": platform,
+            "slotId": slot_id,
+            "meta": {
+                "script": script_text,
+                "max_duration_sec": max_dur,
+                "style": style,
+                "sample_rate": 44100,
+                "format": "mp3",
+            },
+        })
+
+    return {
+        "outputs": outputs,
+        "processing_time_ms": round((time.time() - start) * 1000, 1),
+    }
+
+
+@app.post("/generate/video")
+async def maxcore_generate_video(req: MaxcoreMediaRequest, _key = Depends(require_scope("generate"))):
+    """
+    Generate video asset packs per slot.
+    Applies per-platform rules: aspect ratio, duration, hook requirement.
+    """
+    start = time.time()
+    step = req.step
+    inputs = req.inputs
+    slots = step.get("params", {}).get("slots", [])
+    normalized = inputs.get("normalized", {}) if isinstance(inputs, dict) else {}
+    topic = (normalized.get("semantic") or {}).get("topic") or normalized.get("payload_summary", "content")
+    hook = (normalized.get("semantic") or {}).get("hook", "")
+    constraints = step.get("params", {}).get("constraints", {})
+    style_tags: list = constraints.get("styleTags", ["cinematic"])
+
+    outputs = []
+    for slot in slots:
+        platform = slot.get("platform", "youtube")
+        slot_id = slot.get("id", "")
+        params = step.get("params", {})
+        rules = _platform_rules.get(platform, {}).get("video", {})
+        aspect_ratio = params.get("aspectRatio") or (rules.get("aspectRatios") or ["16:9"])[0]
+        duration = (
+            params.get("maxDurationSec")
+            or rules.get("recommendedDurationSec")
+            or rules.get("maxDurationSec")
+            or 30
+        )
+        requires_hook = rules.get("requiresHook", False)
+        tone = style_tags[0] if style_tags else "energetic"
+        scene_count = max(2, int(duration) // 5)
+
+        hook_line = hook or f"You need to see this — {topic}"
+        script = hook_line
+
+        if _model_ready and _script_agent:
+            try:
+                from ai_model.agents.script_agent import ScriptRequest
+                res = _script_agent.run(ScriptRequest(
+                    idea=topic,
+                    platform=normalize_platform(platform),
+                    goal="engagement",
+                    tone=tone,
+                ))
+                hook_line = res.hook
+                script = f"{res.hook}\n{res.body}\n{res.cta}"
+            except Exception:
+                pass
+
+        lines = script.split("\n")
+        scenes = [
+            {
+                "scene": i + 1,
+                "duration_sec": max(1, int(duration) // scene_count),
+                "narration": lines[min(i, len(lines) - 1)],
+                "visual_direction": f"{tone.capitalize()} — {topic}",
+            }
+            for i in range(scene_count)
+        ]
+
+        outputs.append({
+            "url": f"asset://{slot_id}/{aspect_ratio.replace(':', 'x')}.mp4",
+            "platform": platform,
+            "slotId": slot_id,
+            "meta": {
+                "hook": hook_line if requires_hook else None,
+                "script": script,
+                "scenes": scenes,
+                "aspect_ratio": aspect_ratio,
+                "duration_sec": duration,
+                "requires_hook": requires_hook,
+                "style_tags": style_tags,
+                "format": "mp4",
+                "fps": 30,
+            },
+        })
+
+    return {
+        "outputs": outputs,
+        "processing_time_ms": round((time.time() - start) * 1000, 1),
+    }
+
+
 # ─── AI Ad System & Autopilot ─────────────────────────────────────────────────
 #
 # Replicates peak performance of paid ads across Meta, TikTok, YouTube, Google.

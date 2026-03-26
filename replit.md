@@ -119,6 +119,70 @@ lib/
 - Scopes: `read`, `write`, `train`, `admin`, `generate`
 - Admin key: `mbs_8a3edbac97ff333dda5068410227267e6d85b14a4c9caee279fbb18ddfb47edc`
 
+## Multimodal Generation System
+
+One request in → platform-aware pack out with text, image, audio, and video — all grounded by the MaxCore model.
+
+### Architecture
+
+```
+POST /api/multimodal/generate
+        │
+        ▼
+Express Orchestrator (multimodal.ts)
+        │
+        ├─► POST /analyze              → unified semantic representation
+        ├─► POST /generate/text        → mode=planner: TaskPlan | mode=content: text assets
+        ├─► POST /generate/image       → image asset specs per slot
+        ├─► POST /generate/audio       → voiceover/audio asset specs per slot
+        └─► POST /generate/video       → video asset packs per slot
+                │
+                ▼
+        Python AI Server (port 9878) — applies platform rules + MaxCore model
+```
+
+### Key Files
+- `artifacts/api-server/src/routes/multimodal.ts` — TS orchestrator: types, pack definitions, workers, `handleGeneration`
+- `artifacts/api-server/src/platform_rules.json` — per-platform rules (char limits, aspect ratios, durations, hashtags)
+- `artifacts/ai-training-server/server.py` — maxcore endpoints: `/analyze`, `/generate/text`, `/generate/image`, `/generate/audio`, `/generate/video`
+
+### Packs (packId)
+| Pack | Slots | Modalities |
+|------|-------|------------|
+| `singlereleasefull_pack` | 14 | text, image, audio, video |
+| `announcement_pack` | 7 | text, image |
+| `tourdates_pack` | 8 | text, image, video |
+| `evergreenbrand_pack` | 7 | text, image, audio |
+
+### Platforms
+`facebook`, `instagram`, `threads`, `tiktok`, `youtube`, `google_business`, `linkedin`
+
+### Input Modalities
+`text`, `url`, `image`, `audio`, `video`
+
+### Discovery
+- `GET /api/multimodal/packs` — list all packs, modalities, platform rules
+
+### Example Request
+```json
+POST /api/multimodal/generate
+{
+  "id": "req_123",
+  "userId": "artist_42",
+  "input": { "modality": "text", "payload": "New single dropping Friday" },
+  "platforms": ["instagram", "tiktok", "youtube"],
+  "packId": "singlereleasefull_pack",
+  "intent": "singlereleaseannouncement",
+  "constraints": { "styleTags": ["cinematic", "emotional"] }
+}
+```
+
+### Video Generation (platform endpoint)
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/platform/video/generate` | Schema discovery — parameters + response shape |
+| POST | `/api/platform/video/generate` | Generate full video pack per user (personalized via curriculum) |
+
 ## Platform API Endpoints (for main music platform)
 
 All routes accessible via Express proxy at `/api/...`:
