@@ -72,10 +72,16 @@ function startPythonServer() {
     process.stderr.write(`[Python] ${d}`);
   });
 
-  pythonProcess.on("exit", (code, signal) => {
+  pythonProcess.on("exit", async (code, signal) => {
     pythonProcess = null;
     if (signal === "SIGTERM" || signal === "SIGINT") {
       console.log("[Python] Server shut down gracefully.");
+      return;
+    }
+    // If port is now held by another process (e.g. standalone workflow), stop retrying.
+    const portTaken = await isPortAlreadyOpen(PYTHON_PORT);
+    if (portTaken) {
+      console.log(`[Python] Port ${PYTHON_PORT} now held by another process — reusing it.`);
       return;
     }
     // If the server was healthy for a sustained period, treat it as a fresh start
@@ -105,8 +111,19 @@ async function isPortAlreadyOpen(port: number): Promise<boolean> {
   });
 }
 
+// Poll for up to `maxMs` in case the standalone workflow is still starting up.
+async function waitForPortOpen(port: number, maxMs = 6000): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < maxMs) {
+    if (await isPortAlreadyOpen(port)) return true;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return false;
+}
+
 export async function ensurePythonServer(): Promise<void> {
-  const alreadyRunning = await isPortAlreadyOpen(PYTHON_PORT);
+  // Give any concurrently-starting standalone workflow a window to bind first.
+  const alreadyRunning = await waitForPortOpen(PYTHON_PORT, 6000);
   if (alreadyRunning) {
     console.log(`[Python] AI training server already running on port ${PYTHON_PORT} — skipping spawn.`);
     return;
