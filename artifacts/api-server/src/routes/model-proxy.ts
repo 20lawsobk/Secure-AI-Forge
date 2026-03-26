@@ -235,6 +235,14 @@ router.post("/training/puller/stop", async (req, res) => {
   await proxyRequest(req, res, "/training/puller/stop");
 });
 
+router.get("/platform/video/generate", async (req, res) => {
+  await proxyRequest(req, res, "/platform/video/generate");
+});
+
+router.post("/platform/video/generate", async (req, res) => {
+  await proxyRequest(req, res, "/platform/video/generate");
+});
+
 router.post("/content/generate", async (req, res) => {
   await proxyRequest(req, res, "/content/generate");
 });

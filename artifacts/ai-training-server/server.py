@@ -1571,6 +1571,18 @@ class PlatformDistributionRequest(BaseModel):
     bio: Optional[str] = None
 
 
+class PlatformVideoRequest(BaseModel):
+    user_id: str
+    topic: str
+    platform: str = "youtube"           # youtube | tiktok | instagram | general
+    style: str = "cinematic"            # cinematic | documentary | animated | social
+    goal: str = "engagement"            # engagement | education | promotion | storytelling
+    tone: str = "energetic"             # energetic | calm | dramatic | inspirational | playful
+    duration_seconds: int = Field(30, ge=5, le=300)
+    aspect_ratio: str = "16:9"          # 16:9 | 9:16 | 1:1 | 4:5
+    include_captions: bool = True
+
+
 def _build_personalized_tone(user_id: str, platform: str, base_tone: str) -> str:
     """Pull user engagement signals from storage to bias the model tone."""
     try:
@@ -1899,6 +1911,169 @@ async def platform_distribution_plan(req: PlatformDistributionRequest, _key = De
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/platform/video/generate")
+async def platform_video_generate_schema():
+    """
+    Schema discovery for the video generation platform endpoint.
+    Returns parameter definitions and expected response shape.
+    """
+    return {
+        "endpoint": "POST /platform/video/generate",
+        "description": (
+            "Generate a complete AI video production package for the MaxBooster platform — "
+            "includes personalized script, scene-by-scene visual directions, captions, "
+            "thumbnail concept, and distribution metadata. Personalised per user via "
+            "curriculum engagement signals."
+        ),
+        "parameters": {
+            "user_id":          {"type": "string",  "required": True},
+            "topic":            {"type": "string",  "required": True},
+            "platform":         {"type": "string",  "required": False, "default": "youtube",    "options": ["youtube", "tiktok", "instagram", "general"]},
+            "style":            {"type": "string",  "required": False, "default": "cinematic",  "options": ["cinematic", "documentary", "animated", "social"]},
+            "goal":             {"type": "string",  "required": False, "default": "engagement", "options": ["engagement", "education", "promotion", "storytelling"]},
+            "tone":             {"type": "string",  "required": False, "default": "energetic",  "options": ["energetic", "calm", "dramatic", "inspirational", "playful"]},
+            "duration_seconds": {"type": "integer", "required": False, "default": 30, "min": 5, "max": 300},
+            "aspect_ratio":     {"type": "string",  "required": False, "default": "16:9",       "options": ["16:9", "9:16", "1:1", "4:5"]},
+            "include_captions": {"type": "boolean", "required": False, "default": True},
+        },
+        "returns": {
+            "user_id":           "Echoed user identifier",
+            "title":             "Video title",
+            "hook":              "Opening hook line",
+            "script":            "Full narration / dialogue script",
+            "scenes":            "List of scene objects — description, visual_direction, narration, duration_seconds",
+            "captions":          "Caption blocks with start_sec / end_sec / text",
+            "hashtags":          "Platform-tuned hashtags",
+            "thumbnail_concept": "AI-generated thumbnail concept description",
+            "distribution":      "Platform caption, goal, and recommended post time",
+            "duration_seconds":  "Planned duration",
+            "aspect_ratio":      "Output aspect ratio",
+            "source":            "'model' or 'template'",
+            "processing_time_ms":"Generation latency",
+        },
+    }
+
+
+@app.post("/platform/video/generate")
+async def platform_video_generate(req: PlatformVideoRequest, _key = Depends(require_scope("generate"))):
+    """
+    Main platform video generation endpoint.
+    Generates a complete AI video production package personalised to the user's
+    engagement history via the curriculum feedback store.
+    """
+    start = time.time()
+    platform = normalize_platform(req.platform)
+    personalized_tone = _build_personalized_tone(req.user_id, platform, req.tone)
+    scene_count = max(3, req.duration_seconds // 10)
+
+    if not _model_ready or _script_agent is None:
+        scenes = [
+            {
+                "scene": i + 1,
+                "duration_seconds": req.duration_seconds // scene_count,
+                "description": f"Scene {i + 1} — {req.topic}",
+                "visual_direction": f"{req.style.capitalize()} shot of {req.topic}",
+                "narration": f"Part {i + 1} of your {req.topic} story.",
+            }
+            for i in range(scene_count)
+        ]
+        caption_blocks = [
+            {
+                "start_sec": i * (req.duration_seconds // scene_count),
+                "end_sec": (i + 1) * (req.duration_seconds // scene_count),
+                "text": f"Scene {i + 1}: {req.topic}",
+            }
+            for i in range(scene_count)
+        ] if req.include_captions else []
+        return {
+            "success": True,
+            "user_id": req.user_id,
+            "title": f"{req.topic} — {req.style.capitalize()} Video",
+            "hook": f"You won't believe what {req.topic} can do.",
+            "script": f"Welcome to this {req.style} video about {req.topic}. " * 3,
+            "scenes": scenes,
+            "captions": caption_blocks,
+            "hashtags": [f"#{req.topic.replace(' ', '')}", f"#{platform}", "#video"],
+            "thumbnail_concept": f"Bold '{req.topic.upper()}' text over a {req.style} background",
+            "distribution": {"platform": platform, "goal": req.goal, "recommended_post_time": "peak hours"},
+            "duration_seconds": req.duration_seconds,
+            "aspect_ratio": req.aspect_ratio,
+            "source": "template",
+            "processing_time_ms": round((time.time() - start) * 1000, 1),
+        }
+
+    try:
+        from ai_model.agents.script_agent import ScriptRequest
+        from ai_model.agents.visual_spec_agent import VisualSpecRequest
+        from ai_model.agents.distribution_agent import DistributionRequest
+
+        script_result = _script_agent.run(ScriptRequest(
+            idea=req.topic, platform=platform, goal=req.goal, tone=personalized_tone,
+        ))
+        full_script = f"{script_result.hook}\n{script_result.body}\n{script_result.cta}"
+
+        visual_result = _visual_spec_agent.run(VisualSpecRequest(
+            idea=req.topic, platform=platform, tone=personalized_tone,
+        )) if _visual_spec_agent else None
+
+        dist_result = _distribution_agent.run(DistributionRequest(
+            script=full_script, platform=platform, goal=req.goal,
+        ))
+
+        raw_scenes = getattr(visual_result, "scenes", None) or []
+        if not raw_scenes:
+            lines = full_script.split("\n")
+            raw_scenes = [
+                {
+                    "scene": i + 1,
+                    "duration_seconds": req.duration_seconds // scene_count,
+                    "description": f"{req.topic} — {req.style} scene {i + 1}",
+                    "visual_direction": f"{req.style.capitalize()} framing, {personalized_tone} energy",
+                    "narration": lines[min(i, len(lines) - 1)],
+                }
+                for i in range(scene_count)
+            ]
+
+        caption_blocks = []
+        if req.include_captions:
+            per_scene = req.duration_seconds // max(len(raw_scenes), 1)
+            for idx, scene in enumerate(raw_scenes):
+                caption_blocks.append({
+                    "start_sec": idx * per_scene,
+                    "end_sec": (idx + 1) * per_scene,
+                    "text": scene.get("narration", f"Scene {idx + 1}"),
+                })
+
+        thumbnail_concept = (
+            getattr(visual_result, "thumbnail_concept", None)
+            or f"Bold '{req.topic.upper()}' text over {req.style} background with {personalized_tone} color grading"
+        )
+
+        return {
+            "success": True,
+            "user_id": req.user_id,
+            "title": f"{req.topic} — {req.style.capitalize()} Video",
+            "hook": script_result.hook,
+            "script": full_script,
+            "scenes": raw_scenes,
+            "captions": caption_blocks,
+            "hashtags": dist_result.hashtags if req.include_captions else [],
+            "thumbnail_concept": thumbnail_concept,
+            "distribution": {
+                "platform": platform,
+                "caption": dist_result.caption,
+                "goal": req.goal,
+                "recommended_post_time": getattr(dist_result, "recommended_post_time", "peak hours"),
+            },
+            "duration_seconds": req.duration_seconds,
+            "aspect_ratio": req.aspect_ratio,
+            "source": getattr(script_result, "source", "model"),
+            "processing_time_ms": round((time.time() - start) * 1000, 1),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/platform/model/info")
 async def platform_model_info(_key = Depends(verify_api_key)):
     """
@@ -1935,6 +2110,8 @@ async def platform_model_info(_key = Depends(verify_api_key)):
             "POST /platform/social/autopilot",
             "POST /platform/daw/generate",
             "POST /platform/distribution/plan",
+            "GET  /platform/video/generate",
+            "POST /platform/video/generate",
             "POST /platform/model/reload",
         ],
     }
