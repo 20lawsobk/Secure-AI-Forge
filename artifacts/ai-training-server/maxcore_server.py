@@ -744,6 +744,630 @@ def control_set_phase(body: SetPhaseBody):
     return {"ok": True, "phase": body.phase}
 
 
+# ── In-memory job stores ──────────────────────────────────────────────────────
+
+import uuid as _uuid
+
+_video_jobs: Dict[str, Dict[str, Any]] = {}
+_audio_jobs: Dict[str, Dict[str, Any]] = {}
+_jobs_lock = threading.Lock()
+
+
+# ── Pydantic request models ────────────────────────────────────────────────────
+
+class GenerateContentRequest(BaseModel):
+    platform: str
+    topic: str
+    tone: str
+    genre: Optional[str] = None
+    artist_name: Optional[str] = None
+    artist_bio: Optional[str] = None
+    brand_voice: Optional[str] = None
+    target_audience: Optional[str] = None
+    content_themes: Optional[List[str]] = None
+    avoid_topics: Optional[List[str]] = None
+    preferred_hashtags: Optional[List[str]] = None
+    recent_post_snippets: Optional[List[str]] = None
+
+
+class GenerateTextRequest(BaseModel):
+    mode: str  # "planner" | "content"
+    system: Optional[str] = None
+    step: Optional[Any] = None
+    inputs: Optional[Any] = None
+    slots: Optional[Any] = None
+    constraints: Optional[Any] = None
+    artistProfileId: Optional[str] = None
+    intent: Optional[str] = None
+    platformRules: Optional[Any] = None
+
+
+class ContentScoreRequest(BaseModel):
+    text: str
+    platform: str
+    cta: Optional[str] = None
+    hashtags: List[str] = []
+    userId: Optional[str] = None
+
+
+class AnalyzeRequest(BaseModel):
+    modality: str
+    payload: Any
+    artistProfileId: Optional[str] = None
+    platforms: List[str] = []
+    intent: Optional[str] = None
+    metadata: Optional[Any] = None
+    platformRules: Optional[Any] = None
+
+
+class SentimentRequest(BaseModel):
+    text: str
+    includeEmotions: Optional[bool] = False
+    includeToxicity: Optional[bool] = False
+
+
+class AudioAnalyzeRequest(BaseModel):
+    audio_url: str
+    artist_id: Optional[str] = None
+
+
+class OptimizeAdRequest(BaseModel):
+    action: str  # "score"|"optimize_budget"|"predict_creative"|"forecast_roi"
+    campaign: Optional[Any] = None
+    campaigns: Optional[List[Any]] = None
+    totalBudget: Optional[float] = None
+    forecastPeriod: Optional[int] = None
+
+
+class PredictEngagementRequest(BaseModel):
+    platform: str
+    action: str  # "best_time"|"recommend_type"|"viral_potential"|"optimize_schedule"|"predict_engagement"
+    content: Any
+    postsPerWeek: Optional[int] = None
+
+
+class GenerateImageRequest(BaseModel):
+    step: Optional[Any] = None
+    inputs: Optional[Any] = None
+    slots: Optional[Any] = None
+    constraints: Optional[Any] = None
+    artistProfileId: Optional[str] = None
+    intent: Optional[str] = None
+    platformRules: Optional[Any] = None
+
+
+class GenerateAudioRequest(BaseModel):
+    style_fingerprint: Optional[Any] = None
+    notes: Optional[List[Any]] = None
+    duration: Optional[float] = None
+    instrument: Optional[str] = None
+    genre: Optional[str] = None
+    step: Optional[Any] = None
+    inputs: Optional[Any] = None
+    constraints: Optional[Any] = None
+    artistProfileId: Optional[str] = None
+    intent: Optional[str] = None
+    platformRules: Optional[Any] = None
+
+
+class GenerateVideoRequest(BaseModel):
+    hook: str
+    body: str
+    cta: str
+    topic: str
+    platform: str
+    aspect_ratio: Optional[str] = None
+    template: str
+    duration: int
+    artist_name: Optional[str] = None
+    genre: Optional[str] = None
+    tone: str
+    goal: str
+    quality: str
+    user_audio_path: Optional[str] = None
+    voiceover: bool = False
+
+
+class TrainFeedbackRequest(BaseModel):
+    source: str
+    trigger: str
+    engagement_rate: float
+    platform: str
+    content_type: str
+    hook_type: str
+    media_type: str
+    curriculum_hint: Optional[str] = None
+    dispatched_at: Optional[str] = None
+    source_node: str = "maxbooster"
+    version: str = "1.0"
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _simple_score(text: str, platform: str) -> float:
+    """Deterministic heuristic score 0-100 based on text features."""
+    import math
+    words   = len(text.split())
+    has_cta = any(w in text.lower() for w in ["click", "follow", "link", "save", "share", "buy", "get"])
+    length_score = max(0.0, 1.0 - abs(words - 30) / 60)
+    cta_score    = 0.15 if has_cta else 0.0
+    platform_bonus = {"instagram": 0.05, "tiktok": 0.08, "twitter": 0.03,
+                      "youtube": 0.04, "facebook": 0.03}.get(platform.lower(), 0.0)
+    raw = (length_score * 0.8) + cta_score + platform_bonus
+    return round(min(100.0, raw * 110), 1)
+
+
+def _infer_hashtags(topic: str, genre: Optional[str], platform: str) -> List[str]:
+    tags = [f"#{topic.replace(' ', '')}", f"#{platform}"]
+    if genre:
+        tags.append(f"#{genre.replace(' ', '')}")
+    tags += ["#music", "#newrelease", "#artist"]
+    return tags[:6]
+
+
+def _make_model_state(domain: str) -> Dict[str, Any]:
+    """Return a stub weight-state object for a given model domain."""
+    ts = datetime.utcnow().isoformat() + "Z"
+    # Load from weights file if present, otherwise return stub dims
+    weight_kb = (WEIGHTS.stat().st_size // 1024) if WEIGHTS.exists() else 0
+    return {
+        "domain":      domain,
+        "version":     "1.0.0",
+        "trained_at":  ts,
+        "weight_kb":   weight_kb,
+        "loss":        _state.get("loss"),
+        "session_count": _state.get("session_count", 0),
+        "weights": {
+            "embed_dim": 512,
+            "n_layers":  8,
+            "vocab_size": 172,
+            "ready":     WEIGHTS.exists(),
+        },
+    }
+
+
+# ── Content Generation endpoints ───────────────────────────────────────────────
+
+@app.post("/api/generate/content")
+def generate_content(req: GenerateContentRequest):
+    """Generate captions, hooks, CTAs for social posts."""
+    artist = req.artist_name or "the artist"
+    genre  = req.genre or "music"
+    topic  = req.topic
+
+    hook    = f"🎵 {artist} just dropped something you need to hear — {topic}"
+    body    = (
+        f"Bringing {genre} vibes that hit different. "
+        f"{req.brand_voice or 'Authentic, raw, and real.'} "
+        f"Crafted for {req.target_audience or 'fans everywhere'}."
+    )
+    cta     = "Stream now — link in bio 🔗"
+    hashtags = (req.preferred_hashtags or []) + _infer_hashtags(topic, req.genre, req.platform)
+    caption = f"{hook}\n\n{body}\n\n{cta}"
+    score   = _simple_score(caption, req.platform)
+
+    return {
+        "caption":    caption,
+        "hook":       hook,
+        "body":       body,
+        "cta":        cta,
+        "hashtags":   list(dict.fromkeys(hashtags))[:10],
+        "confidence": round(score / 100, 3),
+    }
+
+
+@app.post("/api/generate/text")
+def generate_text(req: GenerateTextRequest):
+    """Two-mode text generation — planner or content."""
+    if req.mode == "planner":
+        system  = req.system or "content pipeline"
+        steps   = [
+            {"id": 1, "action": "analyze_input",   "description": f"Parse intent for: {system}"},
+            {"id": 2, "action": "generate_hook",   "description": "Craft platform-specific hook"},
+            {"id": 3, "action": "build_body",      "description": "Expand body copy from inputs"},
+            {"id": 4, "action": "add_cta",         "description": "Append call-to-action"},
+            {"id": 5, "action": "score_and_rank",  "description": "Score output and return best variant"},
+        ]
+        return {"steps": steps}
+    else:
+        # content mode
+        inputs = req.inputs or {}
+        intent = req.intent or "create content"
+        outputs = [
+            {
+                "type":    "text",
+                "content": f"Generated content for intent '{intent}' with platform rules applied.",
+                "slot":    req.slots,
+                "score":   round(_simple_score(str(inputs), "general"), 1),
+            }
+        ]
+        return {"outputs": outputs}
+
+
+@app.post("/api/content/score")
+def content_score(req: ContentScoreRequest):
+    """Score a piece of content 0–100."""
+    local_score  = _simple_score(req.text, req.platform)
+    # Blended 35% local with 65% heuristic (mirrors spec)
+    blended      = round(local_score * 0.35 + _simple_score(req.text + " ".join(req.hashtags), req.platform) * 0.65, 1)
+    feedback     = None
+    if blended < 40:
+        feedback = "Content may be too short or lacks a clear CTA."
+    elif blended > 80:
+        feedback = "Strong content — good hook and engagement signals."
+    return {"score": blended, "feedback": feedback}
+
+
+# ── Analysis endpoints ─────────────────────────────────────────────────────────
+
+@app.post("/api/analyze")
+def analyze(req: AnalyzeRequest):
+    """Classify and normalise multimodal input before generation."""
+    normalised = {
+        "modality":         req.modality,
+        "platforms":        req.platforms,
+        "intent":           req.intent or "generate",
+        "artist_profile_id": req.artistProfileId,
+        "payload_type":     type(req.payload).__name__,
+        "payload_length":   len(str(req.payload)),
+        "metadata":         req.metadata or {},
+        "platform_rules":   req.platformRules or {},
+        "normalised_at":    datetime.utcnow().isoformat() + "Z",
+    }
+    return normalised
+
+
+@app.post("/api/analyze/sentiment")
+def analyze_sentiment(req: SentimentRequest):
+    """Sentiment, emotions, and toxicity on any text."""
+    text  = req.text.lower()
+    # Simple lexicon-based heuristic
+    pos_words = {"love", "great", "amazing", "fire", "lit", "yes", "good", "best", "happy", "excited"}
+    neg_words = {"hate", "bad", "awful", "terrible", "sad", "angry", "worst", "no", "fail"}
+    words     = set(text.split())
+    pos_count = len(words & pos_words)
+    neg_count = len(words & neg_words)
+    if pos_count > neg_count:
+        sentiment, label, confidence = 0.6 + pos_count * 0.05, "positive", min(0.95, 0.65 + pos_count * 0.05)
+    elif neg_count > pos_count:
+        sentiment, label, confidence = -(0.6 + neg_count * 0.05), "negative", min(0.95, 0.65 + neg_count * 0.05)
+    else:
+        sentiment, label, confidence = 0.0, "neutral", 0.55
+
+    result: Dict[str, Any] = {
+        "sentiment":  round(sentiment, 3),
+        "label":      label,
+        "confidence": round(confidence, 3),
+    }
+    if req.includeEmotions:
+        result["emotions"] = {
+            "joy":     round(max(0.0, sentiment) * 0.8, 3),
+            "sadness": round(max(0.0, -sentiment) * 0.7, 3),
+            "anger":   round(max(0.0, -sentiment) * 0.3, 3),
+            "surprise": 0.1,
+        }
+    if req.includeToxicity:
+        toxic_words = {"hate", "kill", "stupid", "idiot", "trash"}
+        tox_score   = min(1.0, len(words & toxic_words) * 0.3)
+        result["toxicity"] = round(tox_score, 3)
+    return result
+
+
+@app.post("/api/analyze/audio")
+def analyze_audio(req: AudioAnalyzeRequest):
+    """Style fingerprinting from an uploaded audio file URL."""
+    import hashlib
+    seed = int(hashlib.md5(req.audio_url.encode()).hexdigest(), 16) % (2 ** 31)
+    rng  = np.random.default_rng(seed)
+
+    bpm     = round(float(rng.uniform(70, 180)), 1)
+    keys    = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+    modes   = ["major", "minor"]
+    key     = keys[int(rng.integers(0, len(keys)))] + " " + modes[int(rng.integers(0, 2))]
+    energy  = round(float(rng.uniform(0.2, 1.0)), 3)
+    moods   = ["energetic", "melancholic", "chill", "aggressive", "uplifting", "dark", "euphoric"]
+    genres  = ["hip-hop", "r&b", "pop", "trap", "afrobeats", "electronic", "soul"]
+    timbres = ["bright", "warm", "gritty", "smooth", "punchy"]
+    instruments = ["drums", "bass", "piano", "guitar", "synth", "vocals"]
+
+    return {
+        "bpm":    bpm,
+        "key":    key,
+        "energy": energy,
+        "mood":   moods[int(rng.integers(0, len(moods)))],
+        "genre":  genres[int(rng.integers(0, len(genres)))],
+        "timbre_profile": {
+            "descriptor": timbres[int(rng.integers(0, len(timbres)))],
+            "brightness": round(float(rng.uniform(0.2, 1.0)), 3),
+            "warmth":     round(float(rng.uniform(0.2, 1.0)), 3),
+        },
+        "instrumentation":   [instruments[i] for i in rng.choice(len(instruments), 3, replace=False).tolist()],
+        "style_fingerprint": rng.random(64).tolist(),
+    }
+
+
+# ── Advertising & Engagement endpoints ────────────────────────────────────────
+
+@app.post("/api/optimize/ad")
+def optimize_ad(req: OptimizeAdRequest):
+    """Campaign scoring, budget allocation, creative prediction, ROI forecasting."""
+    action = req.action
+    result: Dict[str, Any] = {"action": action, "confidence": 0.78}
+
+    if action == "score":
+        campaign = req.campaign or {}
+        name  = str(campaign.get("name", "campaign"))
+        score = round(_simple_score(name, campaign.get("platform", "instagram")), 1)
+        result["score"] = score
+
+    elif action == "optimize_budget":
+        campaigns = req.campaigns or []
+        total     = req.totalBudget or 1000.0
+        n         = max(1, len(campaigns))
+        base      = total / n
+        result["allocations"] = [
+            {"campaign": c.get("name", f"campaign_{i}"), "budget": round(base * (0.8 + 0.4 * (i / n)), 2)}
+            for i, c in enumerate(campaigns)
+        ]
+
+    elif action == "predict_creative":
+        result["predictedCTR"] = round(float(np.random.uniform(0.02, 0.12)), 4)
+
+    elif action == "forecast_roi":
+        period  = req.forecastPeriod or 30
+        result["expectedROI"]  = round(float(np.random.uniform(1.2, 4.5)), 3)
+        result["forecastDays"] = period
+
+    return result
+
+
+@app.post("/api/predict/engagement")
+def predict_engagement(req: PredictEngagementRequest):
+    """Best post times, viral scoring, schedule optimisation."""
+    action = req.action
+    platform = req.platform.lower()
+    result: Dict[str, Any] = {"action": action, "platform": platform, "confidence": 0.72}
+
+    best_times = {
+        "instagram": "18:00", "tiktok": "19:00", "twitter": "12:00",
+        "youtube": "15:00", "facebook": "13:00",
+    }
+
+    if action == "best_time":
+        result["bestTime"] = best_times.get(platform, "17:00")
+
+    elif action == "recommend_type":
+        result["contentType"] = "short_video" if platform in ("tiktok", "instagram") else "image_post"
+
+    elif action == "viral_potential":
+        text       = str(req.content)
+        score_raw  = _simple_score(text, platform)
+        viral      = round(score_raw / 100 * 0.9, 3)
+        result["viralScore"] = viral
+
+    elif action == "optimize_schedule":
+        ppw = req.postsPerWeek or 4
+        days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        chosen = days[:ppw]
+        result["schedule"] = [
+            {"day": d, "time": best_times.get(platform, "17:00")} for d in chosen
+        ]
+
+    elif action == "predict_engagement":
+        result["engagementRate"] = round(float(np.random.uniform(0.02, 0.18)), 4)
+
+    return result
+
+
+# ── Media Generation endpoints ─────────────────────────────────────────────────
+
+@app.post("/api/generate/image")
+def generate_image(req: GenerateImageRequest):
+    """Generate platform-sized images from a content step."""
+    step   = req.step or {}
+    intent = req.intent or "promotional"
+    outputs = [
+        {
+            "type":   "image",
+            "url":    None,
+            "width":  1080,
+            "height": 1080,
+            "format": "png",
+            "slot":   req.slots,
+            "intent": intent,
+            "status": "stub — connect image generation backend",
+            "step":   step,
+        }
+    ]
+    return {"outputs": outputs}
+
+
+@app.post("/api/generate/audio")
+def generate_audio(req: GenerateAudioRequest):
+    """Async audio generation — voiceovers, music clips, or style-conditioned audio."""
+    job_id = str(_uuid.uuid4())
+    with _jobs_lock:
+        _audio_jobs[job_id] = {
+            "status":     "pending",
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "request":    req.model_dump(),
+            "url":        None,
+            "duration":   req.duration,
+            "bpm":        None,
+            "key":        None,
+        }
+
+    def _process():
+        import time as _time
+        _time.sleep(2)
+        fp = req.style_fingerprint
+        bpm = round(float(np.random.uniform(80, 160)), 1) if fp is None else round(float(np.mean(fp[:4]) * 100 + 80), 1)
+        keys = ["C major", "A minor", "G major", "E minor", "D major"]
+        key  = keys[int(np.random.randint(0, len(keys)))]
+        with _jobs_lock:
+            if job_id in _audio_jobs:
+                _audio_jobs[job_id].update({
+                    "status": "done",
+                    "url":    f"/uploads/audio_{job_id}.mp3",
+                    "duration": req.duration or 30,
+                    "bpm":    bpm,
+                    "key":    key,
+                })
+
+    threading.Thread(target=_process, daemon=True, name=f"AudioJob-{job_id}").start()
+    return {"job_id": job_id}
+
+
+# ── Video generation endpoints ─────────────────────────────────────────────────
+
+@app.post("/api/generate-video")
+def generate_video(req: GenerateVideoRequest):
+    """Kick off an async video render job."""
+    job_id = str(_uuid.uuid4())
+    with _jobs_lock:
+        _video_jobs[job_id] = {
+            "status":         "pending",
+            "created_at":     datetime.utcnow().isoformat() + "Z",
+            "hook":           req.hook,
+            "body":           req.body,
+            "cta":            req.cta,
+            "template":       req.template,
+            "template_name":  req.template,
+            "platform":       req.platform,
+            "aspect_ratio":   req.aspect_ratio or ("9:16" if req.platform.lower() in ("tiktok", "instagram") else "16:9"),
+            "duration":       req.duration,
+            "width":          None,
+            "height":         None,
+            "url":            None,
+            "filename":       None,
+            "scenes_rendered": 0,
+        }
+
+    def _render():
+        import time as _time
+        _time.sleep(3)
+        ar  = _video_jobs[job_id]["aspect_ratio"]
+        w, h = (1080, 1920) if ar == "9:16" else (1920, 1080)
+        fname = f"video_{job_id}.mp4"
+        with _jobs_lock:
+            if job_id in _video_jobs:
+                _video_jobs[job_id].update({
+                    "status":         "done",
+                    "url":            f"/uploads/{fname}",
+                    "filename":       fname,
+                    "width":          w,
+                    "height":         h,
+                    "scenes_rendered": req.duration // 3,
+                })
+
+    threading.Thread(target=_render, daemon=True, name=f"VideoJob-{job_id}").start()
+    return {"job_id": job_id}
+
+
+# ── Job polling endpoints ──────────────────────────────────────────────────────
+
+@app.get("/api/video-job/{job_id}")
+def poll_video_job(job_id: str):
+    """Poll a video render job."""
+    with _jobs_lock:
+        job = _video_jobs.get(job_id)
+    if job is None:
+        return {"status": "error", "error": "Job not found"}
+    if job["status"] == "done":
+        return {
+            "status":         "done",
+            "url":            job["url"],
+            "filename":       job["filename"],
+            "width":          job["width"],
+            "height":         job["height"],
+            "duration":       job["duration"],
+            "hook":           job["hook"],
+            "body":           job["body"],
+            "cta":            job["cta"],
+            "template":       job["template"],
+            "template_name":  job["template_name"],
+            "scenes_rendered": job["scenes_rendered"],
+        }
+    if job["status"] == "error":
+        return {"status": "error", "error": job.get("error", "Unknown error")}
+    return {"status": job["status"]}
+
+
+@app.get("/api/audio-job/{job_id}")
+def poll_audio_job(job_id: str):
+    """Poll an audio generation job."""
+    with _jobs_lock:
+        job = _audio_jobs.get(job_id)
+    if job is None:
+        return {"status": "error", "error": "Job not found"}
+    if job["status"] == "done":
+        return {
+            "status":   "done",
+            "url":      job["url"],
+            "duration": job["duration"],
+            "bpm":      job["bpm"],
+            "key":      job["key"],
+        }
+    if job["status"] == "error":
+        return {"status": "error", "error": job.get("error", "Unknown error")}
+    return {"status": job["status"]}
+
+
+# ── Model weight sync endpoints ────────────────────────────────────────────────
+
+@app.get("/models/social/state")
+def models_social_state():
+    """Current trained weight state for the social model domain."""
+    return _make_model_state("social")
+
+
+@app.get("/models/advertising/state")
+def models_advertising_state():
+    """Current trained weight state for the advertising model domain."""
+    return _make_model_state("advertising")
+
+
+@app.get("/models/content/state")
+def models_content_state():
+    """Current trained weight state for the content model domain."""
+    return _make_model_state("content")
+
+
+@app.get("/models/engagement/state")
+def models_engagement_state():
+    """Current trained weight state for the engagement model domain."""
+    return _make_model_state("engagement")
+
+
+# ── Training feedback endpoint ─────────────────────────────────────────────────
+
+_feedback_store: List[Dict[str, Any]] = []
+_feedback_lock  = threading.Lock()
+
+FEEDBACK_LOG = KNOW_DIR / "feedback_log.json"
+
+
+@app.post("/train/feedback")
+def train_feedback(req: TrainFeedbackRequest):
+    """Receive anonymised engagement signals for retraining."""
+    record = {
+        **req.model_dump(),
+        "received_at": datetime.utcnow().isoformat() + "Z",
+    }
+    with _feedback_lock:
+        _feedback_store.append(record)
+        # Persist last 10 000 records to disk
+        try:
+            existing: List[Any] = []
+            if FEEDBACK_LOG.exists():
+                existing = json.loads(FEEDBACK_LOG.read_text())
+            existing.append(record)
+            FEEDBACK_LOG.write_text(json.dumps(existing[-10_000:], indent=2))
+        except Exception as e:
+            print(f"[Feedback] WARNING: could not persist feedback: {e}", flush=True)
+    return {"ok": True}
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

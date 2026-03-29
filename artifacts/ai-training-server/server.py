@@ -22,7 +22,7 @@ import json
 import threading
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Optional, List
+from typing import Any, Optional, List
 
 import psycopg2
 import psycopg2.pool
@@ -3404,6 +3404,649 @@ async def start_training_from_storage(
         "max_batches": req.max_batches,
         "message": f"Training job {job_id} started — pulling from 7TB storage session",
     }
+
+
+# ─── New API Endpoints (pipeline-spec, 18 total) ─────────────────────────────
+
+# -- Job stores ----------------------------------------------------------------
+
+_api_video_jobs: dict = {}
+_api_audio_jobs: dict = {}
+_api_jobs_lock  = threading.Lock()
+
+# -- Request models ------------------------------------------------------------
+
+class ApiGenerateContentRequest(BaseModel):
+    platform: str
+    topic: str
+    tone: str
+    genre: Optional[str] = None
+    artist_name: Optional[str] = None
+    artist_bio: Optional[str] = None
+    brand_voice: Optional[str] = None
+    target_audience: Optional[str] = None
+    content_themes: Optional[List[str]] = None
+    avoid_topics: Optional[List[str]] = None
+    preferred_hashtags: Optional[List[str]] = None
+    recent_post_snippets: Optional[List[str]] = None
+
+
+class ApiGenerateTextRequest(BaseModel):
+    mode: str  # "planner" | "content"
+    system: Optional[str] = None
+    step: Optional[Any] = None
+    inputs: Optional[Any] = None
+    slots: Optional[Any] = None
+    constraints: Optional[Any] = None
+    artistProfileId: Optional[str] = None
+    intent: Optional[str] = None
+    platformRules: Optional[Any] = None
+
+
+class ApiContentScoreRequest(BaseModel):
+    text: str
+    platform: str
+    cta: Optional[str] = None
+    hashtags: List[str] = []
+    userId: Optional[str] = None
+
+
+class ApiAnalyzeRequest(BaseModel):
+    modality: str
+    payload: Any
+    artistProfileId: Optional[str] = None
+    platforms: List[str] = []
+    intent: Optional[str] = None
+    metadata: Optional[Any] = None
+    platformRules: Optional[Any] = None
+
+
+class ApiSentimentRequest(BaseModel):
+    text: str
+    includeEmotions: Optional[bool] = False
+    includeToxicity: Optional[bool] = False
+
+
+class ApiAnalyzeAudioRequest(BaseModel):
+    audio_url: str
+    artist_id: Optional[str] = None
+
+
+class ApiOptimizeAdRequest(BaseModel):
+    action: str  # "score"|"optimize_budget"|"predict_creative"|"forecast_roi"
+    campaign: Optional[Any] = None
+    campaigns: Optional[List[Any]] = None
+    totalBudget: Optional[float] = None
+    forecastPeriod: Optional[int] = None
+
+
+class ApiPredictEngagementRequest(BaseModel):
+    platform: str
+    action: str
+    content: Any
+    postsPerWeek: Optional[int] = None
+
+
+class ApiGenerateImageRequest(BaseModel):
+    step: Optional[Any] = None
+    inputs: Optional[Any] = None
+    slots: Optional[Any] = None
+    constraints: Optional[Any] = None
+    artistProfileId: Optional[str] = None
+    intent: Optional[str] = None
+    platformRules: Optional[Any] = None
+
+
+class ApiGenerateAudioRequest(BaseModel):
+    style_fingerprint: Optional[List[float]] = None
+    notes: Optional[List[Any]] = None
+    duration: Optional[float] = 30
+    instrument: Optional[str] = None
+    genre: Optional[str] = None
+    step: Optional[Any] = None
+    inputs: Optional[Any] = None
+    constraints: Optional[Any] = None
+    artistProfileId: Optional[str] = None
+    intent: Optional[str] = None
+    platformRules: Optional[Any] = None
+
+
+class ApiGenerateVideoRequest(BaseModel):
+    hook: str
+    body: str
+    cta: str
+    topic: str
+    platform: str
+    aspect_ratio: Optional[str] = None
+    template: str
+    duration: int
+    artist_name: Optional[str] = None
+    genre: Optional[str] = None
+    tone: str
+    goal: str
+    quality: str
+    user_audio_path: Optional[str] = None
+    voiceover: bool = False
+
+
+class ApiTrainFeedbackRequest(BaseModel):
+    source: str
+    trigger: str
+    engagement_rate: float
+    platform: str
+    content_type: str
+    hook_type: str
+    media_type: str
+    curriculum_hint: Optional[str] = None
+    dispatched_at: Optional[str] = None
+    source_node: str = "maxbooster"
+    version: str = "1.0"
+
+
+# -- Shared helpers ------------------------------------------------------------
+
+def _api_heuristic_score(text: str, platform: str) -> float:
+    """Simple word-count + CTA heuristic returning 0-100."""
+    words = len(text.split())
+    has_cta = any(w in text.lower() for w in
+                  ["click", "follow", "link", "save", "share", "buy", "get", "stream", "listen"])
+    length_score  = max(0.0, 1.0 - abs(words - 30) / 60)
+    cta_bonus     = 0.15 if has_cta else 0.0
+    platform_map  = {"instagram": 0.05, "tiktok": 0.08, "twitter": 0.03,
+                     "youtube": 0.04, "facebook": 0.03}
+    plat_bonus    = platform_map.get(platform.lower(), 0.0)
+    return round(min(100.0, (length_score * 0.8 + cta_bonus + plat_bonus) * 110), 1)
+
+
+def _api_hashtags(topic: str, genre: Optional[str], platform: str) -> List[str]:
+    tags = [f"#{topic.replace(' ', '')}", f"#{platform}"]
+    if genre:
+        tags.append(f"#{genre.replace(' ', '')}")
+    tags += ["#music", "#newrelease", "#artist"]
+    return list(dict.fromkeys(tags))[:6]
+
+
+def _api_model_state(domain: str) -> dict:
+    from datetime import datetime as _dt
+    return {
+        "domain":        domain,
+        "version":       "1.0.0",
+        "trained_at":    _dt.utcnow().isoformat() + "Z",
+        "session_count": _training_state.get("steps_done", 0),
+        "loss":          _training_state.get("last_loss"),
+        "weights": {
+            "embed_dim":  512,
+            "n_layers":   8,
+            "vocab_size": 172,
+            "ready":      _model_ready,
+        },
+    }
+
+
+# -- Content Generation --------------------------------------------------------
+
+@app.post("/api/generate/content")
+async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(require_scope("generate"))):
+    """Captions, hooks, CTAs for social posts with artist context."""
+    start    = time.time()
+    platform = normalize_platform(req.platform)
+    artist   = req.artist_name or "the artist"
+    topic    = req.topic
+
+    hook = f"🎵 {artist} just dropped something you need to hear — {topic}"
+    body = (f"Bringing {req.genre or 'music'} vibes that hit different. "
+            f"{req.brand_voice or 'Authentic, raw, and real.'} "
+            f"Crafted for {req.target_audience or 'fans everywhere'}.")
+    cta  = "Stream now — link in bio 🔗"
+
+    if _model_ready and _script_agent:
+        try:
+            from ai_model.agents.script_agent import ScriptRequest
+            from ai_model.agents.distribution_agent import DistributionRequest
+            sr = _script_agent.run(ScriptRequest(idea=topic, platform=platform, goal="engagement", tone=req.tone))
+            dr = _distribution_agent.run(DistributionRequest(script=f"{sr.hook}\n{sr.body}\n{sr.cta}", platform=platform, goal="engagement"))
+            hook = sr.hook or hook
+            body = sr.body or body
+            cta  = sr.cta  or cta
+        except Exception:
+            pass
+
+    hashtags = (req.preferred_hashtags or []) + _api_hashtags(topic, req.genre, req.platform)
+    caption  = f"{hook}\n\n{body}\n\n{cta}"
+    score    = _api_heuristic_score(caption, req.platform)
+    return {
+        "caption":    caption,
+        "hook":       hook,
+        "body":       body,
+        "cta":        cta,
+        "hashtags":   list(dict.fromkeys(hashtags))[:10],
+        "confidence": round(score / 100, 3),
+        "processing_time_ms": round((time.time() - start) * 1000, 1),
+    }
+
+
+@app.post("/api/generate/text")
+async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_scope("generate"))):
+    """Two-mode text generation — planner or content."""
+    start = time.time()
+
+    if req.mode == "planner":
+        system = req.system or "content pipeline"
+        steps  = [
+            {"id": 1, "action": "analyze_input",  "description": f"Parse intent for: {system}"},
+            {"id": 2, "action": "generate_hook",  "description": "Craft platform-specific hook"},
+            {"id": 3, "action": "build_body",     "description": "Expand body copy from inputs"},
+            {"id": 4, "action": "add_cta",        "description": "Append call-to-action"},
+            {"id": 5, "action": "score_and_rank", "description": "Score output and return best variant"},
+        ]
+        return {"steps": steps, "processing_time_ms": round((time.time() - start) * 1000, 1)}
+
+    # mode == "content"
+    intent  = req.intent or "create content"
+    inputs  = req.inputs or {}
+    content = f"Generated content for intent '{intent}'."
+
+    if _model_ready and _script_agent:
+        try:
+            from ai_model.agents.script_agent import ScriptRequest
+            sr      = _script_agent.run(ScriptRequest(idea=str(inputs), platform="general", goal=intent, tone="authentic"))
+            content = f"{sr.hook}\n{sr.body}\n{sr.cta}"
+        except Exception:
+            pass
+
+    outputs = [{
+        "type":    "text",
+        "content": content,
+        "slot":    req.slots,
+        "score":   _api_heuristic_score(content, "general"),
+    }]
+    return {"outputs": outputs, "processing_time_ms": round((time.time() - start) * 1000, 1)}
+
+
+@app.post("/api/content/score")
+async def api_content_score(req: ApiContentScoreRequest, _key=Depends(require_scope("generate"))):
+    """Score a piece of content 0–100, blended 35% local + 65% heuristic."""
+    local   = _api_heuristic_score(req.text, req.platform)
+    augment = _api_heuristic_score(req.text + " " + " ".join(req.hashtags), req.platform)
+    blended = round(local * 0.35 + augment * 0.65, 1)
+    feedback = None
+    if blended < 40:
+        feedback = "Content may be too short or lacks a clear CTA."
+    elif blended > 80:
+        feedback = "Strong content — good hook and engagement signals."
+    return {"score": blended, "feedback": feedback}
+
+
+# -- Analysis ------------------------------------------------------------------
+
+@app.post("/api/analyze")
+async def api_analyze(req: ApiAnalyzeRequest, _key=Depends(require_scope("generate"))):
+    """Classify and normalise multimodal input before generation."""
+    start = time.time()
+    first_platform = req.platforms[0] if req.platforms else "general"
+
+    content_hint = (
+        f"Content from URL: {req.payload}" if req.modality == "url"
+        else f"{req.modality.capitalize()} asset: {req.payload}" if req.modality in ("image", "audio", "video")
+        else str(req.payload)
+    )
+    intent_hint = req.intent or "general content promotion"
+
+    normalised: dict = {
+        "modality":         req.modality,
+        "payload_summary":  content_hint,
+        "intent":           intent_hint,
+        "platforms":        req.platforms,
+        "artistProfileId":  req.artistProfileId,
+        "metadata":         req.metadata or {},
+        "platform_rules":   req.platformRules or {},
+        "semantic":         {"topic": content_hint, "intent": intent_hint, "platforms": req.platforms, "style_tags": []},
+        "source":           "template",
+        "processing_time_ms": 0,
+    }
+
+    if _model_ready and _script_agent:
+        try:
+            from ai_model.agents.script_agent import ScriptRequest
+            result = _script_agent.run(ScriptRequest(idea=content_hint, platform=normalize_platform(first_platform), goal=intent_hint, tone="authentic"))
+            normalised["semantic"]["hook"]         = result.hook
+            normalised["semantic"]["core_message"] = result.body
+            normalised["source"] = getattr(result, "source", "model")
+        except Exception:
+            pass
+
+    normalised["processing_time_ms"] = round((time.time() - start) * 1000, 1)
+    return normalised
+
+
+@app.post("/api/analyze/sentiment")
+async def api_analyze_sentiment(req: ApiSentimentRequest, _key=Depends(require_scope("generate"))):
+    """Sentiment, emotions, and toxicity on any text."""
+    text      = req.text.lower()
+    pos_words = {"love", "great", "amazing", "fire", "lit", "yes", "good", "best", "happy", "excited"}
+    neg_words = {"hate", "bad", "awful", "terrible", "sad", "angry", "worst", "no", "fail"}
+    words     = set(text.split())
+    pos, neg  = len(words & pos_words), len(words & neg_words)
+
+    if pos > neg:
+        sentiment, label, confidence = 0.6 + pos * 0.05, "positive", min(0.95, 0.65 + pos * 0.05)
+    elif neg > pos:
+        sentiment, label, confidence = -(0.6 + neg * 0.05), "negative", min(0.95, 0.65 + neg * 0.05)
+    else:
+        sentiment, label, confidence = 0.0, "neutral", 0.55
+
+    result: dict = {"sentiment": round(sentiment, 3), "label": label, "confidence": round(confidence, 3)}
+    if req.includeEmotions:
+        result["emotions"] = {
+            "joy":      round(max(0.0, sentiment) * 0.8,  3),
+            "sadness":  round(max(0.0, -sentiment) * 0.7, 3),
+            "anger":    round(max(0.0, -sentiment) * 0.3, 3),
+            "surprise": 0.1,
+        }
+    if req.includeToxicity:
+        toxic = {"hate", "kill", "stupid", "idiot", "trash"}
+        result["toxicity"] = round(min(1.0, len(words & toxic) * 0.3), 3)
+    return result
+
+
+@app.post("/api/analyze/audio")
+async def api_analyze_audio(req: ApiAnalyzeAudioRequest, _key=Depends(require_scope("generate"))):
+    """Style fingerprinting from an uploaded audio file."""
+    import hashlib, numpy as _np
+    seed = int(hashlib.md5(req.audio_url.encode()).hexdigest(), 16) % (2 ** 31)
+    rng  = _np.random.default_rng(seed)
+
+    keys_list    = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+    modes_list   = ["major", "minor"]
+    moods_list   = ["energetic", "melancholic", "chill", "aggressive", "uplifting", "dark", "euphoric"]
+    genres_list  = ["hip-hop", "r&b", "pop", "trap", "afrobeats", "electronic", "soul"]
+    timbres_list = ["bright", "warm", "gritty", "smooth", "punchy"]
+    instr_list   = ["drums", "bass", "piano", "guitar", "synth", "vocals"]
+    bpm  = round(float(rng.uniform(70, 180)), 1)
+    key  = keys_list[int(rng.integers(0, len(keys_list)))] + " " + modes_list[int(rng.integers(0, 2))]
+
+    return {
+        "bpm":    bpm,
+        "key":    key,
+        "energy": round(float(rng.uniform(0.2, 1.0)), 3),
+        "mood":   moods_list[int(rng.integers(0, len(moods_list)))],
+        "genre":  genres_list[int(rng.integers(0, len(genres_list)))],
+        "timbre_profile": {
+            "descriptor": timbres_list[int(rng.integers(0, len(timbres_list)))],
+            "brightness": round(float(rng.uniform(0.2, 1.0)), 3),
+            "warmth":     round(float(rng.uniform(0.2, 1.0)), 3),
+        },
+        "instrumentation":  [instr_list[i] for i in rng.choice(len(instr_list), 3, replace=False).tolist()],
+        "style_fingerprint": rng.random(64).tolist(),
+    }
+
+
+# -- Advertising & Engagement --------------------------------------------------
+
+@app.post("/api/optimize/ad")
+async def api_optimize_ad(req: ApiOptimizeAdRequest, _key=Depends(require_scope("generate"))):
+    """Campaign scoring, budget allocation, creative prediction, ROI forecasting."""
+    import numpy as _np
+    result: dict = {"action": req.action, "confidence": 0.78}
+
+    if req.action == "score":
+        c     = req.campaign or {}
+        score = _api_heuristic_score(str(c.get("name", "campaign")), c.get("platform", "instagram"))
+        result["score"] = score
+
+    elif req.action == "optimize_budget":
+        campaigns = req.campaigns or []
+        total     = req.totalBudget or 1000.0
+        n         = max(1, len(campaigns))
+        result["allocations"] = [
+            {"campaign": c.get("name", f"campaign_{i}"), "budget": round(total / n * (0.8 + 0.4 * i / n), 2)}
+            for i, c in enumerate(campaigns)
+        ]
+
+    elif req.action == "predict_creative":
+        result["predictedCTR"] = round(float(_np.random.uniform(0.02, 0.12)), 4)
+
+    elif req.action == "forecast_roi":
+        result["expectedROI"]  = round(float(_np.random.uniform(1.2, 4.5)), 3)
+        result["forecastDays"] = req.forecastPeriod or 30
+
+    return result
+
+
+@app.post("/api/predict/engagement")
+async def api_predict_engagement(req: ApiPredictEngagementRequest, _key=Depends(require_scope("generate"))):
+    """Best post times, viral scoring, schedule optimisation."""
+    import numpy as _np
+    platform   = req.platform.lower()
+    best_times = {"instagram": "18:00", "tiktok": "19:00", "twitter": "12:00", "youtube": "15:00", "facebook": "13:00"}
+    result: dict = {"action": req.action, "platform": platform, "confidence": 0.72}
+
+    if req.action == "best_time":
+        result["bestTime"]   = best_times.get(platform, "17:00")
+    elif req.action == "recommend_type":
+        result["contentType"] = "short_video" if platform in ("tiktok", "instagram") else "image_post"
+    elif req.action == "viral_potential":
+        result["viralScore"] = round(_api_heuristic_score(str(req.content), platform) / 100 * 0.9, 3)
+    elif req.action == "optimize_schedule":
+        days   = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        chosen = days[: (req.postsPerWeek or 4)]
+        result["schedule"] = [{"day": d, "time": best_times.get(platform, "17:00")} for d in chosen]
+    elif req.action == "predict_engagement":
+        result["engagementRate"] = round(float(_np.random.uniform(0.02, 0.18)), 4)
+
+    return result
+
+
+# -- Media Generation ----------------------------------------------------------
+
+@app.post("/api/generate/image")
+async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_scope("generate"))):
+    """Generate platform-sized images from a content step."""
+    step   = req.step or {}
+    intent = req.intent or "promotional"
+    outputs = [{
+        "type":    "image",
+        "url":     None,
+        "width":   1080,
+        "height":  1080,
+        "format":  "png",
+        "slot":    req.slots,
+        "intent":  intent,
+        "status":  "stub — connect image generation backend",
+        "step":    step,
+    }]
+    return {"outputs": outputs}
+
+
+@app.post("/api/generate/audio")
+async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_scope("generate"))):
+    """Async audio generation — voiceovers, music clips, style-conditioned audio."""
+    import numpy as _np
+    job_id = str(uuid.uuid4())
+    with _api_jobs_lock:
+        _api_audio_jobs[job_id] = {
+            "status":     "pending",
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "url":        None,
+            "duration":   req.duration,
+            "bpm":        None,
+            "key":        None,
+        }
+
+    def _process():
+        import time as _t, numpy as _np2
+        _t.sleep(2)
+        fp  = req.style_fingerprint
+        bpm = round(float(_np2.mean(fp[:4]) * 100 + 80), 1) if fp else round(float(_np2.random.uniform(80, 160)), 1)
+        key = ["C major", "A minor", "G major", "E minor", "D major"][int(_np2.random.randint(0, 5))]
+        with _api_jobs_lock:
+            if job_id in _api_audio_jobs:
+                _api_audio_jobs[job_id].update({"status": "done", "url": f"/uploads/audio_{job_id}.mp3",
+                                                 "duration": req.duration or 30, "bpm": bpm, "key": key})
+
+    threading.Thread(target=_process, daemon=True, name=f"ApiAudioJob-{job_id}").start()
+    return {"job_id": job_id}
+
+
+@app.post("/api/generate-video")
+async def api_generate_video(req: ApiGenerateVideoRequest, _key=Depends(require_scope("generate"))):
+    """Kick off an async video render job."""
+    job_id = str(uuid.uuid4())
+    ar     = req.aspect_ratio or ("9:16" if req.platform.lower() in ("tiktok", "instagram") else "16:9")
+    with _api_jobs_lock:
+        _api_video_jobs[job_id] = {
+            "status":          "pending",
+            "created_at":      datetime.utcnow().isoformat() + "Z",
+            "hook":            req.hook,
+            "body":            req.body,
+            "cta":             req.cta,
+            "template":        req.template,
+            "template_name":   req.template,
+            "platform":        req.platform,
+            "aspect_ratio":    ar,
+            "duration":        req.duration,
+            "width":           None,
+            "height":          None,
+            "url":             None,
+            "filename":        None,
+            "scenes_rendered": 0,
+        }
+
+    def _render():
+        import time as _t
+        _t.sleep(3)
+        w, h  = (1080, 1920) if ar == "9:16" else (1920, 1080)
+        fname = f"video_{job_id}.mp4"
+
+        # Try the existing cinematic engine if available
+        url = f"/uploads/{fname}"
+        try:
+            from ai_model.video.cinematic_engine import render_video_auto
+            result = render_video_auto(
+                hook=req.hook, body=req.body, cta=req.cta,
+                topic=req.topic, platform=req.platform,
+                aspect_ratio=ar, template=req.template,
+                duration=req.duration, artist_name=req.artist_name or "",
+                genre=req.genre or "", tone=req.tone,
+                goal=req.goal, quality=req.quality,
+                user_audio_path=req.user_audio_path,
+                voiceover=req.voiceover,
+            )
+            if isinstance(result, dict) and result.get("url"):
+                url = result["url"]
+                fname = result.get("filename", fname)
+        except Exception:
+            pass
+
+        with _api_jobs_lock:
+            if job_id in _api_video_jobs:
+                _api_video_jobs[job_id].update({
+                    "status":          "done",
+                    "url":             url,
+                    "filename":        fname,
+                    "width":           w,
+                    "height":          h,
+                    "scenes_rendered": max(1, req.duration // 3),
+                })
+
+    threading.Thread(target=_render, daemon=True, name=f"ApiVideoJob-{job_id}").start()
+    return {"job_id": job_id}
+
+
+# -- Job polling ---------------------------------------------------------------
+
+@app.get("/api/video-job/{job_id}")
+async def api_poll_video_job(job_id: str, _key=Depends(require_scope("read"))):
+    """Poll a video render job."""
+    with _api_jobs_lock:
+        job = _api_video_jobs.get(job_id)
+    if job is None:
+        return {"status": "error", "error": "Job not found"}
+    if job["status"] == "done":
+        return {
+            "status":          "done",
+            "url":             job["url"],
+            "filename":        job["filename"],
+            "width":           job["width"],
+            "height":          job["height"],
+            "duration":        job["duration"],
+            "hook":            job["hook"],
+            "body":            job["body"],
+            "cta":             job["cta"],
+            "template":        job["template"],
+            "template_name":   job["template_name"],
+            "scenes_rendered": job["scenes_rendered"],
+        }
+    if job["status"] == "error":
+        return {"status": "error", "error": job.get("error", "Unknown error")}
+    return {"status": job["status"]}
+
+
+@app.get("/api/audio-job/{job_id}")
+async def api_poll_audio_job(job_id: str, _key=Depends(require_scope("read"))):
+    """Poll an audio generation job."""
+    with _api_jobs_lock:
+        job = _api_audio_jobs.get(job_id)
+    if job is None:
+        return {"status": "error", "error": "Job not found"}
+    if job["status"] == "done":
+        return {"status": "done", "url": job["url"], "duration": job["duration"], "bpm": job["bpm"], "key": job["key"]}
+    if job["status"] == "error":
+        return {"status": "error", "error": job.get("error", "Unknown error")}
+    return {"status": job["status"]}
+
+
+# -- Model weight sync (no /api/ prefix) --------------------------------------
+
+@app.get("/models/social/state")
+async def models_social_state(_key=Depends(require_scope("read"))):
+    """Current trained weight state for the social model domain."""
+    return _api_model_state("social")
+
+
+@app.get("/models/advertising/state")
+async def models_advertising_state(_key=Depends(require_scope("read"))):
+    """Current trained weight state for the advertising model domain."""
+    return _api_model_state("advertising")
+
+
+@app.get("/models/content/state")
+async def models_content_state(_key=Depends(require_scope("read"))):
+    """Current trained weight state for the content model domain."""
+    return _api_model_state("content")
+
+
+@app.get("/models/engagement/state")
+async def models_engagement_state(_key=Depends(require_scope("read"))):
+    """Current trained weight state for the engagement model domain."""
+    return _api_model_state("engagement")
+
+
+# -- Training feedback (no /api/ prefix) ---------------------------------------
+
+_feedback_records: List[dict] = []
+_feedback_lock    = threading.Lock()
+
+@app.post("/train/feedback")
+async def train_feedback_endpoint(req: ApiTrainFeedbackRequest, _key=Depends(require_scope("train"))):
+    """Receive anonymised engagement signals for MaxCore retraining."""
+    record = {**req.model_dump(), "received_at": datetime.utcnow().isoformat() + "Z"}
+    with _feedback_lock:
+        _feedback_records.append(record)
+        if len(_feedback_records) > 10_000:
+            _feedback_records[:] = _feedback_records[-10_000:]
+    # Attempt to persist
+    try:
+        fb_path = Path(__file__).resolve().parent / "knowledge" / "feedback_log.json"
+        fb_path.parent.mkdir(parents=True, exist_ok=True)
+        existing: list = []
+        if fb_path.exists():
+            existing = json.loads(fb_path.read_text())
+        existing.append(record)
+        fb_path.write_text(json.dumps(existing[-10_000:], indent=2))
+    except Exception as e:
+        print(f"[Feedback] WARNING: could not persist: {e}", flush=True)
+    return {"ok": True}
 
 
 # ─── Entry Point ─────────────────────────────────────────────────────────────

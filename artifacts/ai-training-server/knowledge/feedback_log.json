@@ -1,0 +1,16 @@
+[
+  {
+    "source": "maxbooster",
+    "trigger": "post_publish",
+    "engagement_rate": 0.12,
+    "platform": "instagram",
+    "content_type": "video",
+    "hook_type": "question",
+    "media_type": "short_video",
+    "curriculum_hint": null,
+    "dispatched_at": null,
+    "source_node": "maxbooster",
+    "version": "1.0",
+    "received_at": "2026-03-29T13:38:11.036295Z"
+  }
+]
