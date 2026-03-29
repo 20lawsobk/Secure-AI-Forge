@@ -135,6 +135,28 @@ def init_db():
         print(f"[Server] {admin_key}")
         print(f"[Server] Admin key prefix: {prefix}...")
 
+    # Ensure AI_TRAINING_KEY_PROD is registered (idempotent — upsert by hash)
+    _prod_key = os.environ.get("AI_TRAINING_KEY_PROD")
+    if _prod_key:
+        _prod_hash   = hashlib.sha256(_prod_key.encode()).hexdigest()
+        _prod_prefix = _prod_key[:12]
+        cur.execute("SELECT id FROM api_keys WHERE key_hash = %s", (_prod_hash,))
+        if not cur.fetchone():
+            cur.execute(
+                """INSERT INTO api_keys (name, key_hash, prefix, scopes, is_active)
+                   VALUES (%s, %s, %s, %s, TRUE)""",
+                ("AI Training Key (prod)", _prod_hash, _prod_prefix,
+                 ["read", "write", "train", "admin", "generate"])
+            )
+            print(f"[Server] AI_TRAINING_KEY_PROD registered: {_prod_prefix}...")
+        else:
+            # Ensure it's active
+            cur.execute(
+                "UPDATE api_keys SET is_active = TRUE WHERE key_hash = %s",
+                (_prod_hash,)
+            )
+            print(f"[Server] AI_TRAINING_KEY_PROD already registered: {_prod_prefix}...")
+
     conn.commit()
     cur.close()
     _release(conn)
@@ -316,7 +338,10 @@ def _init_ai_model():
 
 # ─── Auth Helpers ────────────────────────────────────────────────────────────
 
-ADMIN_KEY_ENV = os.environ.get("ADMIN_KEY")
+ADMIN_KEY_ENV          = os.environ.get("ADMIN_KEY")
+AI_TRAINING_KEY_PROD   = os.environ.get("AI_TRAINING_KEY_PROD")
+
+_ENV_BYPASS_KEYS: set = {k for k in [ADMIN_KEY_ENV, AI_TRAINING_KEY_PROD] if k}
 
 def verify_api_key(x_api_key: str = Header(None), x_admin_key: str = Header(None)):
     """Verify API key from X-Api-Key or X-Admin-Key header."""
@@ -324,8 +349,8 @@ def verify_api_key(x_api_key: str = Header(None), x_admin_key: str = Header(None
     if not raw_key:
         raise HTTPException(status_code=401, detail="API key required")
 
-    # Allow env-based admin override
-    if ADMIN_KEY_ENV and raw_key == ADMIN_KEY_ENV:
+    # Allow env-based admin override for ADMIN_KEY and AI_TRAINING_KEY_PROD
+    if raw_key in _ENV_BYPASS_KEYS:
         return {"id": "env-admin", "scopes": ["read", "write", "train", "admin", "generate"]}
 
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()

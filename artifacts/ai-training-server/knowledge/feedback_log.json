@@ -26,5 +26,19 @@
     "source_node": "maxbooster",
     "version": "1.0",
     "received_at": "2026-03-29T13:54:00.837225Z"
+  },
+  {
+    "source": "maxbooster",
+    "trigger": "post_publish",
+    "engagement_rate": 0.15,
+    "platform": "tiktok",
+    "content_type": "video",
+    "hook_type": "statement",
+    "media_type": "short_video",
+    "curriculum_hint": null,
+    "dispatched_at": null,
+    "source_node": "maxbooster",
+    "version": "1.0",
+    "received_at": "2026-03-29T14:04:08.957447Z"
   }
 ]
