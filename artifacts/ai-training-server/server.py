@@ -3998,36 +3998,36 @@ async def api_poll_audio_job(job_id: str, _key=Depends(require_scope("read"))):
 
 # -- Model weight sync (no /api/ prefix) --------------------------------------
 
-@app.get("/models/social/state")
+@app.get("/api/models/social/state")
 async def models_social_state(_key=Depends(require_scope("read"))):
     """Current trained weight state for the social model domain."""
     return _api_model_state("social")
 
 
-@app.get("/models/advertising/state")
+@app.get("/api/models/advertising/state")
 async def models_advertising_state(_key=Depends(require_scope("read"))):
     """Current trained weight state for the advertising model domain."""
     return _api_model_state("advertising")
 
 
-@app.get("/models/content/state")
+@app.get("/api/models/content/state")
 async def models_content_state(_key=Depends(require_scope("read"))):
     """Current trained weight state for the content model domain."""
     return _api_model_state("content")
 
 
-@app.get("/models/engagement/state")
+@app.get("/api/models/engagement/state")
 async def models_engagement_state(_key=Depends(require_scope("read"))):
     """Current trained weight state for the engagement model domain."""
     return _api_model_state("engagement")
 
 
-# -- Training feedback (no /api/ prefix) ---------------------------------------
+# -- Training feedback ---------------------------------------------------------
 
 _feedback_records: List[dict] = []
 _feedback_lock    = threading.Lock()
 
-@app.post("/train/feedback")
+@app.post("/api/train/feedback")
 async def train_feedback_endpoint(req: ApiTrainFeedbackRequest, _key=Depends(require_scope("train"))):
     """Receive anonymised engagement signals for MaxCore retraining."""
     record = {**req.model_dump(), "received_at": datetime.utcnow().isoformat() + "Z"}

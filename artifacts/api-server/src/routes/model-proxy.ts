@@ -367,4 +367,90 @@ router.post("/watchdog/reset", async (req, res) => {
   await proxyRequest(req, res, "/watchdog/reset");
 });
 
+// ─── Content Generation ────────────────────────────────────────────────────
+
+router.post("/generate/content", async (req, res) => {
+  await proxyRequest(req, res, "/api/generate/content");
+});
+
+router.post("/generate/text", async (req, res) => {
+  await proxyRequest(req, res, "/api/generate/text");
+});
+
+router.post("/content/score", async (req, res) => {
+  await proxyRequest(req, res, "/api/content/score");
+});
+
+// ─── Analysis ──────────────────────────────────────────────────────────────
+
+router.post("/analyze", async (req, res) => {
+  await proxyRequest(req, res, "/api/analyze");
+});
+
+router.post("/analyze/sentiment", async (req, res) => {
+  await proxyRequest(req, res, "/api/analyze/sentiment");
+});
+
+router.post("/analyze/audio", async (req, res) => {
+  await proxyRequest(req, res, "/api/analyze/audio");
+});
+
+// ─── Advertising & Engagement ──────────────────────────────────────────────
+
+router.post("/optimize/ad", async (req, res) => {
+  await proxyRequest(req, res, "/api/optimize/ad");
+});
+
+router.post("/predict/engagement", async (req, res) => {
+  await proxyRequest(req, res, "/api/predict/engagement");
+});
+
+// ─── Media Generation ──────────────────────────────────────────────────────
+
+router.post("/generate/image", async (req, res) => {
+  await proxyRequest(req, res, "/api/generate/image");
+});
+
+router.post("/generate/audio", async (req, res) => {
+  await proxyRequest(req, res, "/api/generate/audio");
+});
+
+router.post("/generate-video", async (req, res) => {
+  await proxyRequest(req, res, "/api/generate-video");
+});
+
+// ─── Job Polling ───────────────────────────────────────────────────────────
+
+router.get("/video-job/:jobId", async (req, res) => {
+  await proxyRequest(req, res, `/api/video-job/${req.params.jobId}`);
+});
+
+router.get("/audio-job/:jobId", async (req, res) => {
+  await proxyRequest(req, res, `/api/audio-job/${req.params.jobId}`);
+});
+
+// ─── Model Weight Sync ─────────────────────────────────────────────────────
+
+router.get("/models/social/state", async (req, res) => {
+  await proxyRequest(req, res, "/api/models/social/state");
+});
+
+router.get("/models/advertising/state", async (req, res) => {
+  await proxyRequest(req, res, "/api/models/advertising/state");
+});
+
+router.get("/models/content/state", async (req, res) => {
+  await proxyRequest(req, res, "/api/models/content/state");
+});
+
+router.get("/models/engagement/state", async (req, res) => {
+  await proxyRequest(req, res, "/api/models/engagement/state");
+});
+
+// ─── Training Feedback ─────────────────────────────────────────────────────
+
+router.post("/train/feedback", async (req, res) => {
+  await proxyRequest(req, res, "/api/train/feedback");
+});
+
 export default router;
