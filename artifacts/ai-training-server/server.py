@@ -30,6 +30,7 @@ from psycopg2.extras import RealDictCursor
 from fastapi import FastAPI, HTTPException, Depends, Header, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 # ─── DB Setup ────────────────────────────────────────────────────────────────
@@ -223,6 +224,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ─── Static file serving for generated assets ────────────────────────────────
+
+_UPLOADS_PATH = Path(__file__).parent / "uploads"
+_UPLOADS_PATH.mkdir(parents=True, exist_ok=True)
+(Path(__file__).parent / "uploads" / "images").mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(_UPLOADS_PATH)), name="uploads")
+
 # ─── AI Model Globals ────────────────────────────────────────────────────────
 
 _model_ready = False
@@ -235,6 +243,7 @@ _optimization_agent = None
 _repo = None
 _adapter = None
 _render_manager = None
+_image_engine = None
 _hyper_backend = None
 _digital_gpu_backend = None
 _model_config = {}
@@ -251,7 +260,7 @@ _workers_lock = threading.Lock()
 def _init_ai_model():
     global _model_ready, _tokenizer, _creative_model, _script_agent
     global _visual_spec_agent, _distribution_agent, _optimization_agent
-    global _repo, _adapter, _render_manager, _model_config
+    global _repo, _adapter, _render_manager, _model_config, _image_engine
 
     try:
         sys.path.insert(0, str(Path(__file__).parent))
@@ -320,6 +329,10 @@ def _init_ai_model():
         _repo = BoostSheetRepository(path="boostsheets_db")
         _adapter = UrlToBoostSheetAdapter(_repo)
         _render_manager = RenderManager()
+
+        from ai_model.image.image_engine import ImageEngine
+        _image_engine = ImageEngine()
+        print("[AI Model] ImageEngine ready (PIL renderer)")
 
         _model_config = {"dim": dim, "layers": n_layers, "heads": n_heads, "max_len": max_len}
         _training_state["weights_exist"] = weights_path.exists()
@@ -3866,21 +3879,133 @@ async def api_predict_engagement(req: ApiPredictEngagementRequest, _key=Depends(
 
 @app.post("/api/generate/image")
 async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_scope("generate"))):
-    """Generate platform-sized images from a content step."""
-    step   = req.step or {}
-    intent = req.intent or "promotional"
-    outputs = [{
-        "type":    "image",
-        "url":     None,
-        "width":   1080,
-        "height":  1080,
-        "format":  "png",
-        "slot":    req.slots,
-        "intent":  intent,
-        "status":  "stub — connect image generation backend",
-        "step":    step,
-    }]
-    return {"outputs": outputs}
+    """
+    Generate platform-sized images rendered in-house via PIL.
+    Uses VisualSpecAgent (custom transformer) for concept + style,
+    then renders gradient + typography PNGs per slot.
+    """
+    import time as _t
+    start = _t.time()
+
+    step        = req.step or {}
+    intent      = req.intent or "promotional"
+    constraints = req.constraints or {}
+    style_tags  = constraints.get("styleTags") or step.get("params", {}).get("styleTags", ["cinematic"])
+    if isinstance(style_tags, str):
+        style_tags = [style_tags]
+
+    # Resolve slots — accept as top-level field or nested inside step
+    raw_slots = req.slots
+    if not raw_slots and step:
+        raw_slots = step.get("params", {}).get("slots", [])
+    if not raw_slots:
+        # Build a single default slot from whatever we have
+        raw_slots = [{"id": "default", "platform": "instagram", "purpose": intent}]
+    if isinstance(raw_slots, dict):
+        raw_slots = [raw_slots]
+
+    # Extract topic from inputs (same pattern as /generate/content)
+    inputs   = req.inputs or {}
+    normalized = inputs.get("normalized", {}) if isinstance(inputs, dict) else {}
+    topic = (
+        (normalized.get("semantic") or {}).get("topic")
+        or normalized.get("payload_summary")
+        or step.get("params", {}).get("topic")
+        or intent
+    )
+    artist_name = req.artistProfileId or "MaxBooster"
+
+    outputs = []
+    for slot in raw_slots:
+        if isinstance(slot, str):
+            slot = {"id": slot, "platform": slot}
+        platform  = slot.get("platform", "instagram")
+        slot_id   = slot.get("id", "default")
+        purpose   = slot.get("purpose", intent)
+
+        # ── Determine layout and color scheme via VisualSpecAgent ─────────────
+        layout       = "square_1_1"
+        color_scheme = "dark_neon"
+        prompt       = f"Eye-catching {style_tags[0] if style_tags else 'cinematic'} visual for: {topic}"
+
+        if _visual_spec_agent:
+            try:
+                from ai_model.agents.visual_spec_agent import VisualSpecRequest
+                vis = _visual_spec_agent.run(VisualSpecRequest(
+                    idea=topic,
+                    platform=normalize_platform(platform),
+                    tone=style_tags[0] if style_tags else "cinematic",
+                ))
+                layout       = vis.layout or layout
+                color_scheme = vis.color_scheme or color_scheme
+                if vis.thumbnail_prompt and len(vis.thumbnail_prompt) > 8:
+                    prompt = vis.thumbnail_prompt
+            except Exception:
+                pass
+
+        # ── Render via PIL ImageEngine ─────────────────────────────────────────
+        result = None
+        if _image_engine:
+            try:
+                from ai_model.image.image_engine import ImageRequest
+                result = _image_engine.render(ImageRequest(
+                    prompt=prompt,
+                    color_scheme=color_scheme,
+                    layout=layout,
+                    platform=platform,
+                    artist_name=artist_name,
+                    intent=purpose,
+                    style_tags=style_tags,
+                ))
+            except Exception as _img_err:
+                print(f"[ImageEngine] render error: {_img_err}")
+
+        if result and result.success:
+            outputs.append({
+                "type":    "image",
+                "url":     result.url,
+                "width":   result.width,
+                "height":  result.height,
+                "format":  "png",
+                "slot":    slot_id,
+                "platform": platform,
+                "intent":  purpose,
+                "meta": {
+                    "color_scheme": result.color_scheme,
+                    "layout":       result.layout,
+                    "prompt_used":  result.prompt_used,
+                    "style_tags":   style_tags,
+                    "engine":       "maxbooster-pil-v1",
+                },
+            })
+        else:
+            # Fallback: return spec without a rendered file so callers can
+            # still use the layout/color_scheme guidance even if PIL fails
+            from ai_model.image.image_engine import PLATFORM_DIMS
+            w, h = PLATFORM_DIMS.get(layout, (1080, 1080))
+            outputs.append({
+                "type":    "image",
+                "url":     None,
+                "width":   w,
+                "height":  h,
+                "format":  "png",
+                "slot":    slot_id,
+                "platform": platform,
+                "intent":  purpose,
+                "meta": {
+                    "color_scheme": color_scheme,
+                    "layout":       layout,
+                    "prompt_used":  prompt,
+                    "style_tags":   style_tags,
+                    "engine":       "maxbooster-pil-v1",
+                    "status":       "engine_not_ready",
+                },
+            })
+
+    return {
+        "outputs": outputs,
+        "processing_time_ms": round((_t.time() - start) * 1000, 1),
+    }
 
 
 @app.post("/api/generate/audio")
