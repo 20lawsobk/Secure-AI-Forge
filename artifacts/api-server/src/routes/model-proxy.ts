@@ -123,6 +123,15 @@ async function proxyRequest(req: Request, res: Response, path: string) {
         error: "AI model server unavailable",
         detail: "The Python AI training server is not running or still initializing.",
       });
+    } else if (
+      e.cause?.code === "UND_ERR_SOCKET" ||
+      e.cause?.message?.includes("other side closed") ||
+      e.code === "UND_ERR_SOCKET"
+    ) {
+      res.status(503).json({
+        error: "AI model server closed connection",
+        detail: "The request was dropped — the AI server may be busy. Please retry.",
+      });
     } else {
       res.status(500).json({ error: "Proxy error", detail: String(err) });
     }

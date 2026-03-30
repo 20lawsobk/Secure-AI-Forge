@@ -19,7 +19,9 @@ import secrets
 import hashlib
 import uuid
 import json
+import asyncio
 import threading
+import functools
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Optional, List
@@ -223,6 +225,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ─── Async helper: run blocking calls off the event loop ─────────────────────
+
+async def _in_thread(fn):
+    """Run a synchronous callable in the default thread-pool executor so that
+    CPU-bound / blocking agent inference does not stall uvicorn's event loop."""
+    return await asyncio.get_event_loop().run_in_executor(None, fn)
 
 # ─── Static file serving for generated assets ────────────────────────────────
 
@@ -1368,6 +1377,7 @@ def normalize_platform(p: str) -> str:
 
 @app.post("/content/generate")
 async def generate_content(req: ContentRequest, _key = Depends(require_scope("generate"))):
+    import asyncio
     start = time.time()
     platform = normalize_platform(req.platform)
 
@@ -1389,13 +1399,13 @@ async def generate_content(req: ContentRequest, _key = Depends(require_scope("ge
         from ai_model.agents.script_agent import ScriptRequest
         from ai_model.agents.distribution_agent import DistributionRequest
 
-        script_result = _script_agent.run(ScriptRequest(
+        script_result = await _in_thread(lambda: _script_agent.run(ScriptRequest(
             idea=req.topic, platform=platform, goal=req.goal, tone=req.tone,
-        ))
+        )))
         full_script = f"{script_result.hook}\n{script_result.body}\n{script_result.cta}"
-        dist_result = _distribution_agent.run(DistributionRequest(
+        dist_result = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
             script=full_script, platform=platform, goal=req.goal,
-        ))
+        )))
 
         return {
             "success": True,
@@ -1666,14 +1676,14 @@ async def platform_social_generate(req: PlatformSocialRequest, _key = Depends(re
             try:
                 from ai_model.agents.script_agent import ScriptRequest
                 from ai_model.agents.distribution_agent import DistributionRequest
-                script = _script_agent.run(ScriptRequest(
+                script = await _in_thread(lambda: _script_agent.run(ScriptRequest(
                     idea=req.topic, platform=platform,
                     goal=req.goal, tone=personalized_tone,
-                ))
-                dist = _distribution_agent.run(DistributionRequest(
+                )))
+                dist = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
                     script=f"{script.hook}\n{script.body}\n{script.cta}",
                     platform=platform, goal=req.goal,
-                ))
+                )))
                 variant = {
                     "hook": script.hook,
                     "body": script.body,
@@ -1746,9 +1756,9 @@ async def platform_social_autopilot(req: PlatformAutopilotRequest, _key = Depend
         try:
             from ai_model.agents.script_agent import ScriptRequest
             for tag in (dominant_tags or ["music", "artist", "studio"])[:2]:
-                s = _script_agent.run(ScriptRequest(
-                    idea=tag, platform=platform, goal=req.target_metric, tone="authentic",
-                ))
+                s = await _in_thread(lambda t=tag: _script_agent.run(ScriptRequest(
+                    idea=t, platform=platform, goal=req.target_metric, tone="authentic",
+                )))
                 next_topics.append({
                     "topic": tag,
                     "hook": s.hook,
@@ -1850,12 +1860,12 @@ async def platform_daw_generate(req: PlatformDAWRequest, _key = Depends(require_
         from ai_model.agents.script_agent import ScriptRequest
         from ai_model.agents.visual_spec_agent import VisualSpecRequest
 
-        script = _script_agent.run(ScriptRequest(
+        script = await _in_thread(lambda: _script_agent.run(ScriptRequest(
             idea=topic, platform="youtube", goal=goal, tone=tone,
-        ))
-        visual = _visual_spec_agent.run(VisualSpecRequest(
+        )))
+        visual = await _in_thread(lambda: _visual_spec_agent.run(VisualSpecRequest(
             idea=topic, platform="youtube", tone=tone,
-        ))
+        )))
 
         return {
             "success": True,
@@ -1917,10 +1927,10 @@ async def platform_distribution_plan(req: PlatformDistributionRequest, _key = De
     try:
         from ai_model.agents.distribution_agent import DistributionRequest
         bio_context = req.bio or f"{req.genre} artist"
-        dist = _distribution_agent.run(DistributionRequest(
+        dist = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
             script=f"New {req.genre} track: '{req.track_title}'. Artist: {bio_context}.",
             platform="spotify", goal="streams",
-        ))
+        )))
         return {
             "success": True,
             "user_id": req.user_id,
@@ -2045,18 +2055,18 @@ async def platform_video_generate(req: PlatformVideoRequest, _key = Depends(requ
         from ai_model.agents.visual_spec_agent import VisualSpecRequest
         from ai_model.agents.distribution_agent import DistributionRequest
 
-        script_result = _script_agent.run(ScriptRequest(
+        script_result = await _in_thread(lambda: _script_agent.run(ScriptRequest(
             idea=req.topic, platform=platform, goal=req.goal, tone=personalized_tone,
-        ))
+        )))
         full_script = f"{script_result.hook}\n{script_result.body}\n{script_result.cta}"
 
-        visual_result = _visual_spec_agent.run(VisualSpecRequest(
+        visual_result = await _in_thread(lambda: _visual_spec_agent.run(VisualSpecRequest(
             idea=req.topic, platform=platform, tone=personalized_tone,
-        )) if _visual_spec_agent else None
+        ))) if _visual_spec_agent else None
 
-        dist_result = _distribution_agent.run(DistributionRequest(
+        dist_result = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
             script=full_script, platform=platform, goal=req.goal,
-        ))
+        )))
 
         raw_scenes = getattr(visual_result, "scenes", None) or []
         if not raw_scenes:
@@ -2250,12 +2260,12 @@ async def maxcore_analyze(req: MaxcoreAnalyzeRequest, _key = Depends(require_sco
     if _model_ready and _script_agent:
         try:
             from ai_model.agents.script_agent import ScriptRequest
-            result = _script_agent.run(ScriptRequest(
+            result = await _in_thread(lambda: _script_agent.run(ScriptRequest(
                 idea=content_hint,
                 platform=normalize_platform(first_platform),
                 goal=intent_hint,
                 tone="authentic",
-            ))
+            )))
             normalized["semantic"]["hook"] = result.hook
             normalized["semantic"]["core_message"] = result.body
             normalized["source"] = getattr(result, "source", "model")
@@ -2347,17 +2357,17 @@ async def maxcore_generate_text(req: MaxcoreTextRequest, _key = Depends(require_
             try:
                 from ai_model.agents.script_agent import ScriptRequest
                 from ai_model.agents.distribution_agent import DistributionRequest
-                script = _script_agent.run(ScriptRequest(
+                script = await _in_thread(lambda: _script_agent.run(ScriptRequest(
                     idea=topic, platform=platform, goal=intent, tone=tone,
-                ))
+                )))
                 hook_line = getattr(script, "hook", "") or ""
                 body_line = getattr(script, "body", "") or ""
                 cta_line = getattr(script, "cta", "") or ""
                 source = getattr(script, "source", "template")
                 full_script = f"{hook_line}\n{body_line}\n{cta_line}".strip()
-                dist = _distribution_agent.run(DistributionRequest(
+                dist = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
                     script=full_script, platform=platform, goal=intent,
-                ))
+                )))
                 text = dist.caption
                 posting_time = getattr(dist, "posting_time", "") or ""
                 if hashtags_allowed:
@@ -2423,11 +2433,11 @@ async def maxcore_generate_image(req: MaxcoreMediaRequest, _key = Depends(requir
         if _model_ready and _visual_spec_agent:
             try:
                 from ai_model.agents.visual_spec_agent import VisualSpecRequest
-                vis = _visual_spec_agent.run(VisualSpecRequest(
+                vis = await _in_thread(lambda: _visual_spec_agent.run(VisualSpecRequest(
                     idea=topic,
                     platform=normalize_platform(platform),
                     tone=style_tags[0] if style_tags else "cinematic",
-                ))
+                )))
                 concept = getattr(vis, "thumbnail_concept", concept) or concept
             except Exception:
                 pass
@@ -2481,12 +2491,12 @@ async def maxcore_generate_audio(req: MaxcoreMediaRequest, _key = Depends(requir
         if _model_ready and _script_agent:
             try:
                 from ai_model.agents.script_agent import ScriptRequest
-                res = _script_agent.run(ScriptRequest(
+                res = await _in_thread(lambda: _script_agent.run(ScriptRequest(
                     idea=topic,
                     platform=normalize_platform(platform),
                     goal="engagement",
                     tone=style,
-                ))
+                )))
                 script_text = res.hook
             except Exception:
                 pass
@@ -2550,12 +2560,12 @@ async def maxcore_generate_video(req: MaxcoreMediaRequest, _key = Depends(requir
         if _model_ready and _script_agent:
             try:
                 from ai_model.agents.script_agent import ScriptRequest
-                res = _script_agent.run(ScriptRequest(
+                res = await _in_thread(lambda: _script_agent.run(ScriptRequest(
                     idea=topic,
                     platform=normalize_platform(platform),
                     goal="engagement",
                     tone=tone,
-                ))
+                )))
                 hook_line = res.hook or hook_line
                 body_line = getattr(res, "body", "") or ""
                 cta_line = getattr(res, "cta", "") or ""
@@ -2702,7 +2712,7 @@ class AdAudienceRequest(BaseModel):
     goal: str = "streams"
 
 
-def _generate_ad_creative(
+async def _generate_ad_creative(
     platform: str,
     ad_type: str,
     product: str,
@@ -2740,12 +2750,12 @@ def _generate_ad_creative(
     if _model_ready and _script_agent:
         try:
             from ai_model.agents.script_agent import ScriptRequest
-            script = _script_agent.run(ScriptRequest(
+            script = await _in_thread(lambda: _script_agent.run(ScriptRequest(
                 idea=f"{product} — {genre or 'music'} ad for {artist}",
                 platform=platform,
                 goal=goal,
                 tone="direct",
-            ))
+            )))
             if script.hook and len(script.hook) > 5:
                 hook = script.hook
                 source = "model_enhanced"
@@ -2845,7 +2855,7 @@ async def ads_generate(req: AdGenerateRequest, _key = Depends(require_scope("gen
     # Generate N creatives
     creatives = []
     for i in range(req.num_creatives):
-        creative = _generate_ad_creative(
+        creative = await _generate_ad_creative(
             platform=plat,
             ad_type=ad_type,
             product=req.product,
@@ -2974,9 +2984,9 @@ async def ads_autopilot(req: AdAutopilotRequest, _key = Depends(require_scope("g
         if _model_ready and _script_agent:
             try:
                 from ai_model.agents.script_agent import ScriptRequest
-                script = _script_agent.run(ScriptRequest(
-                    idea=ad_idea, platform=plat, goal=req.goal, tone="direct",
-                ))
+                script = await _in_thread(lambda p=plat, a=ad_idea: _script_agent.run(ScriptRequest(
+                    idea=a, platform=p, goal=req.goal, tone="direct",
+                )))
                 hook = script.hook
             except Exception:
                 pass
@@ -3210,10 +3220,11 @@ async def ads_optimize(
         if action in ("KILL", "OPTIMISE") and _model_ready and _script_agent:
             try:
                 from ai_model.agents.script_agent import ScriptRequest
-                s = _script_agent.run(ScriptRequest(
-                    idea=f"new angle for {camp.get('product', 'music')} ad",
+                product_hint = camp.get('product', 'music')
+                s = await _in_thread(lambda ph=product_hint: _script_agent.run(ScriptRequest(
+                    idea=f"new angle for {ph} ad",
                     platform=platform, goal="conversions", tone="direct",
-                ))
+                )))
                 new_hook = s.hook
             except Exception:
                 pass
@@ -3641,8 +3652,8 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
         try:
             from ai_model.agents.script_agent import ScriptRequest
             from ai_model.agents.distribution_agent import DistributionRequest
-            sr = _script_agent.run(ScriptRequest(idea=topic, platform=platform, goal="engagement", tone=req.tone))
-            dr = _distribution_agent.run(DistributionRequest(script=f"{sr.hook}\n{sr.body}\n{sr.cta}", platform=platform, goal="engagement"))
+            sr = await _in_thread(lambda: _script_agent.run(ScriptRequest(idea=topic, platform=platform, goal="engagement", tone=req.tone)))
+            dr = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(script=f"{sr.hook}\n{sr.body}\n{sr.cta}", platform=platform, goal="engagement")))
             hook = sr.hook or hook
             body = sr.body or body
             cta  = sr.cta  or cta
@@ -3687,7 +3698,7 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
     if _model_ready and _script_agent:
         try:
             from ai_model.agents.script_agent import ScriptRequest
-            sr      = _script_agent.run(ScriptRequest(idea=str(inputs), platform="general", goal=intent, tone="authentic"))
+            sr      = await _in_thread(lambda: _script_agent.run(ScriptRequest(idea=str(inputs), platform="general", goal=intent, tone="authentic")))
             content = f"{sr.hook}\n{sr.body}\n{sr.cta}"
         except Exception:
             pass
@@ -3746,7 +3757,7 @@ async def api_analyze(req: ApiAnalyzeRequest, _key=Depends(require_scope("genera
     if _model_ready and _script_agent:
         try:
             from ai_model.agents.script_agent import ScriptRequest
-            result = _script_agent.run(ScriptRequest(idea=content_hint, platform=normalize_platform(first_platform), goal=intent_hint, tone="authentic"))
+            result = await _in_thread(lambda: _script_agent.run(ScriptRequest(idea=content_hint, platform=normalize_platform(first_platform), goal=intent_hint, tone="authentic")))
             normalised["semantic"]["hook"]         = result.hook
             normalised["semantic"]["core_message"] = result.body
             normalised["source"] = getattr(result, "source", "model")
@@ -3931,11 +3942,11 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
         if _visual_spec_agent:
             try:
                 from ai_model.agents.visual_spec_agent import VisualSpecRequest
-                vis = _visual_spec_agent.run(VisualSpecRequest(
+                vis = await _in_thread(lambda: _visual_spec_agent.run(VisualSpecRequest(
                     idea=topic,
                     platform=normalize_platform(platform),
                     tone=style_tags[0] if style_tags else "cinematic",
-                ))
+                )))
                 layout       = vis.layout or layout
                 color_scheme = vis.color_scheme or color_scheme
                 if vis.thumbnail_prompt and len(vis.thumbnail_prompt) > 8:
@@ -3948,7 +3959,7 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
         if _image_engine:
             try:
                 from ai_model.image.image_engine import ImageRequest
-                result = _image_engine.render(ImageRequest(
+                _req = ImageRequest(
                     prompt=prompt,
                     color_scheme=color_scheme,
                     layout=layout,
@@ -3956,7 +3967,8 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
                     artist_name=artist_name,
                     intent=purpose,
                     style_tags=style_tags,
-                ))
+                )
+                result = await _in_thread(lambda r=_req: _image_engine.render(r))
             except Exception as _img_err:
                 print(f"[ImageEngine] render error: {_img_err}")
 
