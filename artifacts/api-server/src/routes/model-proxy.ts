@@ -428,6 +428,10 @@ router.post("/generate-video", async (req, res) => {
   await proxyRequest(req, res, "/api/generate-video");
 });
 
+router.post("/video/generate-ai", async (req, res) => {
+  await proxyRequest(req, res, "/api/video/generate-ai");
+});
+
 // ─── Job Polling ───────────────────────────────────────────────────────────
 
 router.get("/video-job/:jobId", async (req, res) => {

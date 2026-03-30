@@ -11,6 +11,7 @@ import Training from "@/pages/training";
 import GpuStatus from "@/pages/gpu";
 import ContentGenerator from "@/pages/content";
 import ModelStatus from "@/pages/model";
+import VideoStudio from "@/pages/video-studio";
 import { ErrorBoundary } from "@/components/error-boundary";
 
 // Global config for React Query — 2 retries with exponential back-off
@@ -48,6 +49,9 @@ function Router() {
         </Route>
         <Route path="/model">
           <ErrorBoundary fallbackLabel="Model status error"><ModelStatus /></ErrorBoundary>
+        </Route>
+        <Route path="/video">
+          <ErrorBoundary fallbackLabel="Video studio error"><VideoStudio /></ErrorBoundary>
         </Route>
         <Route component={NotFound} />
       </Switch>

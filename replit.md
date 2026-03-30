@@ -4,6 +4,13 @@
 
 Production-grade AI model training server with a custom-built transformer model, GPU simulation engine, multi-platform content generation, and in-house API key management. No external AI APIs used — everything is built from scratch.
 
+### Video Studio (InVideo-like rendering system)
+A full generative video pipeline with no predefined templates. Every video's visual style is derived fresh from content DNA computed from genre/tone/idea:
+- `ai_model/video/ai_scene_builder.py` — generates SceneConfig objects from VisualDNA (energy, darkness, warmth, saturation, grain). Produces unique hex colour palettes, selects background type, effects, typography per-video.
+- `ai_model/video/cinematic_engine.py::render_cinematic_open()` — template-free rendering path that takes pre-built scenes directly.
+- `ai_model/video/video_agent.py::build_open_scenes()` — converts VideoProduction into SceneConfigs via ai_scene_builder.
+- Dashboard route `/video` — Video Studio page with concept panel, editable scene cards, Visual DNA bars, render progress, and in-page video player.
+
 Part of a tri-app music artist platform:
 1. **This server** — AI training + platform inference API
 2. **Storage server** — 7TB training dataset (`pocketdimensionstorage.replit.app`)

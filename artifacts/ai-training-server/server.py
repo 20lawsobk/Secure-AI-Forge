@@ -4247,10 +4247,26 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
 
     def _render_ai():
         try:
-            from ai_model.video.cinematic_engine import CinematicRequest, render_cinematic
-            from ai_model.video.renderer import ASPECT_RATIOS
-            cinematic_req = agent._build_cinematic_request(req, production)
-            result = render_cinematic(cinematic_req)
+            from ai_model.video.cinematic_engine import render_cinematic_open
+            from ai_model.video.renderer import ASPECT_RATIOS, PLATFORM_RATIOS
+            from ai_model.video import ai_scene_builder
+
+            ratio = production.aspect_ratio or PLATFORM_RATIOS.get(production.platform, "9:16")
+            width, height = ASPECT_RATIOS.get(ratio, (1080, 1920))
+
+            scene_configs = agent.build_open_scenes(req, production, width, height)
+            dna = ai_scene_builder.build_dna(req.idea, production.genre_detected, production.tone_used)
+            transition = "fadeblack" if dna.darkness > 0.70 else "dissolve" if dna.energy < 0.50 else "fade"
+            result = render_cinematic_open(
+                scenes=scene_configs,
+                width=width,
+                height=height,
+                total_duration=production.total_duration,
+                audio_path=req.artist_context.get("audio_path"),
+                transition=transition,
+                transition_dur=0.5 if dna.energy > 0.70 else 0.8,
+                label=f"ai:{production.genre_detected}:{production.tone_used}",
+            )
             with _api_jobs_lock:
                 if job_id in _api_video_jobs:
                     if result.success:

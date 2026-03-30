@@ -6,6 +6,7 @@ import {
   BrainCircuit, 
   PenTool, 
   Settings,
+  Film,
   Menu,
   Lock,
   LogOut,
@@ -32,6 +33,7 @@ const navItems = [
   { href: "/training", label: "Training", icon: BrainCircuit },
   { href: "/gpu", label: "GPU Cluster", icon: Cpu },
   { href: "/content", label: "Generators", icon: PenTool },
+  { href: "/video", label: "Video Studio", icon: Film },
   { href: "/model", label: "Model Status", icon: Settings },
 ];
 
