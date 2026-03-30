@@ -45,6 +45,26 @@ CONTROL_TOKENS = [
     "<TYPE_REEL>",
     "<TYPE_VIDEO>",
     "<TYPE_TRACK>",
+    # ── Video production stages ───────────────────────────────────────
+    "<VIDEO_BUILD>",
+    "<VIDEO_DROP>",
+    "<VIDEO_OUTRO>",
+    # ── Genre ─────────────────────────────────────────────────────────
+    "<GENRE_TRAP>",
+    "<GENRE_RNB>",
+    "<GENRE_POP>",
+    "<GENRE_AFROBEATS>",
+    "<GENRE_DRILL>",
+    "<GENRE_LOFI>",
+    "<GENRE_INDIE>",
+    "<GENRE_ELECTRONIC>",
+    "<GENRE_SOUL>",
+    "<GENRE_REGGAETON>",
+    "<GENRE_HYPERPOP>",
+    "<GENRE_ACOUSTIC>",
+    "<GENRE_LATIN>",
+    "<GENRE_JAZZ>",
+    "<GENRE_HIPHOP>",
 ]
 
 

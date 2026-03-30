@@ -4165,6 +4165,135 @@ async def api_generate_video(req: ApiGenerateVideoRequest, _key=Depends(require_
     return {"job_id": job_id}
 
 
+# ── AI-driven video generation ─────────────────────────────────────────────────
+
+@app.post("/api/video/generate-ai")
+async def api_video_generate_ai(request: Request, _key=Depends(require_scope("generate"))):
+    """
+    Generate a video where ALL text content is produced by the trained model.
+
+    The VideoAgent conditions the transformer on platform / goal / tone / genre
+    control tokens, generates distinct AI text for every scene (hook, build, body,
+    drop, cta, outro), selects the matching cinematic template based on the
+    AI-determined genre/tone, and renders the final MP4 via FFmpeg.
+
+    Body fields (all optional except idea):
+      idea        – what the video is about
+      platform    – tiktok | instagram | youtube | instagram_reels | etc.
+      goal        – growth | conversion | engagement | awareness | streams | sales
+      tone        – energetic | edgy | chill | professional | promotional | etc.
+      genre       – trap | rnb | pop | afrobeats | drill | lofi | indie | etc.
+      artist_name – shown on screen as the creator label
+      duration    – desired length in seconds (platform default if omitted)
+      artist_context – dict with optional audio_path key
+    """
+    body = await request.json()
+
+    if not _model_ready or _script_agent is None or _visual_spec_agent is None or _creative_model is None:
+        raise HTTPException(status_code=503, detail="AI model is still initialising — try again shortly")
+
+    idea         = str(body.get("idea", "")).strip()
+    platform     = str(body.get("platform", "tiktok")).strip().lower()
+    goal         = str(body.get("goal", "growth")).strip().lower()
+    tone         = str(body.get("tone", "energetic")).strip().lower()
+    genre        = str(body.get("genre", "")).strip().lower()
+    artist_name  = str(body.get("artist_name", "")).strip()
+    duration     = float(body.get("duration") or 0)
+    artist_ctx   = body.get("artist_context", {}) or {}
+
+    if not idea:
+        raise HTTPException(status_code=422, detail="'idea' is required")
+
+    from ai_model.video.video_agent import VideoAgent, VideoAgentRequest
+    req = VideoAgentRequest(
+        idea=idea,
+        platform=platform,
+        goal=goal,
+        tone=tone,
+        genre=genre,
+        artist_name=artist_name,
+        duration=duration,
+        artist_context=artist_ctx,
+    )
+
+    agent = VideoAgent(_creative_model, _script_agent, _visual_spec_agent)
+
+    # Run planning synchronously (fast — just model inference) so we can
+    # return immediate job status while rendering happens in background.
+    production = await _in_thread(lambda: agent.plan(req))
+
+    job_id = str(uuid.uuid4())
+    with _api_jobs_lock:
+        _api_video_jobs[job_id] = {
+            "status":          "pending",
+            "created_at":      datetime.utcnow().isoformat() + "Z",
+            "platform":        production.platform,
+            "template":        production.template_id,
+            "template_name":   production.template_id,
+            "genre_detected":  production.genre_detected,
+            "tone_used":       production.tone_used,
+            "source":          production.source,
+            "duration":        production.total_duration,
+            "aspect_ratio":    production.aspect_ratio,
+            "scenes":          [{"type": s.scene_type, "text": s.text} for s in production.scenes],
+            "url":             None,
+            "filename":        None,
+            "width":           None,
+            "height":          None,
+            "scenes_rendered": 0,
+            "render_ms":       None,
+            "error":           None,
+        }
+
+    def _render_ai():
+        try:
+            from ai_model.video.cinematic_engine import CinematicRequest, render_cinematic
+            from ai_model.video.renderer import ASPECT_RATIOS
+            cinematic_req = agent._build_cinematic_request(req, production)
+            result = render_cinematic(cinematic_req)
+            with _api_jobs_lock:
+                if job_id in _api_video_jobs:
+                    if result.success:
+                        _api_video_jobs[job_id].update({
+                            "status":          "done",
+                            "url":             f"/uploads/videos/{result.filename}",
+                            "filename":        result.filename,
+                            "width":           result.width,
+                            "height":          result.height,
+                            "scenes_rendered": result.scenes_rendered,
+                            "render_ms":       result.render_time_ms,
+                        })
+                    else:
+                        _api_video_jobs[job_id].update({
+                            "status": "error",
+                            "error":  result.error,
+                        })
+        except Exception as exc:
+            import traceback
+            with _api_jobs_lock:
+                if job_id in _api_video_jobs:
+                    _api_video_jobs[job_id].update({
+                        "status": "error",
+                        "error":  str(exc),
+                    })
+            print(f"[VideoAgent] Render error for job {job_id}: {traceback.format_exc()}")
+
+    threading.Thread(target=_render_ai, daemon=True, name=f"AIVideoJob-{job_id}").start()
+
+    return {
+        "job_id":         job_id,
+        "status":         "pending",
+        "template":       production.template_id,
+        "genre_detected": production.genre_detected,
+        "tone_used":      production.tone_used,
+        "source":         production.source,
+        "duration":       production.total_duration,
+        "aspect_ratio":   production.aspect_ratio,
+        "scenes":         [{"type": s.scene_type, "text": s.text} for s in production.scenes],
+        "poll_url":       f"/api/video-job/{job_id}",
+    }
+
+
 # -- Job polling ---------------------------------------------------------------
 
 @app.get("/api/video-job/{job_id}")
@@ -4177,17 +4306,20 @@ async def api_poll_video_job(job_id: str, _key=Depends(require_scope("read"))):
     if job["status"] == "done":
         return {
             "status":          "done",
-            "url":             job["url"],
-            "filename":        job["filename"],
-            "width":           job["width"],
-            "height":          job["height"],
-            "duration":        job["duration"],
-            "hook":            job["hook"],
-            "body":            job["body"],
-            "cta":             job["cta"],
-            "template":        job["template"],
-            "template_name":   job["template_name"],
-            "scenes_rendered": job["scenes_rendered"],
+            "url":             job.get("url"),
+            "filename":        job.get("filename"),
+            "width":           job.get("width"),
+            "height":          job.get("height"),
+            "duration":        job.get("duration"),
+            "template":        job.get("template"),
+            "template_name":   job.get("template_name"),
+            "genre_detected":  job.get("genre_detected"),
+            "tone_used":       job.get("tone_used"),
+            "source":          job.get("source"),
+            "aspect_ratio":    job.get("aspect_ratio"),
+            "scenes":          job.get("scenes", []),
+            "scenes_rendered": job.get("scenes_rendered", 0),
+            "render_ms":       job.get("render_ms"),
         }
     if job["status"] == "error":
         return {"status": "error", "error": job.get("error", "Unknown error")}
