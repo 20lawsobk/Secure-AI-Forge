@@ -343,6 +343,15 @@ def _init_ai_model():
         _image_engine = ImageEngine()
         print("[AI Model] ImageEngine ready (PIL renderer)")
 
+        # torch.compile with aot_eager backend works on CPU without Triton
+        try:
+            _creative_model.model = torch.compile(
+                _creative_model.model, backend="aot_eager", fullgraph=False
+            )
+            print("[AI Model] torch.compile applied (aot_eager / CPU-safe mode)")
+        except Exception as ce:
+            print(f"[AI Model] torch.compile skipped: {ce}")
+
         _model_config = {"dim": dim, "layers": n_layers, "heads": n_heads, "max_len": max_len}
         _training_state["weights_exist"] = weights_path.exists()
 
@@ -550,7 +559,7 @@ def _init_storage():
 
     def _keepalive_fn() -> bool:
         """
-        Lightweight end-to-end probe: runs a 10-token generation to confirm
+        Lightweight end-to-end probe: runs a minimal generation to confirm
         the rendering pipeline is fully operational.  Runs synchronously on
         the watchdog thread (short enough to not block meaningful traffic).
         """
@@ -559,11 +568,10 @@ def _init_storage():
                 return False
             from ai_model.agents.script_agent import ScriptRequest
             req = ScriptRequest(
-                prompt="ping",
-                max_tokens=10,
-                style="auto",
+                idea="new single dropping",
                 platform="instagram",
-                artist_context={},
+                goal="growth",
+                tone="energetic",
             )
             result = _script_agent.run(req)
             return result is not None
@@ -611,7 +619,6 @@ def _training_bridge(texts: list, epochs: int, phase_label: str,
         "model": {"dim": dim, "layers": n_layers, "heads": 8, "max_len": train_max_len},
         "train": {"lr": 3e-4, "batch_size": 4, "epochs": epochs, "data_path": data_path},
     })
-    cfg.gradient_accumulation_steps = 1
     _creative_model.resize_embeddings()
 
     result = run_train(_creative_model.model, dataset, _tokenizer, cfg, device="cpu")

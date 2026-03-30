@@ -19,6 +19,8 @@ class CreativeModel:
         self.tokenizer = tokenizer
         self.device = device
         self.tokenizer.freeze()
+        # Put model in eval mode once — not on every generate() call
+        self.model.eval()
 
     def resize_embeddings(self):
         new_vocab = self.tokenizer.vocab_size
@@ -66,7 +68,6 @@ class CreativeModel:
         repetition_penalty: float = 1.15,
         min_length: int = 10,
     ) -> str:
-        self.model.eval()
         ids = self.tokenizer.encode(prompt).ids
         if not ids:
             ids = [self.tokenizer.token_to_id("<BOS>")]
@@ -80,9 +81,10 @@ class CreativeModel:
 
         generated_ids: list[int] = []
 
-        with torch.no_grad():
+        _autocast = torch.autocast("cpu", dtype=torch.bfloat16, enabled=True)
+        with torch.no_grad(), _autocast:
             for step in range(max_new_tokens):
-                logits = self.model(x[:, -max_ctx:])
+                logits = self.model(x[:, -max_ctx:]).float()
                 next_logits = logits[:, -1, :].clone()
 
                 # Suppress special tokens
@@ -142,7 +144,6 @@ class CreativeModel:
         Beam search with length penalty.
         Returns the highest-scoring complete sequence.
         """
-        self.model.eval()
         ids = self.tokenizer.encode(prompt).ids
         if not ids:
             ids = [self.tokenizer.token_to_id("<BOS>")]
@@ -158,7 +159,8 @@ class CreativeModel:
         beams: list[tuple[float, list[int]]] = [(0.0, list(ids))]
         completed: list[tuple[float, list[int]]] = []
 
-        with torch.no_grad():
+        _autocast = torch.autocast("cpu", dtype=torch.bfloat16, enabled=True)
+        with torch.no_grad(), _autocast:
             for step in range(max_new_tokens):
                 if not beams:
                     break
@@ -170,7 +172,7 @@ class CreativeModel:
                         continue
 
                     x = torch.tensor([beam_ids[-max_ctx:]], device=self.device)
-                    logits = self.model(x)
+                    logits = self.model(x).float()
                     next_logits = logits[0, -1, :].clone().unsqueeze(0)
 
                     # Suppress specials

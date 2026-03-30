@@ -1,4 +1,5 @@
 from __future__ import annotations
+import datetime
 from dataclasses import dataclass
 from typing import List
 from ..model.creative_model import CreativeModel
@@ -68,7 +69,8 @@ class DistributionAgent:
 
         platform_key = req.platform.lower().replace(" ", "_")
         hashtags = DEFAULT_HASHTAGS.get(platform_key, ["#maxbooster"])
-        posting_time = f"2026-02-19{BEST_POSTING_TIMES.get(platform_key, 'T12:00:00Z')}"
+        today = datetime.date.today()
+        posting_time = f"{today}{BEST_POSTING_TIMES.get(platform_key, 'T12:00:00Z')}"
 
         return DistributionResponse(
             caption=caption,

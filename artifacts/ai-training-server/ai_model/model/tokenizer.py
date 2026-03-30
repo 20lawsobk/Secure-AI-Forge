@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import List
 
 CONTROL_TOKENS = [
+    # ── Platform ──────────────────────────────────────────────────────
     "<PLATFORM_TIKTOK>",
     "<PLATFORM_INSTAGRAM>",
     "<PLATFORM_YOUTUBE>",
@@ -10,17 +11,40 @@ CONTROL_TOKENS = [
     "<PLATFORM_LINKEDIN>",
     "<PLATFORM_GOOGLE_BUSINESS>",
     "<PLATFORM_THREADS>",
+    "<PLATFORM_META>",
+    # ── Goals ─────────────────────────────────────────────────────────
     "<GOAL_GROWTH>",
     "<GOAL_CONVERSION>",
     "<GOAL_NURTURE>",
+    "<GOAL_ENGAGEMENT>",
+    "<GOAL_AWARENESS>",
+    "<GOAL_STREAMS>",
+    "<GOAL_FOLLOWERS>",
+    "<GOAL_SALES>",
+    # ── Script stages ─────────────────────────────────────────────────
     "<STAGE_HOOK>",
     "<STAGE_BODY>",
     "<STAGE_CTA>",
+    # ── Tones — must cover every tone used by all agents ──────────────
     "<TONE_EDGY>",
     "<TONE_PLAYFUL>",
     "<TONE_SERIOUS>",
+    "<TONE_ENERGETIC>",
+    "<TONE_PROFESSIONAL>",
+    "<TONE_CASUAL>",
+    "<TONE_PROMOTIONAL>",
+    "<TONE_INSPIRATIONAL>",
+    "<TONE_CHILL>",
+    # ── Brand slots ───────────────────────────────────────────────────
     "<BRAND_A>",
     "<BRAND_B>",
+    # ── Content types ─────────────────────────────────────────────────
+    "<TYPE_AD>",
+    "<TYPE_POST>",
+    "<TYPE_STORY>",
+    "<TYPE_REEL>",
+    "<TYPE_VIDEO>",
+    "<TYPE_TRACK>",
 ]
 
 
