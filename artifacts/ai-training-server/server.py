@@ -532,6 +532,49 @@ def _init_storage():
     _watchdog.continuous_trainer = _continuous_trainer
     _watchdog.data_puller       = _data_puller
     _watchdog.weights_dir       = Path(__file__).parent / "ai_model" / "weights"
+
+    # ── Rendering system health callbacks ──────────────────────────────
+    def _rendering_health_fn():
+        """Return live status of every rendering object."""
+        return {
+            "ready": _model_ready,
+            "objects": {
+                "creative_model":       _creative_model is not None,
+                "script_agent":         _script_agent is not None,
+                "visual_spec_agent":    _visual_spec_agent is not None,
+                "distribution_agent":   _distribution_agent is not None,
+                "optimization_agent":   _optimization_agent is not None,
+                "image_engine":         _image_engine is not None,
+            },
+        }
+
+    def _keepalive_fn() -> bool:
+        """
+        Lightweight end-to-end probe: runs a 10-token generation to confirm
+        the rendering pipeline is fully operational.  Runs synchronously on
+        the watchdog thread (short enough to not block meaningful traffic).
+        """
+        try:
+            if not _model_ready or _script_agent is None:
+                return False
+            from ai_model.agents.script_agent import ScriptRequest
+            req = ScriptRequest(
+                prompt="ping",
+                max_tokens=10,
+                style="auto",
+                platform="instagram",
+                artist_context={},
+            )
+            result = _script_agent.run(req)
+            return result is not None
+        except Exception as exc:
+            print(f"[Watchdog] Keep-alive probe error: {exc}")
+            return False
+
+    _watchdog.rendering_health_fn = _rendering_health_fn
+    _watchdog.keepalive_fn        = _keepalive_fn
+    # ──────────────────────────────────────────────────────────────────
+
     _watchdog.start()
 
     print("[Workers] DataPuller, ContinuousTrainer, and Watchdog initialized and running")

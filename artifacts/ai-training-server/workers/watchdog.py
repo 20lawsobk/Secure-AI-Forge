@@ -33,8 +33,10 @@ MODEL_INIT_TIMEOUT     = 300         # 5 min to init model before forcing re-ini
 TRAINING_STUCK_TIMEOUT = 360         # 6 min with no elapsed_seconds change → stuck
 TRAINING_START_TIMEOUT = 180         # 3 min in "starting" state → drop it
 THREAD_RESTART_DELAY   = 5           # seconds before restarting a dead thread
-MEMORY_WARN_PCT        = 80          # % memory usage to start warning
-MEMORY_CRIT_PCT        = 90          # % to trigger GC + reduce batch
+MEMORY_WARN_PCT        = 75          # % memory usage to start warning
+MEMORY_CRIT_PCT        = 85          # % to trigger GC aggressively
+MEMORY_DANGER_PCT      = 92          # % to take extreme measures (clear all caches)
+KEEPALIVE_INTERVAL     = 300         # 5 min between rendering keep-alive probes
 MAX_LOG_ENTRIES        = 200         # rolling alert log size
 
 
@@ -83,6 +85,14 @@ class Watchdog:
         self.continuous_trainer                 = None
         self.data_puller                        = None
         self.weights_dir: Optional[Path]        = None
+
+        # Rendering system health — injected from server.py
+        # rendering_health_fn() → {"ready": bool, "objects": {name: bool, ...}}
+        self.rendering_health_fn: Optional[Callable[[], dict]] = None
+        # keepalive_fn() → bool — runs a minimal end-to-end inference probe
+        self.keepalive_fn: Optional[Callable[[], bool]] = None
+        self._last_keepalive_at: Optional[float] = None
+        self._reinit_in_flight = False
 
         self.stats = {
             "started_at":       None,
@@ -175,6 +185,7 @@ class Watchdog:
             self.stats["last_check_at"] = now
             self.stats["status"] = "checking"
 
+        self._check_rendering_system(now)
         self._check_model_init(now)
         self._check_training_stuck(now)
         self._check_training_start_timeout(now)
@@ -193,6 +204,89 @@ class Watchdog:
     # ------------------------------------------------------------------ #
     # Individual checks                                                    #
     # ------------------------------------------------------------------ #
+
+    def _check_rendering_system(self, now: float):
+        """
+        Verify every rendering object is alive and the pipeline can produce output.
+
+        Two sub-checks:
+          A) Object presence — all required AI objects must be non-None.
+             If any are missing, immediately trigger _init_ai_model.
+          B) Keep-alive probe — every KEEPALIVE_INTERVAL seconds, run a minimal
+             inference to prove the pipeline is end-to-end healthy.
+             If the probe fails, trigger _init_ai_model.
+        """
+        if self.rendering_health_fn is None:
+            return
+
+        # If the model hasn't finished first-time init yet, let _check_model_init
+        # handle it — don't race against the startup thread.
+        if self.model_ready_ref is not None and not self.model_ready_ref():
+            return
+
+        try:
+            health = self.rendering_health_fn()
+        except Exception as e:
+            logger.error(f"[Watchdog] rendering_health_fn error: {e}")
+            return
+
+        objects: dict = health.get("objects", {})
+        missing = [name for name, ok in objects.items() if not ok]
+
+        if missing:
+            if not self._reinit_in_flight:
+                self._alert(
+                    "critical", "rendering_objects_missing",
+                    f"Rendering system missing objects: {missing}. Forcing re-init.",
+                    "Triggered _init_ai_model in background thread"
+                )
+                self._trigger_reinit("WatchdogRenderingReinit")
+            return
+
+        # All objects present — run keep-alive probe on schedule
+        if self.keepalive_fn is None:
+            return
+
+        if (self._last_keepalive_at is not None and
+                now - self._last_keepalive_at < KEEPALIVE_INTERVAL):
+            return
+
+        self._last_keepalive_at = now
+
+        def _probe():
+            try:
+                ok = self.keepalive_fn()
+                if not ok:
+                    self._alert(
+                        "critical", "rendering_keepalive_fail",
+                        "Keep-alive inference probe returned False — rendering degraded.",
+                        "Triggered _init_ai_model to restore rendering system"
+                    )
+                    self._trigger_reinit("WatchdogKeepaliveReinit")
+                else:
+                    logger.info("[Watchdog] Rendering keep-alive probe OK.")
+            except Exception as ex:
+                self._alert(
+                    "warning", "rendering_keepalive_error",
+                    f"Keep-alive probe raised: {ex}",
+                    ""
+                )
+
+        threading.Thread(target=_probe, daemon=True, name="WatchdogKeepalive").start()
+
+    def _trigger_reinit(self, thread_name: str = "WatchdogReinit"):
+        """Spawn _init_ai_model in a background thread (guarded against double-start)."""
+        if self._reinit_in_flight or self.init_model_fn is None:
+            return
+        self._reinit_in_flight = True
+
+        def _run():
+            try:
+                self.init_model_fn()
+            finally:
+                self._reinit_in_flight = False
+
+        threading.Thread(target=_run, daemon=True, name=thread_name).start()
 
     def _check_model_init(self, now: float):
         """If model hasn't initialized within MODEL_INIT_TIMEOUT, force re-init."""
@@ -213,10 +307,7 @@ class Watchdog:
                         f"Model not initialized after {age:.0f}s — forcing re-init",
                         "Triggered _init_ai_model in background thread")
             self._model_init_started_at = now  # Reset so we don't spam
-            if self.init_model_fn:
-                t = threading.Thread(target=self.init_model_fn, daemon=True,
-                                     name="WatchdogModelInit")
-                t.start()
+            self._trigger_reinit("WatchdogModelInit")
 
     def _check_training_stuck(self, now: float):
         """Detect training loop frozen with no elapsed_seconds progress."""
@@ -391,24 +482,37 @@ class Watchdog:
                 logger.error(f"[Watchdog] Could not rename checkpoint: {rename_err}")
 
     def _check_memory(self, now: float):
-        """Detect memory pressure and run GC if critical."""
+        """Detect memory pressure and free resources before the OS OOM-kills the process."""
         try:
             mem_mb, mem_pct = _get_memory_info()
         except Exception:
             return
 
-        if mem_pct >= MEMORY_CRIT_PCT:
+        if mem_pct >= MEMORY_DANGER_PCT:
+            # Extreme pressure — free everything we safely can
+            collected = gc.collect(2)
+            _free_torch_cache()
+            self._alert(
+                "critical", "memory_danger",
+                f"Memory at {mem_pct:.1f}% ({mem_mb:.0f} MB) — DANGER. "
+                f"Ran full GC ({collected} objects freed) + cleared all caches.",
+                f"gc.collect(2) + torch/malloc cache cleared"
+            )
+        elif mem_pct >= MEMORY_CRIT_PCT:
             collected = gc.collect()
+            _free_torch_cache()
             self._alert(
                 "critical", "memory_pressure",
-                f"Memory at {mem_pct:.1f}% ({mem_mb:.0f} MB) — GC collected {collected} objects.",
-                f"Ran gc.collect() — freed {collected} objects"
+                f"Memory at {mem_pct:.1f}% ({mem_mb:.0f} MB) — running GC + cache clear.",
+                f"gc.collect() freed {collected} objects; torch cache cleared"
             )
         elif mem_pct >= MEMORY_WARN_PCT:
+            # Early warning — light GC to stay ahead of pressure
+            gc.collect(0)
             self._alert(
                 "warning", "memory_high",
-                f"Memory at {mem_pct:.1f}% ({mem_mb:.0f} MB) — approaching limit.",
-                ""
+                f"Memory at {mem_pct:.1f}% ({mem_mb:.0f} MB) — ran light GC.",
+                "gc.collect(0)"
             )
 
     def _check_storage(self, now: float):
@@ -522,6 +626,26 @@ def _get_memory_info() -> tuple[float, float]:
     used_mb   = used_kb / 1024
     used_pct  = 100 * used_kb / total_kb
     return used_mb, used_pct
+
+
+def _free_torch_cache():
+    """Free PyTorch allocator caches without touching model weights."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+        # Free the CPU allocator's cached pages back to the OS
+        if hasattr(torch, "cuda") and hasattr(torch.cuda, "memory"):
+            pass  # CPU path: rely on Python GC + ctypes malloc_trim
+        try:
+            import ctypes
+            libc = ctypes.CDLL("libc.so.6")
+            libc.malloc_trim(0)
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 
 # ------------------------------------------------------------------ #
