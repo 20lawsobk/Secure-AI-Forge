@@ -16,7 +16,7 @@ run = "pnpm --filter @workspace/api-server run dev"
 build = "pnpm --filter @workspace/api-server run build && BASE_PATH=/ pnpm --filter @workspace/ai-dashboard run build"
 
 [services.production.run]
-args = ["node", "artifacts/api-server/dist/index.cjs"]
+args = ["bash", "scripts/start-production.sh"]
 
 [services.production.run.env]
 PORT = "8080"
