@@ -1445,10 +1445,9 @@ async def generate_content(req: ContentRequest, _key = Depends(require_scope("ge
             "processing_time_ms": (time.time() - start) * 1000,
         }
 
-    try:
+    async def _run_content_inference():
         from ai_model.agents.script_agent import ScriptRequest
         from ai_model.agents.distribution_agent import DistributionRequest
-
         script_result = await _in_thread(lambda: _script_agent.run(ScriptRequest(
             idea=req.topic, platform=platform, goal=req.goal, tone=req.tone,
         )))
@@ -1456,7 +1455,10 @@ async def generate_content(req: ContentRequest, _key = Depends(require_scope("ge
         dist_result = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
             script=full_script, platform=platform, goal=req.goal,
         )))
+        return script_result, dist_result
 
+    try:
+        script_result, dist_result = await asyncio.wait_for(_run_content_inference(), timeout=20.0)
         return {
             "success": True,
             "platform": platform,
@@ -1466,6 +1468,18 @@ async def generate_content(req: ContentRequest, _key = Depends(require_scope("ge
             "cta": script_result.cta,
             "hashtags": dist_result.hashtags if req.include_hashtags else [],
             "source": getattr(script_result, "source", "template"),
+            "processing_time_ms": (time.time() - start) * 1000,
+        }
+    except asyncio.TimeoutError:
+        return {
+            "success": True,
+            "platform": platform,
+            "caption": f"Check out this {req.topic} content!",
+            "hook": f"🔥 {req.topic} is going viral!",
+            "body": f"Here's everything you need to know about {req.topic}.",
+            "cta": "Follow for more!",
+            "hashtags": ["#content", f"#{req.topic.replace(' ', '')}"],
+            "source": "template_timeout",
             "processing_time_ms": (time.time() - start) * 1000,
         }
     except Exception as e:
@@ -1726,14 +1740,19 @@ async def platform_social_generate(req: PlatformSocialRequest, _key = Depends(re
             try:
                 from ai_model.agents.script_agent import ScriptRequest
                 from ai_model.agents.distribution_agent import DistributionRequest
-                script = await _in_thread(lambda: _script_agent.run(ScriptRequest(
-                    idea=req.topic, platform=platform,
-                    goal=req.goal, tone=personalized_tone,
-                )))
-                dist = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
-                    script=f"{script.hook}\n{script.body}\n{script.cta}",
-                    platform=platform, goal=req.goal,
-                )))
+
+                async def _run_variant():
+                    s = await _in_thread(lambda: _script_agent.run(ScriptRequest(
+                        idea=req.topic, platform=platform,
+                        goal=req.goal, tone=personalized_tone,
+                    )))
+                    d = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
+                        script=f"{s.hook}\n{s.body}\n{s.cta}",
+                        platform=platform, goal=req.goal,
+                    )))
+                    return s, d
+
+                script, dist = await asyncio.wait_for(_run_variant(), timeout=20.0)
                 variant = {
                     "hook": script.hook,
                     "body": script.body,
@@ -1741,6 +1760,15 @@ async def platform_social_generate(req: PlatformSocialRequest, _key = Depends(re
                     "caption": dist.caption,
                     "hashtags": dist.hashtags if req.include_hashtags else [],
                     "source": getattr(script, "source", "model"),
+                }
+            except asyncio.TimeoutError:
+                variant = {
+                    "hook": f"🎵 {req.topic} — take {i + 1}",
+                    "body": f"Your audience wants {req.topic}. Give it to them.",
+                    "cta": "Drop a comment below 👇",
+                    "caption": f"{req.topic} #{platform}",
+                    "hashtags": [f"#{req.topic.replace(' ', '')}", f"#{platform}", "#MaxBooster"],
+                    "source": "template_timeout",
                 }
             except Exception as e:
                 variant = {
@@ -2100,7 +2128,7 @@ async def platform_video_generate(req: PlatformVideoRequest, _key = Depends(requ
             "processing_time_ms": round((time.time() - start) * 1000, 1),
         }
 
-    try:
+    async def _run_model_inference():
         from ai_model.agents.script_agent import ScriptRequest
         from ai_model.agents.visual_spec_agent import VisualSpecRequest
         from ai_model.agents.distribution_agent import DistributionRequest
@@ -2117,6 +2145,48 @@ async def platform_video_generate(req: PlatformVideoRequest, _key = Depends(requ
         dist_result = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
             script=full_script, platform=platform, goal=req.goal,
         )))
+        return script_result, full_script, visual_result, dist_result
+
+    def _build_template_response(source="template"):
+        scenes = [
+            {
+                "scene": i + 1,
+                "duration_seconds": req.duration_seconds // scene_count,
+                "description": f"Scene {i + 1} — {req.topic}",
+                "visual_direction": f"{req.style.capitalize()} shot of {req.topic}",
+                "narration": f"Part {i + 1} of your {req.topic} story.",
+            }
+            for i in range(scene_count)
+        ]
+        caption_blocks = [
+            {
+                "start_sec": i * (req.duration_seconds // scene_count),
+                "end_sec": (i + 1) * (req.duration_seconds // scene_count),
+                "text": f"Scene {i + 1}: {req.topic}",
+            }
+            for i in range(scene_count)
+        ] if req.include_captions else []
+        return {
+            "success": True,
+            "user_id": req.user_id,
+            "title": f"{req.topic} — {req.style.capitalize()} Video",
+            "hook": f"You won't believe what {req.topic} can do.",
+            "script": f"Welcome to this {req.style} video about {req.topic}. " * 3,
+            "scenes": scenes,
+            "captions": caption_blocks,
+            "hashtags": [f"#{req.topic.replace(' ', '')}", f"#{platform}", "#video"],
+            "thumbnail_concept": f"Bold '{req.topic.upper()}' text over a {req.style} background",
+            "distribution": {"platform": platform, "goal": req.goal, "recommended_post_time": "peak hours"},
+            "duration_seconds": req.duration_seconds,
+            "aspect_ratio": req.aspect_ratio,
+            "source": source,
+            "processing_time_ms": round((time.time() - start) * 1000, 1),
+        }
+
+    try:
+        script_result, full_script, visual_result, dist_result = await asyncio.wait_for(
+            _run_model_inference(), timeout=25.0
+        )
 
         raw_scenes = getattr(visual_result, "scenes", None) or []
         if not raw_scenes:
@@ -2168,6 +2238,8 @@ async def platform_video_generate(req: PlatformVideoRequest, _key = Depends(requ
             "source": getattr(script_result, "source", "model"),
             "processing_time_ms": round((time.time() - start) * 1000, 1),
         }
+    except asyncio.TimeoutError:
+        return _build_template_response(source="template_timeout")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2799,13 +2871,17 @@ async def _generate_ad_creative(
     headline = ""
     if _model_ready and _script_agent:
         try:
+            import asyncio as _asyncio
             from ai_model.agents.script_agent import ScriptRequest
-            script = await _in_thread(lambda: _script_agent.run(ScriptRequest(
-                idea=f"{product} — {genre or 'music'} ad for {artist}",
-                platform=platform,
-                goal=goal,
-                tone="direct",
-            )))
+            script = await _asyncio.wait_for(
+                _in_thread(lambda: _script_agent.run(ScriptRequest(
+                    idea=f"{product} — {genre or 'music'} ad for {artist}",
+                    platform=platform,
+                    goal=goal,
+                    tone="direct",
+                ))),
+                timeout=12.0,
+            )
             if script.hook and len(script.hook) > 5:
                 hook = script.hook
                 source = "model_enhanced"
@@ -3034,9 +3110,12 @@ async def ads_autopilot(req: AdAutopilotRequest, _key = Depends(require_scope("g
         if _model_ready and _script_agent:
             try:
                 from ai_model.agents.script_agent import ScriptRequest
-                script = await _in_thread(lambda p=plat, a=ad_idea: _script_agent.run(ScriptRequest(
-                    idea=a, platform=p, goal=req.goal, tone="direct",
-                )))
+                script = await asyncio.wait_for(
+                    _in_thread(lambda p=plat, a=ad_idea: _script_agent.run(ScriptRequest(
+                        idea=a, platform=p, goal=req.goal, tone="direct",
+                    ))),
+                    timeout=12.0,
+                )
                 hook = script.hook
             except Exception:
                 pass
