@@ -2,11 +2,21 @@ import path from "path";
 import { fileURLToPath } from "url";
 import express, { type Express, type Request, type Response } from "express";
 import cors from "cors";
+import rateLimit from "express-rate-limit";
 import router from "./routes";
 
 const app: Express = express();
 
+const limiter = rateLimit({
+  windowMs: 1000,
+  limit: 120_000_000,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { error: "Rate limit exceeded. Please try again shortly." },
+});
+
 app.use(cors());
+app.use(limiter);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
