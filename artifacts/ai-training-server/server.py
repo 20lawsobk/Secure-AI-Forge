@@ -1325,7 +1325,7 @@ async def continuous_stop(_key = Depends(require_scope("train"))):
 async def continuous_history(_key = Depends(require_scope("read"))):
     from storage_client import get_storage
     storage = get_storage()
-    history = storage.lrange("mb:training:continuous:history", 0, 49) if storage.is_available() else []
+    history = storage.lrange("mb:training:continuous:history", 0, 49) if storage.is_available else []
     return {"history": history or [], "count": len(history or [])}
 
 
