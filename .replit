@@ -12,8 +12,8 @@ id = "artifacts/mockup-sandbox"
 [deployment]
 router = "application"
 deploymentTarget = "gce"
-build = ["sh", "-c", "bash -c pnpm --filter @workspace/api-server run build && BASE_PATH=/ pnpm --filter @workspace/ai-dashboard run build"]
-run = ["sh", "-c", "pnpm --filter @workspace/api-server run serve"]
+build = ["pnpm", "run", "build:production"]
+run = ["pnpm", "start"]
 
 [workflows]
 runButton = "Project"
