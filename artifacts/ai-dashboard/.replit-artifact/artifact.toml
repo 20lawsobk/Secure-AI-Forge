@@ -22,10 +22,15 @@ PORT = "20060"
 BASE_PATH = "/"
 
 [services.production]
-build = ["pnpm", "--filter", "@workspace/ai-dashboard", "run", "build"]
-publicDir = "artifacts/ai-dashboard/dist/public"
-serve = "static"
+build = "pnpm --filter @workspace/api-server run build && BASE_PATH=/ pnpm --filter @workspace/ai-dashboard run build"
 
-[[services.production.rewrites]]
-from = "/*"
-to = "/index.html"
+[services.production.run]
+args = ["bash", "scripts/start-production.sh"]
+
+[services.production.run.env]
+PORT = "8080"
+MODEL_API_PORT = "9878"
+NODE_ENV = "production"
+
+[services.production.health.startup]
+path = "/api/healthz"
