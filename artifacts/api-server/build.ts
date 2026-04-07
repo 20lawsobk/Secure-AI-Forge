@@ -58,8 +58,18 @@ async function buildAll() {
     entryPoints: [path.resolve(__dirname, "src/index.ts")],
     platform: "node",
     bundle: true,
-    format: "cjs",
-    outfile: path.resolve(distDir, "index.cjs"),
+    format: "esm",
+    outfile: path.resolve(distDir, "index.mjs"),
+    banner: {
+      js: [
+        `import { createRequire } from 'module';`,
+        `import { fileURLToPath as __ftu } from 'url';`,
+        `import { dirname as __dn } from 'path';`,
+        `const require = createRequire(import.meta.url);`,
+        `const __filename = __ftu(import.meta.url);`,
+        `const __dirname = __dn(__filename);`,
+      ].join("\n"),
+    },
     define: {
       "process.env.NODE_ENV": '"production"',
     },

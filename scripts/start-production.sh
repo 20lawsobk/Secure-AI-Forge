@@ -11,4 +11,4 @@ done
 echo "[Deploy] AI Training Server is ready."
 
 echo "[Deploy] Starting API Server (Node.js)..."
-exec node artifacts/api-server/dist/index.cjs
+exec node artifacts/api-server/dist/index.mjs
