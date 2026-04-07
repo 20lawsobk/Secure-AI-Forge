@@ -23,7 +23,7 @@ BASE_PATH = "/"
 
 [services.production]
 build = "pnpm --filter @workspace/api-server run build && BASE_PATH=/ pnpm --filter @workspace/ai-dashboard run build"
-run = "bash scripts/start-production.sh"
+run = "pnpm --filter @workspace/api-server run serve"
 
 [services.production.health.startup]
 path = "/api/healthz"
