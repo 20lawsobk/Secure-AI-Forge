@@ -27,6 +27,22 @@ author = "agent"
 task = "workflow.run"
 args = "AI Training Server"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "typecheck"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "python-lint"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "python-typecheck"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "format-check"
+
 [[workflows.workflow]]
 name = "AI Training Server"
 author = "agent"
@@ -38,6 +54,50 @@ waitForPort = 9878
 
 [workflows.workflow.metadata]
 outputType = "console"
+
+[[workflows.workflow]]
+name = "typecheck"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm run typecheck"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "python-lint"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "uv run ruff check artifacts/ai-training-server/ --output-format=concise"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "python-typecheck"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "uv run mypy artifacts/ai-training-server/ --ignore-missing-imports --no-strict-optional --follow-imports=skip"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "format-check"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm exec prettier --check \"artifacts/**/*.{ts,tsx}\" \"lib/**/*.{ts,tsx}\""
+
+[workflows.workflow.metadata]
+isValidation = true
 
 [agent]
 stack = "PNPM_WORKSPACE"
