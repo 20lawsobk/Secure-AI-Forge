@@ -746,7 +746,7 @@ def control_set_phase(body: SetPhaseBody):
 
 # ── In-memory job stores ──────────────────────────────────────────────────────
 
-import uuid as _uuid
+import uuid as _uuid  # noqa: E402
 
 _video_jobs: Dict[str, Dict[str, Any]] = {}
 _audio_jobs: Dict[str, Dict[str, Any]] = {}
@@ -886,7 +886,6 @@ class TrainFeedbackRequest(BaseModel):
 
 def _simple_score(text: str, platform: str) -> float:
     """Deterministic heuristic score 0-100 based on text features."""
-    import math
     words   = len(text.split())
     has_cta = any(w in text.lower() for w in ["click", "follow", "link", "save", "share", "buy", "get"])
     length_score = max(0.0, 1.0 - abs(words - 30) / 60)

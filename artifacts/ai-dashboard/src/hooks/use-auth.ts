@@ -16,8 +16,8 @@ export const useAuth = create<AuthState>()(
     }),
     {
       name: "ai-dashboard-auth",
-    }
-  )
+    },
+  ),
 );
 
 export function getAuthHeaders() {

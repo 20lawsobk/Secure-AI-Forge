@@ -6,7 +6,7 @@ from enum import Enum, auto
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from ai_model.gpu.digital_gpu import (
-    GPUError, ShapeError, TypeErrorGPU, SIMDCore, VRAM, OpCode
+    GPUError, ShapeError, SIMDCore, VRAM
 )
 
 

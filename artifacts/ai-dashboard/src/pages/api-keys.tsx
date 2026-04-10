@@ -56,7 +56,10 @@ export default function ApiKeys() {
   const { adminKey } = useAuth();
   const { toast } = useToast();
   const [isCreateOpen, setIsCreateOpen] = useState(false);
-  const [newKeyData, setNewKeyData] = useState<{ key: string; name: string } | null>(null);
+  const [newKeyData, setNewKeyData] = useState<{
+    key: string;
+    name: string;
+  } | null>(null);
 
   const { data, isLoading, refetch } = useListApiKeys({
     query: { enabled: !!adminKey },
@@ -100,7 +103,8 @@ export default function ApiKeys() {
   };
 
   const handleRotate = async (id: string) => {
-    if (!confirm("Rotating will invalidate the old key immediately. Continue?")) return;
+    if (!confirm("Rotating will invalidate the old key immediately. Continue?"))
+      return;
     try {
       const result = await rotateMut.mutateAsync({ keyId: id });
       setNewKeyData({ key: result.key, name: result.name });
@@ -122,9 +126,12 @@ export default function ApiKeys() {
         <div className="w-16 h-16 rounded-2xl bg-destructive/10 flex items-center justify-center mb-4">
           <ShieldAlert className="w-8 h-8 text-destructive" />
         </div>
-        <h2 className="text-2xl font-display font-bold text-white mb-2">Authentication Required</h2>
+        <h2 className="text-2xl font-display font-bold text-white mb-2">
+          Authentication Required
+        </h2>
         <p className="text-muted-foreground max-w-md">
-          You need to provide an Admin Key in the sidebar to view and manage API keys.
+          You need to provide an Admin Key in the sidebar to view and manage API
+          keys.
         </p>
       </div>
     );
@@ -134,10 +141,14 @@ export default function ApiKeys() {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <div>
-          <h1 className="text-3xl font-display font-bold text-white">API Keys</h1>
-          <p className="text-muted-foreground mt-1">Manage access tokens for external integrations.</p>
+          <h1 className="text-3xl font-display font-bold text-white">
+            API Keys
+          </h1>
+          <p className="text-muted-foreground mt-1">
+            Manage access tokens for external integrations.
+          </p>
         </div>
-        <Button 
+        <Button
           onClick={() => setIsCreateOpen(true)}
           className="bg-primary hover:bg-primary/90 text-white shadow-lg shadow-primary/20"
         >
@@ -162,50 +173,94 @@ export default function ApiKeys() {
             {isLoading ? (
               [...Array(3)].map((_, i) => (
                 <TableRow key={i} className="border-white/5">
-                  <TableCell><Skeleton className="h-5 w-32 bg-white/5" /></TableCell>
-                  <TableCell><Skeleton className="h-5 w-24 bg-white/5" /></TableCell>
-                  <TableCell><Skeleton className="h-5 w-40 bg-white/5" /></TableCell>
-                  <TableCell><Skeleton className="h-5 w-16 bg-white/5" /></TableCell>
-                  <TableCell><Skeleton className="h-5 w-24 bg-white/5" /></TableCell>
-                  <TableCell><Skeleton className="h-5 w-24 bg-white/5" /></TableCell>
-                  <TableCell><Skeleton className="h-8 w-20 bg-white/5 ml-auto" /></TableCell>
+                  <TableCell>
+                    <Skeleton className="h-5 w-32 bg-white/5" />
+                  </TableCell>
+                  <TableCell>
+                    <Skeleton className="h-5 w-24 bg-white/5" />
+                  </TableCell>
+                  <TableCell>
+                    <Skeleton className="h-5 w-40 bg-white/5" />
+                  </TableCell>
+                  <TableCell>
+                    <Skeleton className="h-5 w-16 bg-white/5" />
+                  </TableCell>
+                  <TableCell>
+                    <Skeleton className="h-5 w-24 bg-white/5" />
+                  </TableCell>
+                  <TableCell>
+                    <Skeleton className="h-5 w-24 bg-white/5" />
+                  </TableCell>
+                  <TableCell>
+                    <Skeleton className="h-8 w-20 bg-white/5 ml-auto" />
+                  </TableCell>
                 </TableRow>
               ))
             ) : data?.keys.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={7} className="h-32 text-center text-muted-foreground">
+                <TableCell
+                  colSpan={7}
+                  className="h-32 text-center text-muted-foreground"
+                >
                   No API keys found. Create one to get started.
                 </TableCell>
               </TableRow>
             ) : (
               data?.keys.map((key) => (
-                <TableRow key={key.id} className="border-white/5 hover:bg-white/5">
-                  <TableCell className="font-medium text-white">{key.name}</TableCell>
-                  <TableCell className="font-mono text-muted-foreground">{key.prefix}••••••••</TableCell>
+                <TableRow
+                  key={key.id}
+                  className="border-white/5 hover:bg-white/5"
+                >
+                  <TableCell className="font-medium text-white">
+                    {key.name}
+                  </TableCell>
+                  <TableCell className="font-mono text-muted-foreground">
+                    {key.prefix}••••••••
+                  </TableCell>
                   <TableCell>
                     <div className="flex gap-1 flex-wrap">
-                      {key.scopes.map(s => (
-                        <Badge key={s} variant="secondary" className="bg-white/5 text-xs font-normal border-white/10">
+                      {key.scopes.map((s) => (
+                        <Badge
+                          key={s}
+                          variant="secondary"
+                          className="bg-white/5 text-xs font-normal border-white/10"
+                        >
                           {s}
                         </Badge>
                       ))}
                     </div>
                   </TableCell>
                   <TableCell className="text-muted-foreground text-sm font-mono">
-                    {(key as any).request_count != null ? ((key as any).request_count as number).toLocaleString() : "—"}
+                    {(key as any).request_count != null
+                      ? ((key as any).request_count as number).toLocaleString()
+                      : "—"}
                   </TableCell>
                   <TableCell className="text-muted-foreground text-sm">
                     {format(new Date(key.created_at), "MMM d, yyyy")}
                   </TableCell>
                   <TableCell className="text-muted-foreground text-sm">
-                    {key.last_used_at ? format(new Date(key.last_used_at), "MMM d, HH:mm") : "Never"}
+                    {key.last_used_at
+                      ? format(new Date(key.last_used_at), "MMM d, HH:mm")
+                      : "Never"}
                   </TableCell>
                   <TableCell className="text-right">
                     <div className="flex justify-end gap-2">
-                      <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-white" onClick={() => handleRotate(key.id)} title="Rotate Key">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-muted-foreground hover:text-white"
+                        onClick={() => handleRotate(key.id)}
+                        title="Rotate Key"
+                      >
                         <RefreshCw className="w-4 h-4" />
                       </Button>
-                      <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive hover:text-red-400 hover:bg-destructive/10" onClick={() => handleRevoke(key.id)} title="Revoke Key">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-destructive hover:text-red-400 hover:bg-destructive/10"
+                        onClick={() => handleRevoke(key.id)}
+                        title="Revoke Key"
+                      >
                         <Trash2 className="w-4 h-4" />
                       </Button>
                     </div>
@@ -221,14 +276,20 @@ export default function ApiKeys() {
       <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
         <DialogContent className="sm:max-w-md glass-panel border-white/10">
           <DialogHeader>
-            <DialogTitle className="text-xl font-display text-white">Create API Key</DialogTitle>
+            <DialogTitle className="text-xl font-display text-white">
+              Create API Key
+            </DialogTitle>
             <DialogDescription className="text-muted-foreground">
-              Generate a new key for API access. The key will only be shown once.
+              Generate a new key for API access. The key will only be shown
+              once.
             </DialogDescription>
           </DialogHeader>
 
           <Form {...form}>
-            <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4 py-4">
+            <form
+              onSubmit={form.handleSubmit(onSubmit)}
+              className="space-y-4 py-4"
+            >
               <FormField
                 control={form.control}
                 name="name"
@@ -236,7 +297,11 @@ export default function ApiKeys() {
                   <FormItem>
                     <FormLabel className="text-white">Key Name</FormLabel>
                     <FormControl>
-                      <Input placeholder="e.g. Production Backend" className="bg-black/50 border-white/10 text-white" {...field} />
+                      <Input
+                        placeholder="e.g. Production Backend"
+                        className="bg-black/50 border-white/10 text-white"
+                        {...field}
+                      />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -250,7 +315,9 @@ export default function ApiKeys() {
                   <FormItem>
                     <div className="mb-4">
                       <FormLabel className="text-white">Scopes</FormLabel>
-                      <FormDescription className="text-xs">Select permissions for this key.</FormDescription>
+                      <FormDescription className="text-xs">
+                        Select permissions for this key.
+                      </FormDescription>
                     </div>
                     <div className="grid grid-cols-2 gap-2">
                       {SCOPES.map((scope) => (
@@ -269,10 +336,15 @@ export default function ApiKeys() {
                                     checked={field.value?.includes(scope)}
                                     onCheckedChange={(checked) => {
                                       return checked
-                                        ? field.onChange([...field.value, scope])
+                                        ? field.onChange([
+                                            ...field.value,
+                                            scope,
+                                          ])
                                         : field.onChange(
-                                            field.value?.filter((value) => value !== scope)
-                                          )
+                                            field.value?.filter(
+                                              (value) => value !== scope,
+                                            ),
+                                          );
                                     }}
                                   />
                                 </FormControl>
@@ -280,7 +352,7 @@ export default function ApiKeys() {
                                   {scope}
                                 </FormLabel>
                               </FormItem>
-                            )
+                            );
                           }}
                         />
                       ))}
@@ -291,8 +363,18 @@ export default function ApiKeys() {
               />
 
               <DialogFooter className="pt-4">
-                <Button variant="ghost" type="button" onClick={() => setIsCreateOpen(false)}>Cancel</Button>
-                <Button type="submit" disabled={createMut.isPending} className="bg-primary text-white">
+                <Button
+                  variant="ghost"
+                  type="button"
+                  onClick={() => setIsCreateOpen(false)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={createMut.isPending}
+                  className="bg-primary text-white"
+                >
                   {createMut.isPending ? "Creating..." : "Create Key"}
                 </Button>
               </DialogFooter>
@@ -312,7 +394,7 @@ export default function ApiKeys() {
               Please copy this key now. You won't be able to see it again!
             </DialogDescription>
           </DialogHeader>
-          
+
           <div className="p-4 bg-black/50 rounded-xl border border-white/10 mt-2 relative group">
             <code className="text-primary-foreground font-mono text-sm break-all pr-10 block">
               {newKeyData?.key}
@@ -326,7 +408,7 @@ export default function ApiKeys() {
               <Copy className="w-4 h-4" />
             </Button>
           </div>
-          
+
           <DialogFooter className="mt-4">
             <Button onClick={() => setNewKeyData(null)} className="w-full">
               I've copied it safely

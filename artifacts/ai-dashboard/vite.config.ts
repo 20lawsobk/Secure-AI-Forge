@@ -10,13 +10,17 @@ const rawPort = process.env.PORT;
 const port = rawPort ? Number(rawPort) : 3000;
 
 if (!isBuild && (!rawPort || Number.isNaN(port) || port <= 0)) {
-  throw new Error("PORT environment variable is required but was not provided.");
+  throw new Error(
+    "PORT environment variable is required but was not provided.",
+  );
 }
 
 const basePath = process.env.BASE_PATH ?? "/";
 
 if (!isBuild && !process.env.BASE_PATH) {
-  throw new Error("BASE_PATH environment variable is required but was not provided.");
+  throw new Error(
+    "BASE_PATH environment variable is required but was not provided.",
+  );
 }
 
 export default defineConfig({
@@ -42,7 +46,12 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "src"),
-      "@assets": path.resolve(import.meta.dirname, "..", "..", "attached_assets"),
+      "@assets": path.resolve(
+        import.meta.dirname,
+        "..",
+        "..",
+        "attached_assets",
+      ),
     },
     dedupe: ["react", "react-dom"],
   },

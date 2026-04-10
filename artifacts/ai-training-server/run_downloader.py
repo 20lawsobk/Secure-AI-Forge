@@ -143,7 +143,7 @@ def run():
                     sys.exit(0)
 
             attempt  += 1
-            t_start   = time.time()
+            _t_start  = time.time()
             log(f"Launching Dataset Downloader (attempt {attempt}) …")
 
             try:

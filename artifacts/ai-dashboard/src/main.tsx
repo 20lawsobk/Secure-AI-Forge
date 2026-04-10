@@ -6,7 +6,9 @@ import { useAuth } from "./hooks/use-auth";
 
 setAuthHeaderProvider(() => {
   const { adminKey } = useAuth.getState();
-  return adminKey ? { "X-Admin-Key": adminKey } : {};
+  return adminKey
+    ? { "X-Admin-Key": adminKey }
+    : ({} as Record<string, string>);
 });
 
 createRoot(document.getElementById("root")!).render(<App />);

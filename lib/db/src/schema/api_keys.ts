@@ -1,4 +1,11 @@
-import { pgTable, text, boolean, integer, timestamp, uuid } from "drizzle-orm/pg-core";
+import {
+  pgTable,
+  text,
+  boolean,
+  integer,
+  timestamp,
+  uuid,
+} from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -35,7 +42,9 @@ export const trainingLogsTable = pgTable("training_logs", {
   jobId: text("job_id"),
 });
 
-export const insertTrainingLogSchema = createInsertSchema(trainingLogsTable).omit({
+export const insertTrainingLogSchema = createInsertSchema(
+  trainingLogsTable,
+).omit({
   id: true,
   timestamp: true,
 });

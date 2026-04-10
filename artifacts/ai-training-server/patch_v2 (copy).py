@@ -2,7 +2,8 @@
 patch_v2.py — One-shot fix for download_datasets.py on D: drive.
 Run from: D:\ai_server>  python patch_v2.py
 """
-import json, re, sys
+import json
+import re
 from pathlib import Path
 
 SCRIPT = Path(__file__).parent / 'download_datasets.py'

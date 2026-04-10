@@ -9,14 +9,13 @@ No fixed templates are used.
 """
 from __future__ import annotations
 import re
-import math
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any
+from typing import List, Dict, Any
 
 from ..model.creative_model import CreativeModel
 from ..agents.script_agent import ScriptAgent, ScriptRequest, PLATFORM_CTAS
-from ..agents.visual_spec_agent import VisualSpecAgent, VisualSpecRequest, TONE_COLORS
-from .cinematic_engine import CinematicRequest, CinematicResult, render_cinematic
+from ..agents.visual_spec_agent import VisualSpecAgent
+from .cinematic_engine import CinematicRequest, CinematicResult
 from .cinematic_engine import render_cinematic_open
 from .renderer import ASPECT_RATIOS, PLATFORM_RATIOS
 from .scenes import SceneConfig
@@ -402,7 +401,7 @@ class VideoAgent:
     def _pick_animation(tone: str, scene_type: str) -> str:
         """Choose text animation driven by tone and scene position."""
         energetic_tones = {"energetic", "edgy", "playful", "promotional"}
-        calm_tones      = {"chill", "serious", "professional", "casual"}
+        _calm_tones     = {"chill", "serious", "professional", "casual"}
 
         if scene_type == "hook":
             return "scale_in" if tone in energetic_tones else "slide_up"

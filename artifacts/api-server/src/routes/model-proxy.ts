@@ -16,17 +16,17 @@ interface CacheEntry {
 const _cache = new Map<string, CacheEntry>();
 
 const CACHE_TTL_MS: Record<string, number> = {
-  "/dashboard/stats":           5_000,
-  "/health":                    8_000,
-  "/model/status":              8_000,
-  "/gpu/status":                6_000,
-  "/gpu/hyper/status":          6_000,
-  "/gpu/capabilities":         15_000,
-  "/storage/status":           10_000,
-  "/watchdog/status":          10_000,
+  "/dashboard/stats": 5_000,
+  "/health": 8_000,
+  "/model/status": 8_000,
+  "/gpu/status": 6_000,
+  "/gpu/hyper/status": 6_000,
+  "/gpu/capabilities": 15_000,
+  "/storage/status": 10_000,
+  "/watchdog/status": 10_000,
   "/training/continuous/status": 4_000,
-  "/training/puller/status":    8_000,
-  "/training/puller/sources":  30_000,
+  "/training/puller/status": 8_000,
+  "/training/puller/sources": 30_000,
 };
 
 function getCached(path: string): CacheEntry | null {
@@ -43,7 +43,9 @@ function setCached(path: string, status: number, data: unknown): void {
 
 // ─── Safe JSON parsing (handles non-JSON upstream error bodies) ─────────────
 
-async function parseResponseBody(response: globalThis.Response): Promise<unknown> {
+async function parseResponseBody(
+  response: globalThis.Response,
+): Promise<unknown> {
   const text = await response.text();
   try {
     return JSON.parse(text);
@@ -54,7 +56,11 @@ async function parseResponseBody(response: globalThis.Response): Promise<unknown
 
 // ─── Core proxy function ────────────────────────────────────────────────────
 
-async function proxyRequest(req: Request, res: Response, path: string) {
+async function proxyRequest(
+  req: Request,
+  res: Response,
+  path: string,
+): Promise<void> {
   const isGet = req.method === "GET" || req.method === "HEAD";
   const startTime = Date.now();
 
@@ -63,7 +69,8 @@ async function proxyRequest(req: Request, res: Response, path: string) {
     const cached = getCached(path);
     if (cached) {
       res.setHeader("X-Cache", "HIT");
-      return res.status(cached.status).json(cached.data);
+      res.status(cached.status).json(cached.data);
+      return;
     }
   }
 
@@ -121,7 +128,8 @@ async function proxyRequest(req: Request, res: Response, path: string) {
     ) {
       res.status(503).json({
         error: "AI model server unavailable",
-        detail: "The Python AI training server is not running or still initializing.",
+        detail:
+          "The Python AI training server is not running or still initializing.",
       });
     } else if (
       e.cause?.code === "UND_ERR_SOCKET" ||
@@ -130,7 +138,8 @@ async function proxyRequest(req: Request, res: Response, path: string) {
     ) {
       res.status(503).json({
         error: "AI model server closed connection",
-        detail: "The request was dropped — the AI server may be busy. Please retry.",
+        detail:
+          "The request was dropped — the AI server may be busy. Please retry.",
       });
     } else {
       res.status(500).json({ error: "Proxy error", detail: String(err) });
@@ -185,7 +194,11 @@ router.post("/training/start", async (req, res) => {
 });
 
 router.get("/training/logs", async (req, res) => {
-  await proxyRequest(req, res, `/training/logs${req.query.limit ? `?limit=${req.query.limit}` : ""}`);
+  await proxyRequest(
+    req,
+    res,
+    `/training/logs${req.query.limit ? `?limit=${req.query.limit}` : ""}`,
+  );
 });
 
 router.post("/training/stop", async (req, res) => {
@@ -354,7 +367,11 @@ router.post("/platform/ads/audience", async (req, res) => {
 
 router.get("/platform/ads/performance/:userId", async (req, res) => {
   const query = req.query.platform ? `?platform=${req.query.platform}` : "";
-  await proxyRequest(req, res, `/platform/ads/performance/${req.params.userId}${query}`);
+  await proxyRequest(
+    req,
+    res,
+    `/platform/ads/performance/${req.params.userId}${query}`,
+  );
 });
 
 router.post("/platform/ads/optimize", async (req, res) => {

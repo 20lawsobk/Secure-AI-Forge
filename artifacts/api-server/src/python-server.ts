@@ -8,14 +8,17 @@ const PYTHON_PORT = parseInt(process.env.MODEL_API_PORT || "9878", 10);
 const PYTHON_SCRIPT = (() => {
   const metaUrl = import.meta?.url;
   if (metaUrl) {
-    return path.resolve(path.dirname(fileURLToPath(metaUrl)), "../../../artifacts/ai-training-server/server.py");
+    return path.resolve(
+      path.dirname(fileURLToPath(metaUrl)),
+      "../../../artifacts/ai-training-server/server.py",
+    );
   }
   return path.resolve(process.cwd(), "artifacts/ai-training-server/server.py");
 })();
 
 // Backoff: starts at 2 s, doubles each crash, caps at 30 s
 const INITIAL_RETRY_MS = 2_000;
-const MAX_RETRY_MS     = 30_000;
+const MAX_RETRY_MS = 30_000;
 
 // If the server ran at least this long without crashing, treat the next
 // crash as a fresh start (reset backoff).
@@ -26,8 +29,8 @@ const HEALTH_POLL_INTERVAL_MS = 15_000;
 
 let pythonProcess: ChildProcess | null = null;
 let consecutiveCrashes = 0;
-let lastStartTime      = 0;
-let restartScheduled   = false;
+let lastStartTime = 0;
+let restartScheduled = false;
 let healthTimer: ReturnType<typeof setInterval> | null = null;
 let shuttingDown = false;
 
@@ -42,9 +45,18 @@ function isPortOpen(port: number, timeoutMs = 1000): Promise<boolean> {
   return new Promise((resolve) => {
     const sock = new net.Socket();
     sock.setTimeout(timeoutMs);
-    sock.on("connect", () => { sock.destroy(); resolve(true); });
-    sock.on("error",   () => { sock.destroy(); resolve(false); });
-    sock.on("timeout", () => { sock.destroy(); resolve(false); });
+    sock.on("connect", () => {
+      sock.destroy();
+      resolve(true);
+    });
+    sock.on("error", () => {
+      sock.destroy();
+      resolve(false);
+    });
+    sock.on("timeout", () => {
+      sock.destroy();
+      resolve(false);
+    });
     sock.connect(port, "127.0.0.1");
   });
 }
@@ -55,9 +67,22 @@ function waitForPort(port: number, timeoutMs = 45_000): Promise<void> {
     const poll = () => {
       const sock = new net.Socket();
       sock.setTimeout(1000);
-      sock.on("connect", () => { sock.destroy(); resolve(); });
-      sock.on("error",   () => { sock.destroy(); Date.now() < deadline ? setTimeout(poll, 500) : reject(new Error(`Timeout waiting for port ${port}`)); });
-      sock.on("timeout", () => { sock.destroy(); Date.now() < deadline ? setTimeout(poll, 500) : reject(new Error(`Timeout waiting for port ${port}`)); });
+      sock.on("connect", () => {
+        sock.destroy();
+        resolve();
+      });
+      sock.on("error", () => {
+        sock.destroy();
+        Date.now() < deadline
+          ? setTimeout(poll, 500)
+          : reject(new Error(`Timeout waiting for port ${port}`));
+      });
+      sock.on("timeout", () => {
+        sock.destroy();
+        Date.now() < deadline
+          ? setTimeout(poll, 500)
+          : reject(new Error(`Timeout waiting for port ${port}`));
+      });
       sock.connect(port, "127.0.0.1");
     };
     poll();
@@ -82,12 +107,20 @@ function spawnPython() {
   lastStartTime = Date.now();
 
   pythonProcess = spawn("python3", [PYTHON_SCRIPT], {
-    env: { ...process.env, MODEL_API_PORT: String(PYTHON_PORT), PYTHONUNBUFFERED: "1" },
+    env: {
+      ...process.env,
+      MODEL_API_PORT: String(PYTHON_PORT),
+      PYTHONUNBUFFERED: "1",
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  pythonProcess.stdout?.on("data", (d: Buffer) => process.stdout.write(`[Python] ${d}`));
-  pythonProcess.stderr?.on("data", (d: Buffer) => process.stderr.write(`[Python] ${d}`));
+  pythonProcess.stdout?.on("data", (d: Buffer) =>
+    process.stdout.write(`[Python] ${d}`),
+  );
+  pythonProcess.stderr?.on("data", (d: Buffer) =>
+    process.stderr.write(`[Python] ${d}`),
+  );
 
   pythonProcess.on("exit", async (code, signal) => {
     pythonProcess = null;
@@ -100,19 +133,25 @@ function spawnPython() {
 
     // If another process grabbed the port (e.g., standalone workflow restarted), don't fight it
     if (await isPortOpen(PYTHON_PORT)) {
-      console.log(`[Python] Port ${PYTHON_PORT} is held by another process — standing by.`);
+      console.log(
+        `[Python] Port ${PYTHON_PORT} is held by another process — standing by.`,
+      );
       return;
     }
 
     const uptime = Date.now() - lastStartTime;
     if (uptime >= MIN_HEALTHY_RUN_MS) {
-      console.log(`[Python] Server was healthy for ${Math.round(uptime / 1000)}s — resetting backoff.`);
+      console.log(
+        `[Python] Server was healthy for ${Math.round(uptime / 1000)}s — resetting backoff.`,
+      );
       consecutiveCrashes = 0;
     }
 
     consecutiveCrashes++;
     const delay = backoffMs();
-    console.log(`[Python] Server exited (code ${code ?? "?"}, signal ${signal ?? "none"}). Restart #${consecutiveCrashes} in ${delay}ms…`);
+    console.log(
+      `[Python] Server exited (code ${code ?? "?"}, signal ${signal ?? "none"}). Restart #${consecutiveCrashes} in ${delay}ms…`,
+    );
 
     restartScheduled = true;
     setTimeout(spawnPython, delay);
@@ -142,7 +181,9 @@ export async function ensurePythonServer(): Promise<void> {
   const alreadyUp = await pollUntilOpen(PYTHON_PORT, 6_000);
 
   if (alreadyUp) {
-    console.log(`[Python] AI training server already running on port ${PYTHON_PORT} — monitoring only.`);
+    console.log(
+      `[Python] AI training server already running on port ${PYTHON_PORT} — monitoring only.`,
+    );
   } else {
     spawnPython();
     try {
@@ -150,7 +191,9 @@ export async function ensurePythonServer(): Promise<void> {
       consecutiveCrashes = 0;
       console.log(`[Python] AI training server ready on port ${PYTHON_PORT}`);
     } catch {
-      console.error("[Python] Warning: server did not respond in time — requests will be retried by proxy.");
+      console.error(
+        "[Python] Warning: server did not respond in time — requests will be retried by proxy.",
+      );
     }
   }
 
@@ -159,7 +202,10 @@ export async function ensurePythonServer(): Promise<void> {
 
 export function stopPythonServer() {
   shuttingDown = true;
-  if (healthTimer) { clearInterval(healthTimer); healthTimer = null; }
+  if (healthTimer) {
+    clearInterval(healthTimer);
+    healthTimer = null;
+  }
   if (pythonProcess) {
     console.log("[Python] Stopping AI training server...");
     pythonProcess.kill("SIGTERM");

@@ -5,7 +5,9 @@ import platformRules from "../platform_rules.json";
 const router: IRouter = Router();
 
 const MAXCORE_URL = `http://localhost:${process.env.MODEL_API_PORT || "9878"}`;
-const MAXCORE_API_KEY = process.env.ADMIN_KEY || "mbs_8a3edbac97ff333dda5068410227267e6d85b14a4c9caee279fbb18ddfb47edc";
+const MAXCORE_API_KEY =
+  process.env.ADMIN_KEY ||
+  "mbs_8a3edbac97ff333dda5068410227267e6d85b14a4c9caee279fbb18ddfb47edc";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -85,51 +87,231 @@ interface MultimodalPackage {
 
 const PACK_DEFINITIONS: Record<PackId, PlatformAssetSpec[]> = {
   singlereleasefull_pack: [
-    { id: "fb_post",            platform: "facebook",       modality: "text",  purpose: "Main FB post copy" },
-    { id: "ig_caption",         platform: "instagram",      modality: "text",  purpose: "IG feed caption" },
-    { id: "threads_post",       platform: "threads",        modality: "text",  purpose: "Threads announcement" },
-    { id: "tt_caption",         platform: "tiktok",         modality: "text",  purpose: "TikTok caption + hashtags" },
-    { id: "yt_description",     platform: "youtube",        modality: "text",  purpose: "YouTube description" },
-    { id: "yt_title",           platform: "youtube",        modality: "text",  purpose: "YouTube title options" },
-    { id: "gb_post",            platform: "google_business",modality: "text",  purpose: "Google Business update" },
-    { id: "li_post",            platform: "linkedin",       modality: "text",  purpose: "Professional angle post" },
-    { id: "cover_image",        platform: "instagram",      modality: "image", purpose: "Cover/thumbnail cross-platform" },
-    { id: "story_background",   platform: "instagram",      modality: "image", purpose: "Story background art" },
-    { id: "tt_voiceover_audio", platform: "tiktok",         modality: "audio", purpose: "Voiceover audio for TikTok short" },
-    { id: "yt_voiceover_audio", platform: "youtube",        modality: "audio", purpose: "Voiceover for teaser video" },
-    { id: "tt_short_video",     platform: "tiktok",         modality: "video", purpose: "Vertical short teaser" },
-    { id: "yt_short_video",     platform: "youtube",        modality: "video", purpose: "YouTube Short teaser" },
+    {
+      id: "fb_post",
+      platform: "facebook",
+      modality: "text",
+      purpose: "Main FB post copy",
+    },
+    {
+      id: "ig_caption",
+      platform: "instagram",
+      modality: "text",
+      purpose: "IG feed caption",
+    },
+    {
+      id: "threads_post",
+      platform: "threads",
+      modality: "text",
+      purpose: "Threads announcement",
+    },
+    {
+      id: "tt_caption",
+      platform: "tiktok",
+      modality: "text",
+      purpose: "TikTok caption + hashtags",
+    },
+    {
+      id: "yt_description",
+      platform: "youtube",
+      modality: "text",
+      purpose: "YouTube description",
+    },
+    {
+      id: "yt_title",
+      platform: "youtube",
+      modality: "text",
+      purpose: "YouTube title options",
+    },
+    {
+      id: "gb_post",
+      platform: "google_business",
+      modality: "text",
+      purpose: "Google Business update",
+    },
+    {
+      id: "li_post",
+      platform: "linkedin",
+      modality: "text",
+      purpose: "Professional angle post",
+    },
+    {
+      id: "cover_image",
+      platform: "instagram",
+      modality: "image",
+      purpose: "Cover/thumbnail cross-platform",
+    },
+    {
+      id: "story_background",
+      platform: "instagram",
+      modality: "image",
+      purpose: "Story background art",
+    },
+    {
+      id: "tt_voiceover_audio",
+      platform: "tiktok",
+      modality: "audio",
+      purpose: "Voiceover audio for TikTok short",
+    },
+    {
+      id: "yt_voiceover_audio",
+      platform: "youtube",
+      modality: "audio",
+      purpose: "Voiceover for teaser video",
+    },
+    {
+      id: "tt_short_video",
+      platform: "tiktok",
+      modality: "video",
+      purpose: "Vertical short teaser",
+    },
+    {
+      id: "yt_short_video",
+      platform: "youtube",
+      modality: "video",
+      purpose: "YouTube Short teaser",
+    },
   ],
 
   announcement_pack: [
-    { id: "fb_post",        platform: "facebook",       modality: "text",  purpose: "FB announcement copy" },
-    { id: "ig_caption",     platform: "instagram",      modality: "text",  purpose: "IG announcement caption" },
-    { id: "threads_post",   platform: "threads",        modality: "text",  purpose: "Threads announcement" },
-    { id: "tt_caption",     platform: "tiktok",         modality: "text",  purpose: "TikTok caption" },
-    { id: "yt_description", platform: "youtube",        modality: "text",  purpose: "YouTube description" },
-    { id: "li_post",        platform: "linkedin",       modality: "text",  purpose: "LinkedIn announcement" },
-    { id: "cover_image",    platform: "instagram",      modality: "image", purpose: "Announcement visual" },
+    {
+      id: "fb_post",
+      platform: "facebook",
+      modality: "text",
+      purpose: "FB announcement copy",
+    },
+    {
+      id: "ig_caption",
+      platform: "instagram",
+      modality: "text",
+      purpose: "IG announcement caption",
+    },
+    {
+      id: "threads_post",
+      platform: "threads",
+      modality: "text",
+      purpose: "Threads announcement",
+    },
+    {
+      id: "tt_caption",
+      platform: "tiktok",
+      modality: "text",
+      purpose: "TikTok caption",
+    },
+    {
+      id: "yt_description",
+      platform: "youtube",
+      modality: "text",
+      purpose: "YouTube description",
+    },
+    {
+      id: "li_post",
+      platform: "linkedin",
+      modality: "text",
+      purpose: "LinkedIn announcement",
+    },
+    {
+      id: "cover_image",
+      platform: "instagram",
+      modality: "image",
+      purpose: "Announcement visual",
+    },
   ],
 
   tourdates_pack: [
-    { id: "fb_post",        platform: "facebook",       modality: "text",  purpose: "Tour dates FB post" },
-    { id: "ig_caption",     platform: "instagram",      modality: "text",  purpose: "Tour dates IG caption" },
-    { id: "threads_post",   platform: "threads",        modality: "text",  purpose: "Tour dates Threads post" },
-    { id: "tt_caption",     platform: "tiktok",         modality: "text",  purpose: "TikTok tour hype caption" },
-    { id: "gb_post",        platform: "google_business",modality: "text",  purpose: "Google Business event post" },
-    { id: "tour_poster",    platform: "instagram",      modality: "image", purpose: "Tour poster — cross-platform" },
-    { id: "fb_event_image", platform: "facebook",       modality: "image", purpose: "Facebook event cover image" },
-    { id: "tt_hype_video",  platform: "tiktok",         modality: "video", purpose: "Short hype clip for tour" },
+    {
+      id: "fb_post",
+      platform: "facebook",
+      modality: "text",
+      purpose: "Tour dates FB post",
+    },
+    {
+      id: "ig_caption",
+      platform: "instagram",
+      modality: "text",
+      purpose: "Tour dates IG caption",
+    },
+    {
+      id: "threads_post",
+      platform: "threads",
+      modality: "text",
+      purpose: "Tour dates Threads post",
+    },
+    {
+      id: "tt_caption",
+      platform: "tiktok",
+      modality: "text",
+      purpose: "TikTok tour hype caption",
+    },
+    {
+      id: "gb_post",
+      platform: "google_business",
+      modality: "text",
+      purpose: "Google Business event post",
+    },
+    {
+      id: "tour_poster",
+      platform: "instagram",
+      modality: "image",
+      purpose: "Tour poster — cross-platform",
+    },
+    {
+      id: "fb_event_image",
+      platform: "facebook",
+      modality: "image",
+      purpose: "Facebook event cover image",
+    },
+    {
+      id: "tt_hype_video",
+      platform: "tiktok",
+      modality: "video",
+      purpose: "Short hype clip for tour",
+    },
   ],
 
   evergreenbrand_pack: [
-    { id: "fb_post",        platform: "facebook",       modality: "text",  purpose: "Evergreen brand story" },
-    { id: "ig_caption",     platform: "instagram",      modality: "text",  purpose: "Brand aesthetic caption" },
-    { id: "threads_post",   platform: "threads",        modality: "text",  purpose: "Conversational brand post" },
-    { id: "li_post",        platform: "linkedin",       modality: "text",  purpose: "Professional brand statement" },
-    { id: "brand_image",    platform: "instagram",      modality: "image", purpose: "Brand visual identity" },
-    { id: "yt_thumbnail",   platform: "youtube",        modality: "image", purpose: "YouTube channel art" },
-    { id: "brand_audio",    platform: "youtube",        modality: "audio", purpose: "Brand voiceover / intro" },
+    {
+      id: "fb_post",
+      platform: "facebook",
+      modality: "text",
+      purpose: "Evergreen brand story",
+    },
+    {
+      id: "ig_caption",
+      platform: "instagram",
+      modality: "text",
+      purpose: "Brand aesthetic caption",
+    },
+    {
+      id: "threads_post",
+      platform: "threads",
+      modality: "text",
+      purpose: "Conversational brand post",
+    },
+    {
+      id: "li_post",
+      platform: "linkedin",
+      modality: "text",
+      purpose: "Professional brand statement",
+    },
+    {
+      id: "brand_image",
+      platform: "instagram",
+      modality: "image",
+      purpose: "Brand visual identity",
+    },
+    {
+      id: "yt_thumbnail",
+      platform: "youtube",
+      modality: "image",
+      purpose: "YouTube channel art",
+    },
+    {
+      id: "brand_audio",
+      platform: "youtube",
+      modality: "audio",
+      purpose: "Brand voiceover / intro",
+    },
   ],
 };
 
@@ -137,8 +319,14 @@ const PACK_DEFINITIONS: Record<PackId, PlatformAssetSpec[]> = {
 
 type PlatformRules = typeof platformRules;
 
-function getPlatformRules(platform: string): PlatformRules[keyof PlatformRules] | null {
-  return (platformRules as Record<string, PlatformRules[keyof PlatformRules]>)[platform] ?? null;
+function getPlatformRules(
+  platform: string,
+): PlatformRules[keyof PlatformRules] | null {
+  return (
+    (platformRules as Record<string, PlatformRules[keyof PlatformRules]>)[
+      platform
+    ] ?? null
+  );
 }
 
 function safeExtractJson(text: string): unknown {
@@ -147,14 +335,23 @@ function safeExtractJson(text: string): unknown {
   } catch {
     const match = text.match(/\{[\s\S]*\}/);
     if (match) {
-      try { return JSON.parse(match[0]); } catch { /* fall through */ }
+      try {
+        return JSON.parse(match[0]);
+      } catch {
+        /* fall through */
+      }
     }
     return null;
   }
 }
 
 function validateTaskPlan(raw: unknown, requestId: string): TaskPlan {
-  if (raw && typeof raw === "object" && "steps" in raw && Array.isArray((raw as TaskPlan).steps)) {
+  if (
+    raw &&
+    typeof raw === "object" &&
+    "steps" in raw &&
+    Array.isArray((raw as TaskPlan).steps)
+  ) {
     return raw as TaskPlan;
   }
   return { requestId, steps: [] };
@@ -190,7 +387,10 @@ async function normalizeInput(req: GenerationRequest): Promise<unknown> {
 
 // ─── Step 2: Plan tasks via maxcore /generate/text (mode=planner) ─────────────
 
-async function planTasks(normalized: unknown, req: GenerationRequest): Promise<TaskPlan> {
+async function planTasks(
+  normalized: unknown,
+  req: GenerationRequest,
+): Promise<TaskPlan> {
   const packSpec = req.packId ? PACK_DEFINITIONS[req.packId] : null;
 
   const raw = await maxcorePost("/generate/text", {
@@ -256,7 +456,14 @@ const textWorker = {
       mode: "content",
       step,
       inputs,
-    })) as { outputs: Array<{ text: string; platform: Platform; slotId: string; meta: Record<string, unknown> }> };
+    })) as {
+      outputs: Array<{
+        text: string;
+        platform: Platform;
+        slotId: string;
+        meta: Record<string, unknown>;
+      }>;
+    };
 
     return (result.outputs ?? []).map((o) => ({
       id: randomUUID(),
@@ -274,7 +481,14 @@ const imageWorker = {
     const result = (await maxcorePost("/generate/image", {
       step,
       inputs,
-    })) as { outputs: Array<{ url: string; platform: Platform; slotId: string; meta: Record<string, unknown> }> };
+    })) as {
+      outputs: Array<{
+        url: string;
+        platform: Platform;
+        slotId: string;
+        meta: Record<string, unknown>;
+      }>;
+    };
 
     return (result.outputs ?? []).map((o) => ({
       id: randomUUID(),
@@ -292,7 +506,14 @@ const audioWorker = {
     const result = (await maxcorePost("/generate/audio", {
       step,
       inputs,
-    })) as { outputs: Array<{ url: string; platform: Platform; slotId: string; meta: Record<string, unknown> }> };
+    })) as {
+      outputs: Array<{
+        url: string;
+        platform: Platform;
+        slotId: string;
+        meta: Record<string, unknown>;
+      }>;
+    };
 
     return (result.outputs ?? []).map((o) => ({
       id: randomUUID(),
@@ -310,7 +531,14 @@ const videoWorker = {
     const result = (await maxcorePost("/generate/video", {
       step,
       inputs,
-    })) as { outputs: Array<{ url: string; platform: Platform; slotId: string; meta: Record<string, unknown> }> };
+    })) as {
+      outputs: Array<{
+        url: string;
+        platform: Platform;
+        slotId: string;
+        meta: Record<string, unknown>;
+      }>;
+    };
 
     return (result.outputs ?? []).map((o) => ({
       id: randomUUID(),
@@ -323,7 +551,10 @@ const videoWorker = {
   },
 };
 
-const workers: Record<string, { run: (step: TaskStep, inputs: unknown) => Promise<GeneratedAsset[]> }> = {
+const workers: Record<
+  string,
+  { run: (step: TaskStep, inputs: unknown) => Promise<GeneratedAsset[]> }
+> = {
   text: textWorker,
   image: imageWorker,
   audio: audioWorker,
@@ -332,7 +563,9 @@ const workers: Record<string, { run: (step: TaskStep, inputs: unknown) => Promis
 
 // ─── Orchestrator ─────────────────────────────────────────────────────────────
 
-async function handleGeneration(req: GenerationRequest): Promise<MultimodalPackage> {
+async function handleGeneration(
+  req: GenerationRequest,
+): Promise<MultimodalPackage> {
   const normalized = await normalizeInput(req);
   const plan = await planTasks(normalized, req);
 
@@ -349,7 +582,9 @@ async function handleGeneration(req: GenerationRequest): Promise<MultimodalPacka
         ? { normalized }
         : {
             normalized,
-            prior: (step.inputFrom as string[]).flatMap((id) => stepOutputs.get(id) ?? []),
+            prior: (step.inputFrom as string[]).flatMap(
+              (id) => stepOutputs.get(id) ?? [],
+            ),
           };
 
     const assets = await worker.run(step, inputs);
@@ -366,7 +601,10 @@ async function handleGeneration(req: GenerationRequest): Promise<MultimodalPacka
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
 router.get("/multimodal/packs", (_req: Request, res: Response) => {
-  const summary: Record<string, { slotCount: number; modalities: string[]; platforms: string[] }> = {};
+  const summary: Record<
+    string,
+    { slotCount: number; modalities: string[]; platforms: string[] }
+  > = {};
   for (const [packId, slots] of Object.entries(PACK_DEFINITIONS)) {
     summary[packId] = {
       slotCount: slots.length,
@@ -384,7 +622,12 @@ router.get("/multimodal/packs", (_req: Request, res: Response) => {
 router.post("/multimodal/generate", async (req: Request, res: Response) => {
   const body = req.body as Partial<GenerationRequest>;
 
-  if (!body.id || !body.userId || !body.input?.payload || !body.platforms?.length) {
+  if (
+    !body.id ||
+    !body.userId ||
+    !body.input?.payload ||
+    !body.platforms?.length
+  ) {
     res.status(400).json({
       error: "Missing required fields: id, userId, input.payload, platforms",
     });

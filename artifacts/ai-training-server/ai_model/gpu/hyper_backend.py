@@ -2,14 +2,9 @@ from __future__ import annotations
 import numpy as np
 import torch
 import torch.nn as nn
-from typing import Optional, Tuple, List
+from typing import List
 from ai_model.gpu.hyper_core import (
-    HyperGPU, HyperSIMDCore, GPUCluster, GPUClusterNode,
-    PrecisionMode, GPUError,
-)
-from ai_model.gpu.torch_backend import (
-    _DigitalGEMM, _DigitalAttention, _DigitalSoftmax, _DigitalGEMMBiasReLU,
-    DigitalGPULinear, DigitalGPUAttention, DigitalGPUSoftmax,
+    HyperGPU, GPUCluster, PrecisionMode, GPUError,
 )
 
 
@@ -188,7 +183,7 @@ class _HyperLayerNorm(torch.autograd.Function):
         g_np = gamma.detach().numpy().astype(np.float32)
         b_np = beta.detach().numpy().astype(np.float32)
         O_np = gpu.layer_norm(X_np, g_np, b_np, eps=eps)
-        O = torch.from_numpy(O_np.astype(np.float32))
+        O = torch.from_numpy(O_np.astype(np.float32))  # noqa: E741
 
         mean = X_np.mean(axis=-1, keepdims=True)
         var = X_np.var(axis=-1, keepdims=True)
@@ -519,4 +514,4 @@ class ClusterBackend:
         return self.cluster.status()
 
 
-from typing import Dict
+from typing import Dict  # noqa: E402

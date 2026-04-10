@@ -1,16 +1,16 @@
 import { Link, useLocation } from "wouter";
-import { 
-  Activity, 
-  Key, 
-  Cpu, 
-  BrainCircuit, 
-  PenTool, 
+import {
+  Activity,
+  Key,
+  Cpu,
+  BrainCircuit,
+  PenTool,
   Settings,
   Film,
   Menu,
   Lock,
   LogOut,
-  ChevronRight
+  ChevronRight,
 } from "lucide-react";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -18,13 +18,13 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { 
-  Dialog, 
-  DialogContent, 
-  DialogHeader, 
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
   DialogTitle,
   DialogDescription,
-  DialogFooter
+  DialogFooter,
 } from "@/components/ui/dialog";
 
 const navItems = [
@@ -77,7 +77,9 @@ export function Layout({ children }: { children: React.ReactNode }) {
               <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary to-fuchsia-600 flex items-center justify-center shadow-lg shadow-primary/20">
                 <BrainCircuit className="w-5 h-5 text-white" />
               </div>
-              <span className="font-display font-bold text-xl tracking-tight text-white">MaxCore AI</span>
+              <span className="font-display font-bold text-xl tracking-tight text-white">
+                MaxCore AI
+              </span>
             </div>
 
             <nav className="flex-1 px-4 py-4 space-y-1">
@@ -92,13 +94,16 @@ export function Layout({ children }: { children: React.ReactNode }) {
                     <div
                       className={`
                         flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer transition-all duration-200 group
-                        ${isActive 
-                          ? "bg-primary/10 text-primary font-medium" 
-                          : "text-sidebar-foreground hover:bg-sidebar-accent hover:text-white"
+                        ${
+                          isActive
+                            ? "bg-primary/10 text-primary font-medium"
+                            : "text-sidebar-foreground hover:bg-sidebar-accent hover:text-white"
                         }
                       `}
                     >
-                      <Icon className={`w-5 h-5 ${isActive ? "text-primary" : "text-sidebar-foreground group-hover:text-white transition-colors"}`} />
+                      <Icon
+                        className={`w-5 h-5 ${isActive ? "text-primary" : "text-sidebar-foreground group-hover:text-white transition-colors"}`}
+                      />
                       <span>{item.label}</span>
                       {isActive && (
                         <motion.div layoutId="activeNav" className="ml-auto">
@@ -114,21 +119,29 @@ export function Layout({ children }: { children: React.ReactNode }) {
             <div className="p-4 border-t border-border/50">
               <div className="glass-panel p-4 rounded-xl">
                 <div className="flex items-center gap-3 mb-2">
-                  <div className={`w-2 h-2 rounded-full ${adminKey ? 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.6)]' : 'bg-destructive shadow-[0_0_10px_rgba(239,68,68,0.6)]'}`} />
+                  <div
+                    className={`w-2 h-2 rounded-full ${adminKey ? "bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.6)]" : "bg-destructive shadow-[0_0_10px_rgba(239,68,68,0.6)]"}`}
+                  />
                   <span className="text-sm font-medium text-white">
                     {adminKey ? "Authenticated" : "Unauthenticated"}
                   </span>
                 </div>
-                <Button 
-                  variant="secondary" 
-                  size="sm" 
+                <Button
+                  variant="secondary"
+                  size="sm"
                   className="w-full text-xs mt-2 bg-white/5 hover:bg-white/10 text-white border-white/10"
-                  onClick={() => adminKey ? clearAdminKey() : setIsAuthDialogOpen(true)}
+                  onClick={() =>
+                    adminKey ? clearAdminKey() : setIsAuthDialogOpen(true)
+                  }
                 >
                   {adminKey ? (
-                    <><LogOut className="w-3 h-3 mr-2" /> Remove Key</>
+                    <>
+                      <LogOut className="w-3 h-3 mr-2" /> Remove Key
+                    </>
                   ) : (
-                    <><Lock className="w-3 h-3 mr-2" /> Set Admin Key</>
+                    <>
+                      <Lock className="w-3 h-3 mr-2" /> Set Admin Key
+                    </>
                   )}
                 </Button>
               </div>
@@ -142,15 +155,22 @@ export function Layout({ children }: { children: React.ReactNode }) {
         {/* Top Header */}
         <header className="h-16 flex items-center justify-between px-6 border-b border-border/50 bg-background/80 backdrop-blur-md z-10 sticky top-0">
           <div className="flex items-center gap-4">
-            <Button variant="ghost" size="icon" onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="text-muted-foreground hover:text-white">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+              className="text-muted-foreground hover:text-white"
+            >
               <Menu className="w-5 h-5" />
             </Button>
             <div className="h-4 w-px bg-border"></div>
             <h2 className="text-sm font-medium text-muted-foreground capitalize">
-              {location === "/" ? "Overview" : location.replace("/", "").replace("-", " ")}
+              {location === "/"
+                ? "Overview"
+                : location.replace("/", "").replace("-", " ")}
             </h2>
           </div>
-          
+
           <div className="flex items-center gap-3">
             <div className="hidden md:flex items-center gap-2 text-xs font-medium text-muted-foreground bg-secondary/50 px-3 py-1.5 rounded-full border border-border">
               <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
@@ -162,9 +182,15 @@ export function Layout({ children }: { children: React.ReactNode }) {
         {/* Page Content Scroll Area */}
         <div className="flex-1 overflow-auto relative">
           {/* Abstract background mesh */}
-          <div className="absolute inset-0 pointer-events-none opacity-[0.03] mix-blend-screen z-0" 
-               style={{ backgroundImage: `url(${import.meta.env.BASE_URL}images/abstract-mesh.png)`, backgroundSize: 'cover', backgroundPosition: 'center' }} />
-          
+          <div
+            className="absolute inset-0 pointer-events-none opacity-[0.03] mix-blend-screen z-0"
+            style={{
+              backgroundImage: `url(${import.meta.env.BASE_URL}images/abstract-mesh.png)`,
+              backgroundSize: "cover",
+              backgroundPosition: "center",
+            }}
+          />
+
           <div className="p-6 md:p-8 max-w-7xl mx-auto relative z-10">
             <motion.div
               key={location}
@@ -187,7 +213,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
               Admin Authentication
             </DialogTitle>
             <DialogDescription className="text-muted-foreground">
-              Provide your X-Admin-Key to manage API keys and internal server settings.
+              Provide your X-Admin-Key to manage API keys and internal server
+              settings.
             </DialogDescription>
           </DialogHeader>
           <div className="py-4">
@@ -200,8 +227,13 @@ export function Layout({ children }: { children: React.ReactNode }) {
             />
           </div>
           <DialogFooter>
-            <Button variant="ghost" onClick={() => setIsAuthDialogOpen(false)}>Cancel</Button>
-            <Button onClick={handleSaveKey} className="bg-primary hover:bg-primary/90 text-primary-foreground shadow-lg shadow-primary/20">
+            <Button variant="ghost" onClick={() => setIsAuthDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handleSaveKey}
+              className="bg-primary hover:bg-primary/90 text-primary-foreground shadow-lg shadow-primary/20"
+            >
               Save Key
             </Button>
           </DialogFooter>

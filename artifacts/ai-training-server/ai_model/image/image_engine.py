@@ -9,17 +9,16 @@ No external AI APIs required — powered by:
 """
 from __future__ import annotations
 
-import os
 import uuid
 import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Tuple
 
 import numpy as np
 
 try:
-    from PIL import Image, ImageDraw, ImageFont, ImageFilter
+    from PIL import Image, ImageDraw, ImageFont, ImageFilter  # noqa: F401
     _PIL_OK = True
 except ImportError:
     _PIL_OK = False

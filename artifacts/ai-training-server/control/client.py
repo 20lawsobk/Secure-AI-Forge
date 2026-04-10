@@ -13,7 +13,7 @@ def send(endpoint, payload=None):
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=10)
             return r.json()
-        except:
+        except Exception:
             time.sleep(1)
 
     return {"error": "connection_failed"}
@@ -28,5 +28,5 @@ def server_status():
     try:
         r = requests.get(f"{BASE_URL}/status")
         return r.json()
-    except:
+    except Exception:
         return {"status": "offline"}

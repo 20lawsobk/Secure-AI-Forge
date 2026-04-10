@@ -2,14 +2,13 @@ from __future__ import annotations
 import os
 import uuid
 import time
-import subprocess
 from dataclasses import dataclass
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .scenes import SceneConfig, render_scene, composite_scenes, cleanup_temp
-from .templates_v2 import CINEMATIC_TEMPLATES, get_template_list
-from .renderer import ASPECT_RATIOS, PLATFORM_RATIOS, VideoRequest, VideoResult, render_video as render_basic
+from .templates_v2 import CINEMATIC_TEMPLATES
+from .renderer import ASPECT_RATIOS, PLATFORM_RATIOS, VideoRequest, render_video as render_basic
 
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "uploads", "videos")
 

@@ -2,14 +2,33 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useAuth } from "@/hooks/use-auth";
 import {
-  Film, Sparkles, Play, Download, RefreshCw, AlertCircle,
-  Wand2, ChevronRight, Clock, Zap, Layers, Radio,
-  Cpu, BarChart3, Check, Edit3
+  Film,
+  Sparkles,
+  Play,
+  Download,
+  RefreshCw,
+  AlertCircle,
+  Wand2,
+  ChevronRight,
+  Clock,
+  Zap,
+  Layers,
+  Radio,
+  Cpu,
+  BarChart3,
+  Check,
+  Edit3,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
@@ -58,20 +77,46 @@ interface PollResponse {
 
 const PLATFORMS = [
   { value: "tiktok", label: "TikTok", ratio: "9:16", icon: "▶" },
-  { value: "instagram_reels", label: "Instagram Reels", ratio: "9:16", icon: "◉" },
+  {
+    value: "instagram_reels",
+    label: "Instagram Reels",
+    ratio: "9:16",
+    icon: "◉",
+  },
   { value: "instagram", label: "Instagram Feed", ratio: "1:1", icon: "◉" },
-  { value: "youtube_shorts", label: "YouTube Shorts", ratio: "9:16", icon: "▷" },
+  {
+    value: "youtube_shorts",
+    label: "YouTube Shorts",
+    ratio: "9:16",
+    icon: "▷",
+  },
   { value: "youtube", label: "YouTube", ratio: "16:9", icon: "▷" },
   { value: "twitter", label: "X (Twitter)", ratio: "16:9", icon: "✕" },
   { value: "linkedin", label: "LinkedIn", ratio: "16:9", icon: "in" },
-  { value: "facebook_reels", label: "Facebook Reels", ratio: "9:16", icon: "f" },
+  {
+    value: "facebook_reels",
+    label: "Facebook Reels",
+    ratio: "9:16",
+    icon: "f",
+  },
 ];
 
 const GENRES = [
-  "trap", "drill", "hiphop", "rnb", "soul", "jazz",
-  "pop", "indie", "acoustic", "lofi",
-  "afrobeats", "reggaeton", "latin",
-  "electronic", "hyperpop",
+  "trap",
+  "drill",
+  "hiphop",
+  "rnb",
+  "soul",
+  "jazz",
+  "pop",
+  "indie",
+  "acoustic",
+  "lofi",
+  "afrobeats",
+  "reggaeton",
+  "latin",
+  "electronic",
+  "hyperpop",
 ];
 
 const TONES = [
@@ -97,12 +142,27 @@ const GOALS = [
 ];
 
 const SCENE_LABELS: Record<string, { color: string; label: string }> = {
-  hook:  { color: "text-primary bg-primary/10 border-primary/30", label: "HOOK" },
-  build: { color: "text-blue-400 bg-blue-400/10 border-blue-400/30", label: "BUILD" },
-  body:  { color: "text-gray-300 bg-white/5 border-white/15", label: "BODY" },
-  drop:  { color: "text-fuchsia-400 bg-fuchsia-400/10 border-fuchsia-400/30", label: "DROP" },
-  cta:   { color: "text-amber-400 bg-amber-400/10 border-amber-400/30", label: "CTA" },
-  outro: { color: "text-emerald-400 bg-emerald-400/10 border-emerald-400/30", label: "OUTRO" },
+  hook: {
+    color: "text-primary bg-primary/10 border-primary/30",
+    label: "HOOK",
+  },
+  build: {
+    color: "text-blue-400 bg-blue-400/10 border-blue-400/30",
+    label: "BUILD",
+  },
+  body: { color: "text-gray-300 bg-white/5 border-white/15", label: "BODY" },
+  drop: {
+    color: "text-fuchsia-400 bg-fuchsia-400/10 border-fuchsia-400/30",
+    label: "DROP",
+  },
+  cta: {
+    color: "text-amber-400 bg-amber-400/10 border-amber-400/30",
+    label: "CTA",
+  },
+  outro: {
+    color: "text-emerald-400 bg-emerald-400/10 border-emerald-400/30",
+    label: "OUTRO",
+  },
 };
 
 // ── Render progress estimation ────────────────────────────────────────────────
@@ -126,7 +186,9 @@ function useRenderProgress(isRendering: boolean, sceneCount: number) {
       const pct = Math.min(92, Math.round((elapsed / estimatedMs) * 100));
       setProgress(pct);
     }, tick);
-    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
   }, [isRendering, sceneCount]);
 
   return progress;
@@ -134,10 +196,20 @@ function useRenderProgress(isRendering: boolean, sceneCount: number) {
 
 // ── DNA Indicator ─────────────────────────────────────────────────────────────
 
-function DnaBar({ label, value, color }: { label: string; value: number; color: string }) {
+function DnaBar({
+  label,
+  value,
+  color,
+}: {
+  label: string;
+  value: number;
+  color: string;
+}) {
   return (
     <div className="flex items-center gap-2">
-      <span className="text-xs text-muted-foreground w-20 shrink-0">{label}</span>
+      <span className="text-xs text-muted-foreground w-20 shrink-0">
+        {label}
+      </span>
       <div className="flex-1 h-1.5 bg-white/10 rounded-full overflow-hidden">
         <motion.div
           className={`h-full rounded-full ${color}`}
@@ -146,7 +218,9 @@ function DnaBar({ label, value, color }: { label: string; value: number; color: 
           transition={{ duration: 0.8, ease: "easeOut" }}
         />
       </div>
-      <span className="text-xs text-muted-foreground w-8 text-right">{Math.round(value * 100)}</span>
+      <span className="text-xs text-muted-foreground w-8 text-right">
+        {Math.round(value * 100)}
+      </span>
     </div>
   );
 }
@@ -174,7 +248,8 @@ export default function VideoStudio() {
   const [jobId, setJobId] = useState<string | null>(null);
   const [renderResult, setRenderResult] = useState<PollResponse | null>(null);
   const [isPolling, setIsPolling] = useState(false);
-  const [generationMeta, setGenerationMeta] = useState<Partial<GenerateResponse> | null>(null);
+  const [generationMeta, setGenerationMeta] =
+    useState<Partial<GenerateResponse> | null>(null);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const progress = useRenderProgress(isPolling, scenes.length);
@@ -213,10 +288,17 @@ export default function VideoStudio() {
       setGenerationMeta(data);
       setJobId(null);
       setRenderResult(null);
-      toast({ title: "Scenes generated", description: `${data.scenes.length} scenes ready — edit if needed, then render` });
+      toast({
+        title: "Scenes generated",
+        description: `${data.scenes.length} scenes ready — edit if needed, then render`,
+      });
     },
     onError: (e: Error) => {
-      toast({ title: "Generation failed", description: e.message, variant: "destructive" });
+      toast({
+        title: "Generation failed",
+        description: e.message,
+        variant: "destructive",
+      });
     },
   });
 
@@ -245,10 +327,17 @@ export default function VideoStudio() {
       setJobId(data.job_id);
       setIsPolling(true);
       setRenderResult(null);
-      toast({ title: "Rendering started", description: "AI is generating your video…" });
+      toast({
+        title: "Rendering started",
+        description: "AI is generating your video…",
+      });
     },
     onError: (e: Error) => {
-      toast({ title: "Render failed", description: e.message, variant: "destructive" });
+      toast({
+        title: "Render failed",
+        description: e.message,
+        variant: "destructive",
+      });
     },
   });
 
@@ -259,7 +348,9 @@ export default function VideoStudio() {
 
     const poll = async () => {
       try {
-        const res = await fetch(`${BASE}/video-job/${jobId}`, { headers: authHeaders() });
+        const res = await fetch(`${BASE}/video-job/${jobId}`, {
+          headers: authHeaders(),
+        });
         if (!res.ok) return;
         const data: PollResponse = await res.json();
         if (data.status === "done" || data.status === "error") {
@@ -267,9 +358,16 @@ export default function VideoStudio() {
           setIsPolling(false);
           setRenderResult(data);
           if (data.status === "done") {
-            toast({ title: "Video ready!", description: "Your video has been rendered." });
+            toast({
+              title: "Video ready!",
+              description: "Your video has been rendered.",
+            });
           } else {
-            toast({ title: "Render failed", description: data.error, variant: "destructive" });
+            toast({
+              title: "Render failed",
+              description: data.error,
+              variant: "destructive",
+            });
           }
         }
       } catch {
@@ -279,7 +377,9 @@ export default function VideoStudio() {
 
     pollRef.current = setInterval(poll, 3000);
     poll();
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
   }, [jobId, isPolling, authHeaders, toast]);
 
   // ── Scene editing ─────────────────────────────────────────────────────────
@@ -291,13 +391,16 @@ export default function VideoStudio() {
 
   const commitEdit = () => {
     if (editingIdx === null) return;
-    setScenes(prev => prev.map((s, i) => i === editingIdx ? { ...s, text: editText } : s));
+    setScenes((prev) =>
+      prev.map((s, i) => (i === editingIdx ? { ...s, text: editText } : s)),
+    );
     setEditingIdx(null);
   };
 
   // ── Derived ──────────────────────────────────────────────────────────────
 
-  const currentPlatform = PLATFORMS.find(p => p.value === platform) || PLATFORMS[0];
+  const currentPlatform =
+    PLATFORMS.find((p) => p.value === platform) || PLATFORMS[0];
   const isPortrait = currentPlatform.ratio === "9:16";
   const hasScenes = scenes.length > 0;
   const isGenerating = generateMut.isPending;
@@ -310,14 +413,78 @@ export default function VideoStudio() {
 
   // Rough DNA visualisation from genre/tone (client-side approximation)
   const dnaApprox = {
-    energy: { trap: 0.90, drill: 0.85, hiphop: 0.80, rnb: 0.50, soul: 0.40, jazz: 0.30, pop: 0.70, afrobeats: 0.85, reggaeton: 0.85, latin: 0.80, lofi: 0.20, indie: 0.38, acoustic: 0.28, electronic: 0.92, hyperpop: 1.00 } as Record<string, number>,
-    darkness: { trap: 0.88, drill: 0.92, hiphop: 0.75, rnb: 0.60, soul: 0.60, jazz: 0.70, pop: 0.30, afrobeats: 0.45, reggaeton: 0.40, latin: 0.40, lofi: 0.55, indie: 0.42, acoustic: 0.32, electronic: 0.82, hyperpop: 0.25 } as Record<string, number>,
-    saturation: { trap: 0.80, drill: 0.45, hiphop: 0.70, rnb: 0.60, soul: 0.55, jazz: 0.40, pop: 0.90, afrobeats: 0.95, reggaeton: 0.90, latin: 0.88, lofi: 0.38, indie: 0.48, acoustic: 0.40, electronic: 0.88, hyperpop: 1.00 } as Record<string, number>,
+    energy: {
+      trap: 0.9,
+      drill: 0.85,
+      hiphop: 0.8,
+      rnb: 0.5,
+      soul: 0.4,
+      jazz: 0.3,
+      pop: 0.7,
+      afrobeats: 0.85,
+      reggaeton: 0.85,
+      latin: 0.8,
+      lofi: 0.2,
+      indie: 0.38,
+      acoustic: 0.28,
+      electronic: 0.92,
+      hyperpop: 1.0,
+    } as Record<string, number>,
+    darkness: {
+      trap: 0.88,
+      drill: 0.92,
+      hiphop: 0.75,
+      rnb: 0.6,
+      soul: 0.6,
+      jazz: 0.7,
+      pop: 0.3,
+      afrobeats: 0.45,
+      reggaeton: 0.4,
+      latin: 0.4,
+      lofi: 0.55,
+      indie: 0.42,
+      acoustic: 0.32,
+      electronic: 0.82,
+      hyperpop: 0.25,
+    } as Record<string, number>,
+    saturation: {
+      trap: 0.8,
+      drill: 0.45,
+      hiphop: 0.7,
+      rnb: 0.6,
+      soul: 0.55,
+      jazz: 0.4,
+      pop: 0.9,
+      afrobeats: 0.95,
+      reggaeton: 0.9,
+      latin: 0.88,
+      lofi: 0.38,
+      indie: 0.48,
+      acoustic: 0.4,
+      electronic: 0.88,
+      hyperpop: 1.0,
+    } as Record<string, number>,
   };
 
-  const energy = Math.min(1, (dnaApprox.energy[genre] ?? 0.65) + (tone === "hype" || tone === "energetic" ? 0.1 : tone === "chill" ? -0.2 : 0));
-  const darkness = Math.min(1, (dnaApprox.darkness[genre] ?? 0.60) + (tone === "edgy" ? 0.1 : tone === "playful" ? -0.15 : 0));
-  const saturation = Math.min(1, (dnaApprox.saturation[genre] ?? 0.70) + (tone === "playful" ? 0.1 : tone === "professional" ? -0.15 : 0));
+  const energy = Math.min(
+    1,
+    (dnaApprox.energy[genre] ?? 0.65) +
+      (tone === "hype" || tone === "energetic"
+        ? 0.1
+        : tone === "chill"
+          ? -0.2
+          : 0),
+  );
+  const darkness = Math.min(
+    1,
+    (dnaApprox.darkness[genre] ?? 0.6) +
+      (tone === "edgy" ? 0.1 : tone === "playful" ? -0.15 : 0),
+  );
+  const saturation = Math.min(
+    1,
+    (dnaApprox.saturation[genre] ?? 0.7) +
+      (tone === "playful" ? 0.1 : tone === "professional" ? -0.15 : 0),
+  );
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
@@ -328,21 +495,30 @@ export default function VideoStudio() {
             <Film className="w-6 h-6 text-white" />
           </div>
           <div>
-            <h1 className="text-2xl font-display font-bold text-white">Video Studio</h1>
-            <p className="text-sm text-muted-foreground">Generative AI rendering — every video uniquely derived from your content</p>
+            <h1 className="text-2xl font-display font-bold text-white">
+              Video Studio
+            </h1>
+            <p className="text-sm text-muted-foreground">
+              Generative AI rendering — every video uniquely derived from your
+              content
+            </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
           {generationMeta && (
-            <Badge variant="outline" className="text-primary border-primary/30 bg-primary/5 text-xs font-mono">
-              <Cpu className="w-3 h-3 mr-1" /> {generationMeta.source === "ai_model" ? "model" : "script"} • {generationMeta.aspect_ratio}
+            <Badge
+              variant="outline"
+              className="text-primary border-primary/30 bg-primary/5 text-xs font-mono"
+            >
+              <Cpu className="w-3 h-3 mr-1" />{" "}
+              {generationMeta.source === "ai_model" ? "model" : "script"} •{" "}
+              {generationMeta.aspect_ratio}
             </Badge>
           )}
         </div>
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
-
         {/* ── Left: Configuration ─────────────────────────────────────────── */}
         <div className="xl:col-span-4 space-y-4">
           <Card className="glass-panel p-5 border-white/10 space-y-4">
@@ -351,28 +527,34 @@ export default function VideoStudio() {
             </h3>
 
             <div className="space-y-2">
-              <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Idea / Topic</label>
+              <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                Idea / Topic
+              </label>
               <Textarea
                 placeholder="e.g. debut single dropping Friday, new drop announcement, behind the scenes…"
                 className="bg-black/50 border-white/10 text-white min-h-[80px] resize-none text-sm focus:border-primary/50"
                 value={idea}
-                onChange={e => setIdea(e.target.value)}
+                onChange={(e) => setIdea(e.target.value)}
               />
             </div>
 
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
-                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Platform</label>
+                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                  Platform
+                </label>
                 <Select value={platform} onValueChange={setPlatform}>
                   <SelectTrigger className="bg-black/50 border-white/10 text-white text-sm h-9">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent className="bg-card border-white/10 text-white">
-                    {PLATFORMS.map(p => (
+                    {PLATFORMS.map((p) => (
                       <SelectItem key={p.value} value={p.value}>
                         <span className="flex items-center gap-2">
                           {p.label}
-                          <span className="text-xs text-muted-foreground">{p.ratio}</span>
+                          <span className="text-xs text-muted-foreground">
+                            {p.ratio}
+                          </span>
                         </span>
                       </SelectItem>
                     ))}
@@ -381,42 +563,54 @@ export default function VideoStudio() {
               </div>
 
               <div className="space-y-1.5">
-                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Genre</label>
+                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                  Genre
+                </label>
                 <Select value={genre} onValueChange={setGenre}>
                   <SelectTrigger className="bg-black/50 border-white/10 text-white text-sm h-9">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent className="bg-card border-white/10 text-white">
-                    {GENRES.map(g => (
-                      <SelectItem key={g} value={g} className="capitalize">{g}</SelectItem>
+                    {GENRES.map((g) => (
+                      <SelectItem key={g} value={g} className="capitalize">
+                        {g}
+                      </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
               </div>
 
               <div className="space-y-1.5">
-                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Tone</label>
+                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                  Tone
+                </label>
                 <Select value={tone} onValueChange={setTone}>
                   <SelectTrigger className="bg-black/50 border-white/10 text-white text-sm h-9">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent className="bg-card border-white/10 text-white">
-                    {TONES.map(t => (
-                      <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>
+                    {TONES.map((t) => (
+                      <SelectItem key={t.value} value={t.value}>
+                        {t.label}
+                      </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
               </div>
 
               <div className="space-y-1.5">
-                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Goal</label>
+                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                  Goal
+                </label>
                 <Select value={goal} onValueChange={setGoal}>
                   <SelectTrigger className="bg-black/50 border-white/10 text-white text-sm h-9">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent className="bg-card border-white/10 text-white">
-                    {GOALS.map(g => (
-                      <SelectItem key={g.value} value={g.value}>{g.label}</SelectItem>
+                    {GOALS.map((g) => (
+                      <SelectItem key={g.value} value={g.value}>
+                        {g.label}
+                      </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
@@ -425,16 +619,20 @@ export default function VideoStudio() {
 
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
-                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Artist Name</label>
+                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                  Artist Name
+                </label>
                 <Input
                   placeholder="Your name…"
                   className="bg-black/50 border-white/10 text-white text-sm h-9 focus:border-primary/50"
                   value={artistName}
-                  onChange={e => setArtistName(e.target.value)}
+                  onChange={(e) => setArtistName(e.target.value)}
                 />
               </div>
               <div className="space-y-1.5">
-                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Duration (s)</label>
+                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                  Duration (s)
+                </label>
                 <Input
                   type="number"
                   placeholder="Auto"
@@ -442,7 +640,9 @@ export default function VideoStudio() {
                   max={120}
                   className="bg-black/50 border-white/10 text-white text-sm h-9 focus:border-primary/50"
                   value={duration}
-                  onChange={e => setDuration(e.target.value ? Number(e.target.value) : "")}
+                  onChange={(e) =>
+                    setDuration(e.target.value ? Number(e.target.value) : "")
+                  }
                 />
               </div>
             </div>
@@ -453,9 +653,14 @@ export default function VideoStudio() {
               disabled={!idea.trim() || isGenerating || isRendering}
             >
               {isGenerating ? (
-                <><div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2" /> Generating scenes…</>
+                <>
+                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2" />{" "}
+                  Generating scenes…
+                </>
               ) : (
-                <><Sparkles className="w-4 h-4 mr-2" /> Generate Scenes</>
+                <>
+                  <Sparkles className="w-4 h-4 mr-2" /> Generate Scenes
+                </>
               )}
             </Button>
           </Card>
@@ -464,13 +669,20 @@ export default function VideoStudio() {
           <Card className="glass-panel p-5 border-white/10 space-y-3">
             <h3 className="text-sm font-semibold text-white flex items-center gap-2">
               <BarChart3 className="w-4 h-4 text-fuchsia-400" /> Visual DNA
-              <span className="text-xs text-muted-foreground font-normal ml-auto">derived from genre + tone</span>
+              <span className="text-xs text-muted-foreground font-normal ml-auto">
+                derived from genre + tone
+              </span>
             </h3>
             <DnaBar label="Energy" value={energy} color="bg-primary" />
             <DnaBar label="Darkness" value={darkness} color="bg-slate-400" />
-            <DnaBar label="Saturation" value={saturation} color="bg-fuchsia-500" />
+            <DnaBar
+              label="Saturation"
+              value={saturation}
+              color="bg-fuchsia-500"
+            />
             <p className="text-xs text-muted-foreground pt-1 leading-relaxed">
-              These values drive background type, colour palette, effects, and typography — regenerated fresh for every render. No templates.
+              These values drive background type, colour palette, effects, and
+              typography — regenerated fresh for every render. No templates.
             </p>
           </Card>
         </div>
@@ -480,12 +692,21 @@ export default function VideoStudio() {
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-semibold text-white flex items-center gap-2">
               <Layers className="w-4 h-4 text-blue-400" /> Scenes
-              {hasScenes && <span className="text-xs text-muted-foreground font-normal">({scenes.length} scenes — click to edit)</span>}
+              {hasScenes && (
+                <span className="text-xs text-muted-foreground font-normal">
+                  ({scenes.length} scenes — click to edit)
+                </span>
+              )}
             </h3>
             {hasScenes && (
-              <Badge variant="outline" className="text-xs border-white/10 text-muted-foreground">
+              <Badge
+                variant="outline"
+                className="text-xs border-white/10 text-muted-foreground"
+              >
                 <Clock className="w-3 h-3 mr-1" />
-                {generationMeta?.duration ? `${generationMeta.duration}s` : "auto"}
+                {generationMeta?.duration
+                  ? `${generationMeta.duration}s`
+                  : "auto"}
               </Badge>
             )}
           </div>
@@ -494,25 +715,34 @@ export default function VideoStudio() {
             {!hasScenes && !isGenerating ? (
               <motion.div
                 key="empty"
-                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
                 className="flex-1 min-h-[380px] border-2 border-dashed border-white/10 rounded-2xl flex flex-col items-center justify-center text-muted-foreground gap-3"
               >
                 <Film className="w-10 h-10 opacity-20" />
-                <p className="text-sm">Fill in your concept and click Generate Scenes</p>
+                <p className="text-sm">
+                  Fill in your concept and click Generate Scenes
+                </p>
               </motion.div>
             ) : isGenerating ? (
               <motion.div
                 key="loading"
-                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
                 className="flex-1 min-h-[380px] glass-panel rounded-2xl flex flex-col items-center justify-center gap-4 text-primary"
               >
                 <div className="w-10 h-10 border-4 border-primary/30 border-t-primary rounded-full animate-spin" />
-                <p className="animate-pulse font-medium text-sm">Model generating scenes…</p>
+                <p className="animate-pulse font-medium text-sm">
+                  Model generating scenes…
+                </p>
               </motion.div>
             ) : (
               <motion.div
                 key="scenes"
-                initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
                 className="flex flex-col gap-3"
               >
                 {scenes.map((scene, idx) => {
@@ -529,10 +759,14 @@ export default function VideoStudio() {
                       <Card className="glass-panel border-white/10 p-4 group hover:border-white/20 transition-all">
                         <div className="flex items-start gap-3">
                           <div className="flex flex-col items-center gap-1 pt-0.5 shrink-0">
-                            <span className={`text-[10px] font-bold border rounded px-1.5 py-0.5 ${meta.color}`}>
+                            <span
+                              className={`text-[10px] font-bold border rounded px-1.5 py-0.5 ${meta.color}`}
+                            >
                               {meta.label}
                             </span>
-                            <span className="text-xs text-muted-foreground">{idx + 1}</span>
+                            <span className="text-xs text-muted-foreground">
+                              {idx + 1}
+                            </span>
                           </div>
                           <div className="flex-1 min-w-0">
                             {isEditing ? (
@@ -540,15 +774,28 @@ export default function VideoStudio() {
                                 <Textarea
                                   autoFocus
                                   value={editText}
-                                  onChange={e => setEditText(e.target.value)}
+                                  onChange={(e) => setEditText(e.target.value)}
                                   className="bg-black/50 border-white/20 text-white text-sm resize-none min-h-[60px] focus:border-primary/50"
-                                  onKeyDown={e => { if (e.key === "Enter" && e.metaKey) commitEdit(); if (e.key === "Escape") setEditingIdx(null); }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter" && e.metaKey)
+                                      commitEdit();
+                                    if (e.key === "Escape") setEditingIdx(null);
+                                  }}
                                 />
                                 <div className="flex gap-2">
-                                  <Button size="sm" className="h-7 text-xs bg-primary/20 hover:bg-primary/30 text-primary border border-primary/30" onClick={commitEdit}>
+                                  <Button
+                                    size="sm"
+                                    className="h-7 text-xs bg-primary/20 hover:bg-primary/30 text-primary border border-primary/30"
+                                    onClick={commitEdit}
+                                  >
                                     <Check className="w-3 h-3 mr-1" /> Save
                                   </Button>
-                                  <Button size="sm" variant="ghost" className="h-7 text-xs text-muted-foreground" onClick={() => setEditingIdx(null)}>
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    className="h-7 text-xs text-muted-foreground"
+                                    onClick={() => setEditingIdx(null)}
+                                  >
                                     Cancel
                                   </Button>
                                 </div>
@@ -592,13 +839,24 @@ export default function VideoStudio() {
 
             {/* Platform preview badge */}
             <div className="flex items-center gap-2 p-3 bg-white/5 rounded-xl border border-white/10">
-              <div className={`bg-white/10 rounded flex items-center justify-center text-white font-bold text-xs
-                ${isPortrait ? "w-9 h-14" : "w-14 h-9"}`}>
+              <div
+                className={`bg-white/10 rounded flex items-center justify-center text-white font-bold text-xs
+                ${isPortrait ? "w-9 h-14" : "w-14 h-9"}`}
+              >
                 {currentPlatform.ratio}
               </div>
               <div>
-                <p className="text-xs font-medium text-white">{currentPlatform.label}</p>
-                <p className="text-xs text-muted-foreground">{currentPlatform.ratio} · {isPortrait ? "1080×1920" : currentPlatform.ratio === "1:1" ? "1080×1080" : "1920×1080"}</p>
+                <p className="text-xs font-medium text-white">
+                  {currentPlatform.label}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {currentPlatform.ratio} ·{" "}
+                  {isPortrait
+                    ? "1080×1920"
+                    : currentPlatform.ratio === "1:1"
+                      ? "1080×1080"
+                      : "1920×1080"}
+                </p>
               </div>
             </div>
 
@@ -608,14 +866,20 @@ export default function VideoStudio() {
               disabled={!idea.trim() || isRendering || isGenerating}
             >
               {isRendering ? (
-                <><div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2" /> Rendering…</>
+                <>
+                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2" />{" "}
+                  Rendering…
+                </>
               ) : (
-                <><Radio className="w-4 h-4 mr-2" /> Render Video</>
+                <>
+                  <Radio className="w-4 h-4 mr-2" /> Render Video
+                </>
               )}
             </Button>
 
             <p className="text-xs text-muted-foreground text-center">
-              Visuals are generated fresh — colours, effects, and typography are computed directly from your genre, tone, and idea.
+              Visuals are generated fresh — colours, effects, and typography are
+              computed directly from your genre, tone, and idea.
             </p>
           </Card>
 
@@ -623,12 +887,18 @@ export default function VideoStudio() {
           <AnimatePresence>
             {isRendering && (
               <motion.div
-                initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0 }}
               >
                 <Card className="glass-panel p-4 border-primary/20 space-y-3">
                   <div className="flex items-center justify-between">
-                    <p className="text-xs font-medium text-primary">Rendering scenes via FFmpeg…</p>
-                    <span className="text-xs text-muted-foreground">{progress}%</span>
+                    <p className="text-xs font-medium text-primary">
+                      Rendering scenes via FFmpeg…
+                    </p>
+                    <span className="text-xs text-muted-foreground">
+                      {progress}%
+                    </span>
                   </div>
                   <div className="h-1.5 bg-white/10 rounded-full overflow-hidden">
                     <motion.div
@@ -638,7 +908,8 @@ export default function VideoStudio() {
                     />
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    AI scene builder deriving palette and effects from content DNA…
+                    AI scene builder deriving palette and effects from content
+                    DNA…
                   </p>
                 </Card>
               </motion.div>
@@ -648,13 +919,21 @@ export default function VideoStudio() {
           {/* Error state */}
           <AnimatePresence>
             {renderResult?.status === "error" && (
-              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+              >
                 <Card className="glass-panel p-4 border-destructive/30 bg-destructive/5">
                   <div className="flex gap-2 items-start">
                     <AlertCircle className="w-4 h-4 text-destructive shrink-0 mt-0.5" />
                     <div>
-                      <p className="text-xs font-medium text-destructive">Render failed</p>
-                      <p className="text-xs text-muted-foreground mt-1">{renderResult.error}</p>
+                      <p className="text-xs font-medium text-destructive">
+                        Render failed
+                      </p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        {renderResult.error}
+                      </p>
                     </div>
                   </div>
                 </Card>
@@ -664,17 +943,32 @@ export default function VideoStudio() {
 
           {/* Render metadata */}
           {videoDone && renderResult && (
-            <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+            >
               <Card className="glass-panel p-4 border-emerald-500/20 bg-emerald-500/5 space-y-2">
                 <div className="flex items-center gap-2 text-emerald-400">
                   <Check className="w-4 h-4" />
                   <span className="text-sm font-medium">Render complete</span>
                 </div>
                 <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                  <span>Resolution</span><span className="text-white">{renderResult.width}×{renderResult.height}</span>
-                  <span>Duration</span><span className="text-white">{renderResult.duration}s</span>
-                  <span>Scenes</span><span className="text-white">{renderResult.scenes_rendered}</span>
-                  <span>Render time</span><span className="text-white">{renderResult.render_ms ? `${(renderResult.render_ms / 1000).toFixed(1)}s` : "—"}</span>
+                  <span>Resolution</span>
+                  <span className="text-white">
+                    {renderResult.width}×{renderResult.height}
+                  </span>
+                  <span>Duration</span>
+                  <span className="text-white">{renderResult.duration}s</span>
+                  <span>Scenes</span>
+                  <span className="text-white">
+                    {renderResult.scenes_rendered}
+                  </span>
+                  <span>Render time</span>
+                  <span className="text-white">
+                    {renderResult.render_ms
+                      ? `${(renderResult.render_ms / 1000).toFixed(1)}s`
+                      : "—"}
+                  </span>
                 </div>
               </Card>
             </motion.div>
@@ -686,14 +980,18 @@ export default function VideoStudio() {
       <AnimatePresence>
         {videoDone && videoUrl && (
           <motion.div
-            initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
             className="mt-2"
           >
             <Card className="glass-panel border-white/10 p-6">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-sm font-semibold text-white flex items-center gap-2">
                   <Play className="w-4 h-4 text-primary" /> Preview
-                  <Badge variant="outline" className="text-xs text-emerald-400 border-emerald-400/30 bg-emerald-400/5 ml-2">
+                  <Badge
+                    variant="outline"
+                    className="text-xs text-emerald-400 border-emerald-400/30 bg-emerald-400/5 ml-2"
+                  >
                     ai_derived
                   </Badge>
                 </h3>
@@ -712,14 +1010,19 @@ export default function VideoStudio() {
                     className="h-8 text-xs bg-primary/20 hover:bg-primary/30 text-primary border border-primary/30 gap-1.5"
                     asChild
                   >
-                    <a href={videoUrl} download={renderResult?.filename || "video.mp4"}>
+                    <a
+                      href={videoUrl}
+                      download={renderResult?.filename || "video.mp4"}
+                    >
                       <Download className="w-3 h-3" /> Download
                     </a>
                   </Button>
                 </div>
               </div>
 
-              <div className={`mx-auto overflow-hidden rounded-xl bg-black shadow-2xl shadow-black/60 ${isPortrait ? "max-w-[320px]" : "max-w-full"}`}>
+              <div
+                className={`mx-auto overflow-hidden rounded-xl bg-black shadow-2xl shadow-black/60 ${isPortrait ? "max-w-[320px]" : "max-w-full"}`}
+              >
                 <video
                   ref={videoRef}
                   src={videoUrl}
@@ -727,7 +1030,14 @@ export default function VideoStudio() {
                   autoPlay
                   loop
                   className="w-full h-auto block"
-                  style={{ aspectRatio: currentPlatform.ratio === "9:16" ? "9/16" : currentPlatform.ratio === "1:1" ? "1/1" : "16/9" }}
+                  style={{
+                    aspectRatio:
+                      currentPlatform.ratio === "9:16"
+                        ? "9/16"
+                        : currentPlatform.ratio === "1:1"
+                          ? "1/1"
+                          : "16/9",
+                  }}
                 />
               </div>
             </Card>

@@ -11,7 +11,6 @@ and pushes a deduplicated snapshot back to pdim for cross-session continuity.
 
 import json
 import logging
-import os
 import time
 import threading
 import hashlib

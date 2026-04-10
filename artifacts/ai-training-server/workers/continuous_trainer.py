@@ -12,11 +12,9 @@ Each cycle:
 State is persisted to pdim at mb:training:continuous:state so it survives restarts.
 """
 
-import json
 import logging
 import threading
 import time
-import uuid
 from typing import Optional, Callable
 
 logger = logging.getLogger("continuous_trainer")

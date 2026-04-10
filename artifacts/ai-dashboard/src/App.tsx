@@ -33,25 +33,39 @@ function Router() {
     <Layout>
       <Switch>
         <Route path="/">
-          <ErrorBoundary fallbackLabel="Dashboard error"><Dashboard /></ErrorBoundary>
+          <ErrorBoundary fallbackLabel="Dashboard error">
+            <Dashboard />
+          </ErrorBoundary>
         </Route>
         <Route path="/api-keys">
-          <ErrorBoundary fallbackLabel="API Keys error"><ApiKeys /></ErrorBoundary>
+          <ErrorBoundary fallbackLabel="API Keys error">
+            <ApiKeys />
+          </ErrorBoundary>
         </Route>
         <Route path="/training">
-          <ErrorBoundary fallbackLabel="Training error"><Training /></ErrorBoundary>
+          <ErrorBoundary fallbackLabel="Training error">
+            <Training />
+          </ErrorBoundary>
         </Route>
         <Route path="/gpu">
-          <ErrorBoundary fallbackLabel="GPU status error"><GpuStatus /></ErrorBoundary>
+          <ErrorBoundary fallbackLabel="GPU status error">
+            <GpuStatus />
+          </ErrorBoundary>
         </Route>
         <Route path="/content">
-          <ErrorBoundary fallbackLabel="Content generator error"><ContentGenerator /></ErrorBoundary>
+          <ErrorBoundary fallbackLabel="Content generator error">
+            <ContentGenerator />
+          </ErrorBoundary>
         </Route>
         <Route path="/model">
-          <ErrorBoundary fallbackLabel="Model status error"><ModelStatus /></ErrorBoundary>
+          <ErrorBoundary fallbackLabel="Model status error">
+            <ModelStatus />
+          </ErrorBoundary>
         </Route>
         <Route path="/video">
-          <ErrorBoundary fallbackLabel="Video studio error"><VideoStudio /></ErrorBoundary>
+          <ErrorBoundary fallbackLabel="Video studio error">
+            <VideoStudio />
+          </ErrorBoundary>
         </Route>
         <Route component={NotFound} />
       </Switch>

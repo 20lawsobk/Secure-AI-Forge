@@ -1,6 +1,5 @@
 from __future__ import annotations
 import math
-from typing import Optional
 
 
 def _hex_to_rgb(hex_color: str) -> tuple:

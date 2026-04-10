@@ -19,7 +19,7 @@ from .schemas import (
     VideoGenerateRequest, VideoGenerateResponse,
     CinematicTemplatesResponse, CinematicTemplateInfo,
     HealthResponse,
-    MultiTrainRequest, MultiTrainResponse, MultiGPUStatusResponse,
+    MultiTrainRequest, MultiGPUStatusResponse,
     HyperGPUStatusResponse, GPUClusterStatusResponse, ClusterScaleRequest,
 )
 from ..model.tokenizer import SimpleTokenizer
@@ -29,10 +29,8 @@ from ..agents.script_agent import ScriptAgent, ScriptRequest
 from ..agents.visual_spec_agent import VisualSpecAgent, VisualSpecRequest
 from ..agents.distribution_agent import DistributionAgent, DistributionRequest
 from ..agents.optimization_agent import OptimizationAgent, OptimizationRequest
-from ..boostsheets.boostsheet import BoostSheet
 from ..boostsheets.repository import BoostSheetRepository
 from ..boostsheets.lifecycle import BoostSheetLifecycle
-from ..boostsheets.versioning import BoostSheetVersioning, diff_sheets
 from ..adapters.url_adapter import UrlToBoostSheetAdapter
 from ..render_manager import RenderManager
 
@@ -407,7 +405,7 @@ async def optimize(req: OptimizeRequest):
 async def train_model(req: TrainRequest):
     from ..training.dataset import CreativeDataset
     from ..training.trainer import train as run_train, evaluate
-    from ..training.config import TrainConfig, DEFAULT_TRAIN_CONFIG
+    from ..training.config import TrainConfig
     from ..training.synthetic import generate_synthetic_samples
 
     if req.generate_synthetic or not os.path.exists(req.data_path):
@@ -529,7 +527,9 @@ async def receive_training_feedback(payload: dict):
     the CurriculumTrainer reads before each training session to bias its
     synthetic data generation toward visual styles that drove real engagement.
     """
-    import json, os, time
+    import json
+    import os
+    import time
 
     feedback_dir  = os.path.join(os.path.dirname(__file__), '..', '..', 'training', 'feedback')
     os.makedirs(feedback_dir, exist_ok=True)
@@ -1059,7 +1059,7 @@ async def generate_veo_campaign(request: dict = {}):
     else:
         targets_raw = targets_input
     if not targets_raw:
-        from maxbooster_veo_music.model.platform_heads import PLATFORM_DEFAULTS, PlatformHeads
+        from maxbooster_veo_music.model.platform_heads import PLATFORM_DEFAULTS
         default_goals = {
             "tiktok": "hook_clip", "youtube": "full_video",
             "instagram": "promo_reel", "reels": "promo_reel",

@@ -89,11 +89,11 @@ def _random_daw_content() -> dict:
     bpm = random.randint(70, 160)
     key = random.choice(["C minor", "G major", "F# minor", "Bb major", "D minor", "A major"])
     lyric_hook = random.choice([
-        f"I been on the grind since day one, nobody saw me coming",
-        f"We made it out, we ain't going back to nothing",
-        f"Every night I pray that I can find my way",
-        f"The city lights reflect in my eyes at midnight",
-        f"They never believed until the whole world was watching",
+        "I been on the grind since day one, nobody saw me coming",
+        "We made it out, we ain't going back to nothing",
+        "Every night I pray that I can find my way",
+        "The city lights reflect in my eyes at midnight",
+        "They never believed until the whole world was watching",
     ])
     return {
         "title": title,

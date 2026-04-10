@@ -1,4 +1,7 @@
-import { useGetGpuStatus, useGetHyperGpuStatus } from "@workspace/api-client-react";
+import {
+  useGetGpuStatus,
+  useGetHyperGpuStatus,
+} from "@workspace/api-client-react";
 import { Cpu, Server, Activity, ArrowUpRight, Zap } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Progress } from "@/components/ui/progress";
@@ -14,7 +17,8 @@ function formatOps(ops: number | undefined): string {
 
 function formatUptime(seconds: number | undefined): string {
   if (seconds == null) return "—";
-  if (seconds >= 3600) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+  if (seconds >= 3600)
+    return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
   if (seconds >= 60) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
   return `${seconds}s`;
 }
@@ -26,8 +30,12 @@ export default function GpuStatus() {
   return (
     <div className="space-y-8">
       <div>
-        <h1 className="text-3xl font-display font-bold text-white">Compute Cluster</h1>
-        <p className="text-muted-foreground mt-1">Live metrics from the digital and hyper GPU backends.</p>
+        <h1 className="text-3xl font-display font-bold text-white">
+          Compute Cluster
+        </h1>
+        <p className="text-muted-foreground mt-1">
+          Live metrics from the digital and hyper GPU backends.
+        </p>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -39,12 +47,18 @@ export default function GpuStatus() {
                 <Cpu className="w-5 h-5 text-blue-400" />
               </div>
               <div>
-                <h3 className="font-display font-bold text-white">Digital GPU</h3>
-                <p className="text-xs text-muted-foreground">Standard Compute Backend</p>
+                <h3 className="font-display font-bold text-white">
+                  Digital GPU
+                </h3>
+                <p className="text-xs text-muted-foreground">
+                  Standard Compute Backend
+                </p>
               </div>
             </div>
-            <div className={`px-3 py-1 rounded-full text-xs font-medium border ${gpu?.available ? 'bg-green-500/10 text-green-400 border-green-500/20' : 'bg-red-500/10 text-red-400 border-red-500/20'}`}>
-              {gpu?.available ? 'Online' : 'Offline'}
+            <div
+              className={`px-3 py-1 rounded-full text-xs font-medium border ${gpu?.available ? "bg-green-500/10 text-green-400 border-green-500/20" : "bg-red-500/10 text-red-400 border-red-500/20"}`}
+            >
+              {gpu?.available ? "Online" : "Offline"}
             </div>
           </div>
 
@@ -55,37 +69,54 @@ export default function GpuStatus() {
               <>
                 <div>
                   <div className="flex justify-between text-sm mb-2">
-                    <span className="text-muted-foreground">Core Utilization</span>
-                    <span className="text-white font-mono">{gpu?.utilization || 0}%</span>
+                    <span className="text-muted-foreground">
+                      Core Utilization
+                    </span>
+                    <span className="text-white font-mono">
+                      {gpu?.utilization || 0}%
+                    </span>
                   </div>
-                  <Progress value={gpu?.utilization || 0} className="h-2 bg-white/5 [&>div]:bg-blue-500" />
+                  <Progress
+                    value={gpu?.utilization || 0}
+                    className="h-2 bg-white/5 [&>div]:bg-blue-500"
+                  />
                 </div>
 
                 <div className="grid grid-cols-2 gap-4">
                   <div className="bg-black/30 p-4 rounded-xl">
                     <p className="text-xs text-muted-foreground">SIMD Lanes</p>
-                    <p className="text-xl font-mono text-white mt-1">{gpu?.lanes || 0}</p>
+                    <p className="text-xl font-mono text-white mt-1">
+                      {gpu?.lanes || 0}
+                    </p>
                   </div>
                   <div className="bg-black/30 p-4 rounded-xl">
-                    <p className="text-xs text-muted-foreground">VRAM Allocated</p>
-                    <p className="text-xl font-mono text-white mt-1">{gpu?.vram_mb || 0} MB</p>
+                    <p className="text-xs text-muted-foreground">
+                      VRAM Allocated
+                    </p>
+                    <p className="text-xl font-mono text-white mt-1">
+                      {gpu?.vram_mb || 0} MB
+                    </p>
                   </div>
                 </div>
 
-                {(gpu?.total_ops != null || gpu?.uptime_s != null) && (
+                {(hyper?.total_ops != null || hyper?.uptime_s != null) && (
                   <div className="grid grid-cols-2 gap-4 pt-2 border-t border-white/5">
-                    {gpu?.total_ops != null && (
+                    {hyper?.total_ops != null && (
                       <div className="bg-black/20 p-3 rounded-xl">
                         <p className="text-xs text-muted-foreground flex items-center gap-1">
                           <Zap className="w-3 h-3" /> Total Ops
                         </p>
-                        <p className="text-lg font-mono text-white mt-1">{formatOps(gpu.total_ops)}</p>
+                        <p className="text-lg font-mono text-white mt-1">
+                          {formatOps(hyper.total_ops)}
+                        </p>
                       </div>
                     )}
-                    {gpu?.uptime_s != null && (
+                    {hyper?.uptime_s != null && (
                       <div className="bg-black/20 p-3 rounded-xl">
                         <p className="text-xs text-muted-foreground">Uptime</p>
-                        <p className="text-lg font-mono text-white mt-1">{formatUptime(gpu.uptime_s)}</p>
+                        <p className="text-lg font-mono text-white mt-1">
+                          {formatUptime(hyper.uptime_s)}
+                        </p>
                       </div>
                     )}
                   </div>
@@ -105,8 +136,12 @@ export default function GpuStatus() {
                 <Server className="w-5 h-5 text-primary" />
               </div>
               <div>
-                <h3 className="font-display font-bold text-white">HyperGPU Cluster</h3>
-                <p className="text-xs text-muted-foreground">Accelerated Tensor Core Backend</p>
+                <h3 className="font-display font-bold text-white">
+                  HyperGPU Cluster
+                </h3>
+                <p className="text-xs text-muted-foreground">
+                  Accelerated Tensor Core Backend
+                </p>
               </div>
             </div>
             <div className="px-3 py-1 rounded-full text-xs font-medium border bg-primary/10 text-primary border-primary/20 flex items-center gap-1">
@@ -123,29 +158,51 @@ export default function GpuStatus() {
                   <div>
                     <p className="text-xs text-muted-foreground">Throughput</p>
                     <p className="text-3xl font-display font-bold text-white mt-1">
-                      {hyper?.total_tensor_core_tflops?.toFixed(2) || "0.00"} <span className="text-lg text-muted-foreground font-normal">TFLOPS</span>
+                      {hyper?.total_tensor_core_tflops?.toFixed(2) || "0.00"}{" "}
+                      <span className="text-lg text-muted-foreground font-normal">
+                        TFLOPS
+                      </span>
                     </p>
                   </div>
                   <div>
-                    <p className="text-xs text-muted-foreground">Compute Time</p>
+                    <p className="text-xs text-muted-foreground">
+                      Compute Time
+                    </p>
                     <p className="text-3xl font-display font-bold text-white mt-1">
-                      {hyper?.total_compute_ms ? (hyper.total_compute_ms / 1000).toFixed(1) : "0"} <span className="text-lg text-muted-foreground font-normal">s</span>
+                      {hyper?.total_compute_ms
+                        ? (hyper.total_compute_ms / 1000).toFixed(1)
+                        : "0"}{" "}
+                      <span className="text-lg text-muted-foreground font-normal">
+                        s
+                      </span>
                     </p>
                   </div>
                 </div>
 
                 <div className="grid grid-cols-3 gap-2">
                   <div className="bg-black/30 p-3 rounded-lg border border-white/5">
-                    <p className="text-[10px] uppercase text-muted-foreground">Lanes</p>
-                    <p className="text-sm font-mono text-white mt-1">{hyper?.lanes}</p>
+                    <p className="text-[10px] uppercase text-muted-foreground">
+                      Lanes
+                    </p>
+                    <p className="text-sm font-mono text-white mt-1">
+                      {hyper?.lanes}
+                    </p>
                   </div>
                   <div className="bg-black/30 p-3 rounded-lg border border-white/5">
-                    <p className="text-[10px] uppercase text-muted-foreground">Tensor Cores</p>
-                    <p className="text-sm font-mono text-white mt-1">{hyper?.tensor_cores}</p>
+                    <p className="text-[10px] uppercase text-muted-foreground">
+                      Tensor Cores
+                    </p>
+                    <p className="text-sm font-mono text-white mt-1">
+                      {hyper?.tensor_cores}
+                    </p>
                   </div>
                   <div className="bg-black/30 p-3 rounded-lg border border-white/5">
-                    <p className="text-[10px] uppercase text-muted-foreground">Precision</p>
-                    <p className="text-sm font-mono text-primary-foreground mt-1">{hyper?.precision}</p>
+                    <p className="text-[10px] uppercase text-muted-foreground">
+                      Precision
+                    </p>
+                    <p className="text-sm font-mono text-primary-foreground mt-1">
+                      {hyper?.precision}
+                    </p>
                   </div>
                 </div>
 
@@ -156,13 +213,19 @@ export default function GpuStatus() {
                         <p className="text-[10px] uppercase text-muted-foreground flex items-center gap-1">
                           <Zap className="w-3 h-3" /> Total Ops
                         </p>
-                        <p className="text-sm font-mono text-white mt-1">{formatOps(hyper.total_ops)}</p>
+                        <p className="text-sm font-mono text-white mt-1">
+                          {formatOps(hyper.total_ops)}
+                        </p>
                       </div>
                     )}
                     {hyper?.uptime_s != null && (
                       <div className="bg-black/20 p-3 rounded-lg border border-white/5">
-                        <p className="text-[10px] uppercase text-muted-foreground">Uptime</p>
-                        <p className="text-sm font-mono text-white mt-1">{formatUptime(hyper.uptime_s)}</p>
+                        <p className="text-[10px] uppercase text-muted-foreground">
+                          Uptime
+                        </p>
+                        <p className="text-sm font-mono text-white mt-1">
+                          {formatUptime(hyper.uptime_s)}
+                        </p>
                       </div>
                     )}
                   </div>

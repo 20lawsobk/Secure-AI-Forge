@@ -1,7 +1,6 @@
-import math
 import torch
 import torch.nn as nn
-from ai_model.gpu.torch_backend import DigitalGPUBackend, DigitalGPULinear
+from ai_model.gpu.torch_backend import DigitalGPUBackend
 
 
 class DigitalGPUFeedForward(nn.Module):

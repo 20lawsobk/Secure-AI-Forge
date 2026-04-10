@@ -12,7 +12,13 @@ interface StatCardProps {
   };
 }
 
-export function StatCard({ title, value, icon: Icon, description, trend }: StatCardProps) {
+export function StatCard({
+  title,
+  value,
+  icon: Icon,
+  description,
+  trend,
+}: StatCardProps) {
   return (
     <Card className="glass-panel hover:bg-card/80 transition-all duration-300 overflow-hidden relative group">
       <div className="absolute inset-0 bg-gradient-to-br from-primary/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
@@ -22,10 +28,15 @@ export function StatCard({ title, value, icon: Icon, description, trend }: StatC
             <Icon className="w-5 h-5 text-primary" />
           </div>
           {trend && (
-            <div className={`text-xs font-medium px-2 py-1 rounded-full ${
-              trend.isPositive ? 'bg-green-500/10 text-green-400 border border-green-500/20' : 'bg-red-500/10 text-red-400 border border-red-500/20'
-            }`}>
-              {trend.isPositive ? '+' : '-'}{Math.abs(trend.value)}%
+            <div
+              className={`text-xs font-medium px-2 py-1 rounded-full ${
+                trend.isPositive
+                  ? "bg-green-500/10 text-green-400 border border-green-500/20"
+                  : "bg-red-500/10 text-red-400 border border-red-500/20"
+              }`}
+            >
+              {trend.isPositive ? "+" : "-"}
+              {Math.abs(trend.value)}%
             </div>
           )}
         </div>

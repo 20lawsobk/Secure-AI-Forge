@@ -713,7 +713,7 @@ class AdsClient:
         for run in runs:
             roas = float(run.get("roas", 0))
             ctr  = float(run.get("ctr", 0))
-            cpc  = float(run.get("cpc", 999))
+            _cpc = float(run.get("cpc", 999))
 
             if roas >= self.PEAK_ROAS_THRESHOLD and ctr >= self.PEAK_CTR_THRESHOLD:
                 scale.append(run)

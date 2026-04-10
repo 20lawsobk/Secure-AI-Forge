@@ -1,6 +1,6 @@
 from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import List
 from .scenes import SceneConfig, TextElement
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
@@ -694,7 +694,7 @@ class StorytellerTemplate(CinematicTemplate):
         )
         if artist_name:
             s1.texts.append(TextElement(
-                text=f"presents", font=FONT_PATH_REGULAR, size=int(height * 0.02),
+                text="presents", font=FONT_PATH_REGULAR, size=int(height * 0.02),
                 color="0x888888", x="(w-text_w)/2", y=f"{int(height * 0.14)}",
                 start=0.3, fade_in=0.8, animation="fade", max_chars=40, shadow=False,
             ))

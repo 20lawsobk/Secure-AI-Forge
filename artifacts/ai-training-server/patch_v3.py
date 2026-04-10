@@ -2,7 +2,8 @@
 patch_v3.py — Fix medley_solos, nsynth, mtg_jamendo URLs + add "already downloaded" size check.
 Run from: D:\ai_server>  python patch_v3.py
 """
-import json, re, sys
+import json
+import re
 from pathlib import Path
 
 SCRIPT = Path(__file__).parent / 'download_datasets.py'

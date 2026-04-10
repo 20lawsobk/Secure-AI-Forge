@@ -205,7 +205,7 @@ class Scheduler:
                     Q = self.vram.get(hQ)
                     K = self.vram.get(hK)
                     V = self.vram.get(hV)
-                    O = self.core.attention(Q, K, V, causal=causal)
+                    O = self.core.attention(Q, K, V, causal=causal)  # noqa: E741
                     self.vram._store[hOut] = O
                     self.vram._meta[hOut]["shape"] = O.shape
                     self.vram._meta[hOut]["size"] = O.size
@@ -216,7 +216,7 @@ class Scheduler:
                     A = self.vram.get(hA)
                     B = self.vram.get(hB)
                     bias = self.vram.get(hBias)
-                    O = self.core.gemm_bias_relu(A, B, bias)
+                    O = self.core.gemm_bias_relu(A, B, bias)  # noqa: E741
                     self.vram._store[hOut] = O
                     self.vram._meta[hOut]["shape"] = O.shape
                     self.vram._meta[hOut]["size"] = O.size

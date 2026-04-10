@@ -21,7 +21,6 @@ import uuid
 import json
 import asyncio
 import threading
-import functools
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Optional, List
@@ -31,7 +30,6 @@ import psycopg2.pool
 from psycopg2.extras import RealDictCursor
 from fastapi import FastAPI, HTTPException, Depends, Header, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -134,7 +132,7 @@ def init_db():
             ("Default Admin Key", key_hash, prefix, ["read", "write", "train", "admin", "generate"])
         )
         # Print admin key once to stdout — do not persist to disk
-        print(f"[Server] *** DEFAULT ADMIN KEY (copy now — not stored) ***")
+        print("[Server] *** DEFAULT ADMIN KEY (copy now — not stored) ***")
         print(f"[Server] {admin_key}")
         print(f"[Server] Admin key prefix: {prefix}...")
 
@@ -276,10 +274,10 @@ def _init_ai_model():
         from ai_model.model.tokenizer import SimpleTokenizer
         from ai_model.model.transformer import TransformerLM
         from ai_model.model.creative_model import CreativeModel
-        from ai_model.agents.script_agent import ScriptAgent, ScriptRequest
-        from ai_model.agents.visual_spec_agent import VisualSpecAgent, VisualSpecRequest
-        from ai_model.agents.distribution_agent import DistributionAgent, DistributionRequest
-        from ai_model.agents.optimization_agent import OptimizationAgent, OptimizationRequest
+        from ai_model.agents.script_agent import ScriptAgent
+        from ai_model.agents.visual_spec_agent import VisualSpecAgent
+        from ai_model.agents.distribution_agent import DistributionAgent
+        from ai_model.agents.optimization_agent import OptimizationAgent
         from ai_model.boostsheets.repository import BoostSheetRepository
         from ai_model.adapters.url_adapter import UrlToBoostSheetAdapter
         from ai_model.render_manager import RenderManager
@@ -507,7 +505,7 @@ async def on_startup():
 def _init_storage():
     """Connect to storage server, load checkpoint, and start workers."""
     global _data_puller, _continuous_trainer, _watchdog
-    from storage_client import get_storage, get_checkpoint_client
+    from storage_client import get_storage
     storage = get_storage()
     ok = storage.ping()
     if ok:
@@ -594,7 +592,6 @@ def _training_bridge(texts: list, epochs: int, phase_label: str,
     Called by ContinuousTrainer to run a training pass.
     Writes data to a temp file, builds dataset, runs the trainer, returns loss.
     """
-    import math
     from ai_model.training.dataset import CreativeDataset
     from ai_model.training.trainer import train as run_train
     from ai_model.training.config import TrainConfig
@@ -629,7 +626,8 @@ def _training_bridge(texts: list, epochs: int, phase_label: str,
     # Save checkpoint (include tokenizer vocab so _init_ai_model can restore it)
     weights_dir = Path(__file__).parent / "ai_model" / "weights"
     weights_dir.mkdir(exist_ok=True)
-    import torch, numpy as np
+    import torch
+    import numpy as np
     torch.save({
         "model_state_dict": _creative_model.model.state_dict(),
         "vocab": _tokenizer.vocab,
@@ -678,7 +676,7 @@ def _load_checkpoint_from_storage():
                 "hash": latest.get("hash"),
                 "source": "storage",
             }
-        print(f"[Storage] Checkpoint sync complete — model is ready with trained data")
+        print("[Storage] Checkpoint sync complete — model is ready with trained data")
     except Exception as e:
         print(f"[Storage] Checkpoint load error (non-fatal): {e}")
 
@@ -993,7 +991,7 @@ def _run_training(req: StartTrainingRequest, job_id: str):
         weights_dir = Path(__file__).parent / "ai_model" / "weights"
         weights_dir.mkdir(parents=True, exist_ok=True)
         weights_path = weights_dir / "model.pt"
-        n_layers = len(_creative_model.model.layers)
+        _n_layers = len(_creative_model.model.layers)
         torch.save({
             "model_state_dict": _creative_model.model.state_dict(),
             "vocab": _tokenizer.vocab,
@@ -1115,7 +1113,8 @@ async def get_training_datasets(_key = Depends(require_scope("read"))):
     total_gb = sum(d["size_gb"] for d in STORAGE_DATASETS)
     storage_session = None
     try:
-        storage_session = get_storage_client().get_session_info()
+        from storage_client import get_storage  # noqa: E402
+        storage_session = get_storage().get_session()
     except Exception:
         pass
     return {
@@ -1170,7 +1169,6 @@ async def schedule_training(req: ScheduleRequest, background_tasks: BackgroundTa
 
 
 def _run_curriculum(phases: list, req: ScheduleRequest, job_id: str):
-    import math
     from ai_model.training.synthetic import generate_synthetic_samples
     from ai_model.training.dataset import CreativeDataset
     from ai_model.training.trainer import train as run_train
@@ -1238,7 +1236,8 @@ def _run_curriculum(phases: list, req: ScheduleRequest, job_id: str):
 
                 weights_dir = Path(__file__).parent / "ai_model" / "weights"
                 weights_dir.mkdir(parents=True, exist_ok=True)
-                import torch, numpy as np
+                import torch
+                import numpy as np
                 state_dict = _creative_model.model.state_dict()
                 torch.save({"model_state_dict": state_dict, "vocab": _tokenizer.vocab,
                             "inv_vocab": _tokenizer.inv_vocab, "next_id": _tokenizer.next_id,
@@ -1498,7 +1497,10 @@ async def list_boostsheets():
 
 @app.get("/dashboard/stats")
 async def dashboard_stats():
-    total_keys = 0; active_keys = 0; total_requests_today = 0; boostsheet_count = 0
+    total_keys = 0
+    active_keys = 0
+    total_requests_today = 0
+    boostsheet_count = 0
     try:
         conn = _acquire()
         cur = conn.cursor()
@@ -1508,7 +1510,8 @@ async def dashboard_stats():
         active_keys = cur.fetchone()[0]
         cur.execute("SELECT COALESCE(SUM(request_count), 0) FROM api_keys WHERE last_used_at > NOW() - INTERVAL '1 day'")
         total_requests_today = cur.fetchone()[0] or 0
-        cur.close(); _release(conn)
+        cur.close()
+        _release(conn)
     except Exception:
         pass
 
@@ -1808,10 +1811,10 @@ async def platform_social_autopilot(req: PlatformAutopilotRequest, _key = Depend
         from storage_client import get_curriculum_client
         curriculum = get_curriculum_client()
         top_content = curriculum.get_top_performers(req.user_id, platform=platform, top_n=5)
-        user_stats = curriculum.get_user_stats(req.user_id)
+        _user_stats = curriculum.get_user_stats(req.user_id)
     except Exception:
         top_content = []
-        user_stats = {}
+        _user_stats = {}
 
     # Analyse what's working
     top_tags = []
@@ -1843,7 +1846,7 @@ async def platform_social_autopilot(req: PlatformAutopilotRequest, _key = Depend
                     "cta": s.cta,
                     "source": "model",
                 })
-        except Exception as e:
+        except Exception:
             next_topics = [{"topic": t, "hook": f"Post about {t}", "cta": "Engage now", "source": "template"}
                            for t in (dominant_tags or ["music"])]
     else:
@@ -1928,7 +1931,7 @@ async def platform_daw_generate(req: PlatformDAWRequest, _key = Depends(require_
                 "main": f"[{req.mode.upper()}] {context_prompt}",
                 "verse": f"Verse: Building the foundation of {req.genre}...",
                 "chorus": f"Hook: Feel the {req.mood} energy rise...",
-                "bridge": f"Bridge: The turn that makes them stay...",
+                "bridge": "Bridge: The turn that makes them stay...",
             },
             "source": "template",
             "processing_time_ms": round((time.time() - start) * 1000, 1),
@@ -2250,7 +2253,7 @@ async def platform_model_info(_key = Depends(verify_api_key)):
     Returns the current model state for the main platform UI.
     Shows whether the model is running on trained storage data or baseline weights.
     """
-    from storage_client import get_pipeline, get_storage
+    from storage_client import get_storage
     storage = get_storage()
 
     with _training_lock:
@@ -3325,7 +3328,7 @@ async def ads_optimize(
     for camp in campaigns:
         roas = float(camp.get("roas", 0))
         ctr  = float(camp.get("ctr", 0))
-        cpc  = float(camp.get("cpc", 999))
+        _cpc = float(camp.get("cpc", 999))
         run_id = camp.get("run_id", "unknown")
 
         if roas >= 3.0 and ctr >= 2.5:
@@ -3333,7 +3336,7 @@ async def ads_optimize(
             detail = f"Peak performer. Double budget. ROAS={roas}x CTR={ctr}%"
         elif roas >= 2.0 or ctr >= 1.5:
             action = "MAINTAIN"
-            detail = f"Solid performance. Hold budget. Consider testing new angle."
+            detail = "Solid performance. Hold budget. Consider testing new angle."
         elif roas >= 1.0:
             action = "OPTIMISE"
             detail = f"Borderline. Try new hook/audience. ROAS={roas}x CTR={ctr}%"
@@ -3342,7 +3345,7 @@ async def ads_optimize(
             detail = f"CTR too low ({ctr}%). Pause and replace creative immediately."
         else:
             action = "TEST"
-            detail = f"Insufficient data. Run for 3 more days before deciding."
+            detail = "Insufficient data. Run for 3 more days before deciding."
 
         # Generate a replacement hook if killing
         new_hook = None
@@ -3440,15 +3443,14 @@ def _run_storage_training(req: StorageTrainRequest, job_id: str):
 
         sys.path.insert(0, str(Path(__file__).parent))
         import torch
-        from ai_model.training.dataset import CreativeDataset
-        from ai_model.training.trainer import train as run_train, evaluate
+        from ai_model.training.trainer import train as run_train
         from ai_model.training.config import TrainConfig
 
         total_loss = 0.0
         batch_count = 0
         samples_written = []
 
-        log_training(f"[StorageTrain] Streaming batches from storage...", job_id=job_id)
+        log_training("[StorageTrain] Streaming batches from storage...", job_id=job_id)
 
         for text_batch in pipeline.stream_batches(batch_size=req.batch_size):
             if req.max_batches and batch_count >= req.max_batches:
@@ -3525,7 +3527,7 @@ def _run_storage_training(req: StorageTrainRequest, job_id: str):
                            "final_loss": _training_state.get("final_loss")},
                     metadata={"source": "storage", "session": pipeline._session},
                 )
-                log_training(f"[StorageTrain] Checkpoint saved to storage", job_id=job_id)
+                log_training("[StorageTrain] Checkpoint saved to storage", job_id=job_id)
             except Exception as e:
                 log_training(f"[StorageTrain] Checkpoint error: {e}", job_id=job_id, level="error")
 
@@ -3782,7 +3784,7 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
             from ai_model.agents.script_agent import ScriptRequest
             from ai_model.agents.distribution_agent import DistributionRequest
             sr = await _in_thread(lambda: _script_agent.run(ScriptRequest(idea=topic, platform=platform, goal="engagement", tone=req.tone)))
-            dr = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(script=f"{sr.hook}\n{sr.body}\n{sr.cta}", platform=platform, goal="engagement")))
+            _dr = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(script=f"{sr.hook}\n{sr.body}\n{sr.cta}", platform=platform, goal="engagement")))
             hook = sr.hook or hook
             body = sr.body or body
             cta  = sr.cta  or cta
@@ -3993,7 +3995,8 @@ async def api_analyze_sentiment(req: ApiSentimentRequest, _key=Depends(require_s
 @app.post("/api/analyze/audio")
 async def api_analyze_audio(req: ApiAnalyzeAudioRequest, _key=Depends(require_scope("generate"))):
     """Style fingerprinting from an uploaded audio file."""
-    import hashlib, numpy as _np
+    import hashlib
+    import numpy as _np
     seed = int(hashlib.md5(req.audio_url.encode()).hexdigest(), 16) % (2 ** 31)
     rng  = _np.random.default_rng(seed)
 
@@ -4055,7 +4058,7 @@ async def api_optimize_ad(req: ApiOptimizeAdRequest, _key=Depends(require_scope(
     elif req.action == "optimize_budget":
         campaigns = req.campaigns or []
         total     = req.totalBudget or 1000.0
-        n         = max(1, len(campaigns))
+        _n        = max(1, len(campaigns))
         # Score each campaign via model, allocate proportionally
         scores: list[float] = []
         for c in campaigns:
@@ -4375,7 +4378,6 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
 @app.post("/api/generate/audio")
 async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_scope("generate"))):
     """Async audio generation — style-conditioned via AI model for concept, BPM/key, creative direction."""
-    import numpy as _np
     job_id = str(uuid.uuid4())
     with _api_jobs_lock:
         _api_audio_jobs[job_id] = {
@@ -4396,7 +4398,7 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         try:
             from ai_model.agents.script_agent import ScriptRequest
             genre_hint = req.genre or "music"
-            mood_hint  = req.intent or "energetic"
+            _mood_hint = req.intent or "energetic"
             idea_text  = f"{genre_hint} audio track — {req.intent or req.instrument or 'music clip'}"
             sr = await _in_thread(lambda: _script_agent.run(ScriptRequest(
                 idea=idea_text, platform="general",
@@ -4410,7 +4412,8 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
             pass
 
     def _process():
-        import time as _t, numpy as _np2
+        import time as _t
+        import numpy as _np2
         _t.sleep(2)
         fp  = req.style_fingerprint
         # BPM derived from style fingerprint (deterministic if provided, else seeded)

@@ -13,12 +13,11 @@ The system produces an infinite palette space rather than 23 fixed choices.
 """
 from __future__ import annotations
 import hashlib
-import math
 import colorsys
-from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple
+from dataclasses import dataclass
+from typing import List, Dict
 
-from .scenes import SceneConfig, TextElement, FONT_PATH, FONT_PATH_REGULAR
+from .scenes import SceneConfig, TextElement, FONT_PATH
 
 
 # ── Visual DNA definitions ────────────────────────────────────────────────────
@@ -75,7 +74,7 @@ _TONE_DELTA: Dict[str, Dict] = {
 
 # Background type chosen by (energy, darkness) grid
 def _choose_bg_type(energy: float, darkness: float, seed: int) -> str:
-    micro = (seed % 7) / 7.0   # 0-1 micro-variation per video
+    _micro = (seed % 7) / 7.0   # 0-1 micro-variation per video
     if energy > 0.85 and darkness > 0.80:
         return "plasma"
     if energy > 0.85 and darkness <= 0.80:

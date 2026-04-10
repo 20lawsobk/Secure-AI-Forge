@@ -46,7 +46,7 @@ def train_on_hyper_gpu(
     )
 
     print(f"\n{'='*70}")
-    print(f"HYPER GPU ACCELERATED TRAINING")
+    print("HYPER GPU ACCELERATED TRAINING")
     print(f"{'='*70}")
     gpu_s = backend.status()
     print(f"Engine: {gpu_s['engine']}")
@@ -139,9 +139,9 @@ def train_on_hyper_gpu(
 
     use_autocast = hasattr(torch, 'autocast')
     if use_autocast:
-        print(f"Mixed precision: BFloat16 autocast ENABLED")
+        print("Mixed precision: BFloat16 autocast ENABLED")
     else:
-        print(f"Mixed precision: Not available")
+        print("Mixed precision: Not available")
 
     best_state = None
     global_step = 0
@@ -266,7 +266,7 @@ def train_on_hyper_gpu(
     gpu_final = backend.status()
 
     print(f"\n{'='*70}")
-    print(f"HYPER GPU TRAINING COMPLETE")
+    print("HYPER GPU TRAINING COMPLETE")
     print(f"{'='*70}")
     print(f"Total time: {total_time:.0f}s ({total_time/60:.1f} min)")
     print(f"Best val loss: {best_val_loss:.4f} | PPL: {final_ppl:.2f}")

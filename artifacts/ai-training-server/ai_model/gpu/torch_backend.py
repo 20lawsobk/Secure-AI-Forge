@@ -62,7 +62,7 @@ class _DigitalAttention(torch.autograd.Function):
         K_np = K.detach().numpy().astype(np.float64)
         V_np = V.detach().numpy().astype(np.float64)
         O_np = gpu.attention(Q_np, K_np, V_np, causal=causal)
-        O = torch.from_numpy(O_np.astype(np.float32))
+        O = torch.from_numpy(O_np.astype(np.float32))  # noqa: E741
         ctx.save_for_backward(Q, K, V)
         ctx.gpu = gpu
         ctx.causal = causal
@@ -96,14 +96,14 @@ class _DigitalGEMMBiasReLU(torch.autograd.Function):
         B_np = B.detach().numpy().astype(np.float64)
         bias_np = bias.detach().numpy().astype(np.float64)
         O_np = gpu.gemm_bias_relu(A_np, B_np, bias_np)
-        O = torch.from_numpy(O_np.astype(np.float32))
+        O = torch.from_numpy(O_np.astype(np.float32))  # noqa: E741
         ctx.save_for_backward(A, B, bias, O)
         ctx.gpu = gpu
         return O
 
     @staticmethod
     def backward(ctx, grad_output):
-        A, B, bias, O = ctx.saved_tensors
+        A, B, bias, O = ctx.saved_tensors  # noqa: E741
         gpu = ctx.gpu
         relu_mask = (O > 0).float()
         grad_pre_relu = grad_output * relu_mask

@@ -27,12 +27,10 @@ All downloads resume if interrupted. Already-complete datasets are skipped.
 
 import argparse
 import json
-import os
 import shutil
 import subprocess
 import sys
 import threading
-import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -214,7 +212,7 @@ def _run(cmd: List[str], cwd: Optional[Path] = None) -> int:
 def _ensure_pkg(pkg: str, import_name: Optional[str] = None):
     mod = import_name or pkg.replace('-', '_')
     try:
-        m = __import__(mod)
+        _ = __import__(mod)
         # Verify the package is functional (datasets sometimes installs broken)
         if mod == 'datasets':
             from datasets import load_dataset  # noqa: F401
@@ -550,7 +548,7 @@ def _download_http_multi(ds: Dataset, dest: Path):
 def _download_ytdlp(ds: Dataset, dest: Path):
     """Download via yt-dlp."""
     try:
-        import yt_dlp as _
+        import yt_dlp as _  # noqa: F401
     except ImportError:
         rc = subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', 'yt-dlp'])
         if rc.returncode != 0:
@@ -617,9 +615,9 @@ def run(
     print(f"  Datasets   : {len(targets)} ({present} already done)")
     print(f"  Est. total : {total_gb/1024:.1f} TB  ({total_gb:.0f} GB)")
     if HF_TOKEN:
-        print(f"  HF Token   : set (authenticated)")
+        print("  HF Token   : set (authenticated)")
     else:
-        print(f"  HF Token   : not set (gated repos may fail — use --hf-token)")
+        print("  HF Token   : not set (gated repos may fail — use --hf-token)")
     print()
 
     if dry_run:

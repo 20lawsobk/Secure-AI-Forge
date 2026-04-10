@@ -1,5 +1,5 @@
 import numpy as np
-from typing import Dict, List, Optional
+from typing import Dict, List
 from ai_model.gpu.hyper_core import HyperGPU
 from ..boostsheets.schema import PlatformTarget
 from .video_generator import VideoGenerator

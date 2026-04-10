@@ -1,6 +1,5 @@
 import time
 import subprocess
-import json
 import requests
 
 SERVER_URL = "http://127.0.0.1:5055/gpu"
@@ -17,13 +16,13 @@ def get_gpu_stats():
             "memory_used": int(mem_used),
             "memory_total": int(mem_total)
         }
-    except:
+    except Exception:
         return {"error": "GPU not found"}
 
 while True:
     stats = get_gpu_stats()
     try:
         requests.post(SERVER_URL, json=stats)
-    except:
+    except Exception:
         pass
     time.sleep(5)

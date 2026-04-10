@@ -1,4 +1,3 @@
-import re, sys
 from pathlib import Path
 
 f = Path(__file__).parent / 'download_datasets.py'

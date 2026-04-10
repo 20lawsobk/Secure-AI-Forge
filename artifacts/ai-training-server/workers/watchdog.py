@@ -17,14 +17,12 @@ Checks every POLL_INTERVAL seconds:
 """
 
 import gc
-import json
 import logging
-import os
 import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger("watchdog")
 
@@ -316,7 +314,7 @@ class Watchdog:
         with self.training_lock:
             state = self.training_state.get("state", "idle")
             elapsed = self.training_state.get("elapsed_seconds", 0)
-            started_at = self.training_state.get("started_at")
+            _started_at = self.training_state.get("started_at")
 
         if state != "running":
             self._last_elapsed = None
@@ -355,7 +353,7 @@ class Watchdog:
             return
         with self.training_lock:
             state = self.training_state.get("state", "idle")
-            started_at = self.training_state.get("started_at") or 0
+            _started_at = self.training_state.get("started_at") or 0
 
         if state != "starting":
             self._training_start_at = None
@@ -496,7 +494,7 @@ class Watchdog:
                 "critical", "memory_danger",
                 f"Memory at {mem_pct:.1f}% ({mem_mb:.0f} MB) — DANGER. "
                 f"Ran full GC ({collected} objects freed) + cleared all caches.",
-                f"gc.collect(2) + torch/malloc cache cleared"
+                "gc.collect(2) + torch/malloc cache cleared"
             )
         elif mem_pct >= MEMORY_CRIT_PCT:
             collected = gc.collect()

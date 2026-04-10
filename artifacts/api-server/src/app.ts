@@ -32,7 +32,8 @@ app.get("/uploads/*path", async (req: Request, res: Response) => {
       res.status(upstream.status).send(upstream.statusText);
       return;
     }
-    const contentType = upstream.headers.get("content-type") || "application/octet-stream";
+    const contentType =
+      upstream.headers.get("content-type") || "application/octet-stream";
     res.setHeader("Content-Type", contentType);
     const buf = Buffer.from(await upstream.arrayBuffer());
     res.send(buf);
@@ -49,7 +50,10 @@ if (process.env.NODE_ENV === "production") {
     const metaUrl = import.meta?.url;
     if (metaUrl) {
       // ESM path: __dirname = artifacts/api-server/src (dev) or dist (built)
-      return path.resolve(path.dirname(fileURLToPath(metaUrl)), "../../ai-dashboard/dist/public");
+      return path.resolve(
+        path.dirname(fileURLToPath(metaUrl)),
+        "../../ai-dashboard/dist/public",
+      );
     }
     // CJS fallback: process.cwd() is the monorepo root
     return path.resolve(process.cwd(), "artifacts/ai-dashboard/dist/public");

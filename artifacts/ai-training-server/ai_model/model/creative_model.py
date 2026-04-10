@@ -25,7 +25,7 @@ class CreativeModel:
     def resize_embeddings(self):
         new_vocab = self.tokenizer.vocab_size
         old_emb = self.model.token_emb
-        old_head = self.model.head
+        _old_head = self.model.head
         if new_vocab > old_emb.num_embeddings:
             dim = old_emb.embedding_dim
             new_emb = nn.Embedding(new_vocab, dim).to(self.device)

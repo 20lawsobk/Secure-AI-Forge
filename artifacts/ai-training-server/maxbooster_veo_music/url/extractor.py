@@ -2,8 +2,8 @@ from __future__ import annotations
 import re
 import json
 import logging
-from typing import Dict, Any, Optional, List
-from urllib.parse import urlparse, parse_qs
+from typing import Dict, Any, Optional
+from urllib.parse import urlparse
 
 try:
     import urllib.request
