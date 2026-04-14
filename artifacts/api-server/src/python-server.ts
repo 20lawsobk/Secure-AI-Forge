@@ -106,7 +106,7 @@ function spawnPython() {
   console.log(`[Python] Starting AI training server (port ${PYTHON_PORT})...`);
   lastStartTime = Date.now();
 
-  pythonProcess = spawn("python3", [PYTHON_SCRIPT], {
+  pythonProcess = spawn("uv", ["run", "python3", PYTHON_SCRIPT], {
     env: {
       ...process.env,
       MODEL_API_PORT: String(PYTHON_PORT),

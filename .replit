@@ -37,23 +37,31 @@ args = "python-lint"
 
 [[workflows.workflow.tasks]]
 task = "workflow.run"
+args = "format-check"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
 args = "python-typecheck"
 
 [[workflows.workflow.tasks]]
 task = "workflow.run"
-args = "format-check"
+args = "artifacts/api-server: API Server"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "artifacts/ai-dashboard: web"
 
 [[workflows.workflow]]
 name = "AI Training Server"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "MODEL_API_PORT=9878 python3 artifacts/ai-training-server/server.py"
-waitForPort = 9878
-
 [workflows.workflow.metadata]
 outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "MODEL_API_PORT=9878 uv run python3 artifacts/ai-training-server/server.py"
+waitForPort = 9878
 
 [[workflows.workflow]]
 name = "typecheck"
@@ -78,17 +86,6 @@ task = "shell.exec"
 args = "uv tool run ruff check artifacts/ai-training-server/ --output-format=concise"
 
 [[workflows.workflow]]
-name = "python-typecheck"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "uv run mypy artifacts/ai-training-server/ --ignore-missing-imports --no-strict-optional --follow-imports=skip"
-
-[workflows.workflow.metadata]
-isValidation = true
-
-[[workflows.workflow]]
 name = "format-check"
 author = "agent"
 
@@ -98,6 +95,41 @@ isValidation = true
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "pnpm exec prettier --check \"artifacts/**/*.{ts,tsx}\" \"lib/**/*.{ts,tsx}\""
+
+[[workflows.workflow]]
+name = "python-typecheck"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "uv tool run mypy artifacts/ai-training-server/ --ignore-missing-imports --no-strict-optional --follow-imports=skip"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow]]
+name = "artifacts/api-server: API Server"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "PORT=8080 MODEL_API_PORT=9878 pnpm --filter @workspace/api-server run dev"
+waitForPort = 8080
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow]]
+name = "artifacts/ai-dashboard: web"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "PORT=3000 BASE_PATH=/ pnpm --filter @workspace/ai-dashboard run dev"
+waitForPort = 3000
+
+[workflows.workflow.metadata]
+outputType = "webview"
 
 [agent]
 stack = "PNPM_WORKSPACE"
