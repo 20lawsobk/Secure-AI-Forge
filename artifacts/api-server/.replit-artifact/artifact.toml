@@ -13,7 +13,7 @@ paths = ["/", "/api", "/uploads"]
 run = "pnpm --filter @workspace/api-server run dev"
 
 [services.production]
-build = "pnpm --filter @workspace/api-server run build && BASE_PATH=/ pnpm --filter @workspace/ai-dashboard run build"
+build = "pnpm install && uv sync && pnpm --filter @workspace/api-server run build && BASE_PATH=/ pnpm --filter @workspace/ai-dashboard run build"
 run = "pnpm --filter @workspace/api-server run serve"
 
 [services.production.health.startup]
