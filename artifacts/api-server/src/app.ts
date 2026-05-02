@@ -7,6 +7,8 @@ import router from "./routes";
 
 const app: Express = express();
 
+app.set("trust proxy", 1);
+
 const limiter = rateLimit({
   windowMs: 1000,
   limit: 120_000_000,

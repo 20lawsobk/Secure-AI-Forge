@@ -51,6 +51,10 @@ args = "artifacts/api-server: API Server"
 task = "workflow.run"
 args = "artifacts/ai-dashboard: web"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Start application"
+
 [[workflows.workflow]]
 name = "AI Training Server"
 author = "agent"
@@ -131,6 +135,18 @@ waitForPort = 3000
 [workflows.workflow.metadata]
 outputType = "webview"
 
+[[workflows.workflow]]
+name = "Start application"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "PORT=5000 BASE_PATH=/ pnpm --filter @workspace/ai-dashboard run dev"
+waitForPort = 5000
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
 [agent]
 stack = "BEST_EFFORT_FALLBACK"
 expertMode = true
@@ -152,3 +168,7 @@ STORAGE_HTTP_URL = "https://pocketdimensionstorage.replit.app/api/redis/instance
 STORAGE_CONNECTION_URL = "pdim://mbs_373a1368ba359b15860701559d3a7c8f91e04f3afc44577de0c8efa0430bb982@pocketdimensionstorage.replit.app/api/redis/instances/f26378c8b4faf9f237a0f816"
 STORAGE_BEARER_TOKEN = "mbs_373a1368ba359b15860701559d3a7c8f91e04f3afc44577de0c8efa0430bb982"
 AI_TRAINING_KEY_PROD = "mbs_c6fe3b6e7eb7f4c6957f256ef20ae072c2c6ae75b0c88d5448b35707249f3a0d"
+
+[[ports]]
+localPort = 5000
+externalPort = 80
