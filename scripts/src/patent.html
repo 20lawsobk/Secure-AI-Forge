@@ -1,0 +1,800 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>MaxBooster Patent Application — B-Lawz Music LLC</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Times+New+Roman&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: "Times New Roman", Times, serif;
+    font-size: 12pt;
+    line-height: 1.8;
+    color: #000;
+    background: #fff;
+  }
+
+  .page {
+    width: 8.5in;
+    min-height: 11in;
+    padding: 1in 1.25in 1in 1.25in;
+    margin: 0 auto;
+    page-break-after: always;
+    position: relative;
+  }
+
+  .page:last-child { page-break-after: avoid; }
+
+  /* ── Cover Page ─────────────────────────────────────────────── */
+  .cover {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    padding-top: 0.5in;
+  }
+
+  .cover .uspto-header {
+    text-align: center;
+    border-bottom: 3px double #000;
+    padding-bottom: 14pt;
+    width: 100%;
+    margin-bottom: 20pt;
+  }
+
+  .cover .uspto-header h1 {
+    font-size: 15pt;
+    font-weight: bold;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-bottom: 4pt;
+  }
+
+  .cover .uspto-header p {
+    font-size: 11pt;
+    letter-spacing: 1px;
+  }
+
+  .cover .title-block {
+    width: 100%;
+    text-align: center;
+    margin: 24pt 0 28pt 0;
+    border: 1px solid #000;
+    padding: 18pt 24pt;
+  }
+
+  .cover .title-block .label {
+    font-size: 9pt;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: #555;
+    margin-bottom: 8pt;
+  }
+
+  .cover .title-block h2 {
+    font-size: 13pt;
+    font-weight: bold;
+    line-height: 1.5;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .cover .meta-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 24pt;
+    font-size: 11pt;
+  }
+
+  .cover .meta-table td {
+    padding: 6pt 8pt;
+    border: 1px solid #ccc;
+    vertical-align: top;
+  }
+
+  .cover .meta-table td:first-child {
+    font-weight: bold;
+    width: 40%;
+    background: #f7f7f7;
+    text-transform: uppercase;
+    font-size: 9.5pt;
+    letter-spacing: 0.5px;
+  }
+
+  .cover .disclaimer-box {
+    width: 100%;
+    border: 2px solid #888;
+    padding: 12pt 16pt;
+    margin-top: 12pt;
+    background: #fafafa;
+  }
+
+  .cover .disclaimer-box p {
+    font-size: 9.5pt;
+    line-height: 1.6;
+    color: #333;
+  }
+
+  .cover .disclaimer-box strong {
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  /* ── Section Pages ──────────────────────────────────────────── */
+  .section-title {
+    font-size: 12pt;
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    border-top: 2px solid #000;
+    border-bottom: 1px solid #000;
+    padding: 6pt 0;
+    margin: 22pt 0 14pt 0;
+  }
+
+  .section-title:first-of-type {
+    margin-top: 0;
+  }
+
+  .subsection-title {
+    font-size: 11.5pt;
+    font-weight: bold;
+    margin: 16pt 0 8pt 0;
+    text-decoration: underline;
+  }
+
+  p {
+    margin-bottom: 10pt;
+    text-align: justify;
+  }
+
+  .code-block {
+    font-family: "Courier New", Courier, monospace;
+    font-size: 9.5pt;
+    background: #f5f5f5;
+    border: 1px solid #ddd;
+    padding: 10pt 14pt;
+    margin: 10pt 0 12pt 0;
+    line-height: 1.5;
+    white-space: pre;
+  }
+
+  ul, ol {
+    margin: 8pt 0 10pt 24pt;
+  }
+
+  li {
+    margin-bottom: 5pt;
+    text-align: justify;
+  }
+
+  /* ── Claims ─────────────────────────────────────────────────── */
+  .claim {
+    margin-bottom: 14pt;
+    padding-left: 0;
+  }
+
+  .claim-number {
+    font-weight: bold;
+  }
+
+  .claim-body {
+    padding-left: 24pt;
+    margin-top: 4pt;
+  }
+
+  .claim-indent-1 { padding-left: 36pt; }
+  .claim-indent-2 { padding-left: 52pt; }
+
+  /* ── Abstract ───────────────────────────────────────────────── */
+  .abstract-box {
+    border: 1px solid #000;
+    padding: 16pt 20pt;
+    margin-top: 14pt;
+  }
+
+  /* ── Declaration ────────────────────────────────────────────── */
+  .sig-line {
+    border-bottom: 1px solid #000;
+    width: 60%;
+    margin: 6pt 0 2pt 0;
+    height: 22pt;
+  }
+
+  .sig-label {
+    font-size: 9.5pt;
+    color: #444;
+    margin-bottom: 14pt;
+  }
+
+  /* ── Page Header/Footer ──────────────────────────────────────── */
+  .page-header {
+    font-size: 8.5pt;
+    color: #666;
+    border-bottom: 1px solid #ccc;
+    padding-bottom: 5pt;
+    margin-bottom: 14pt;
+    display: flex;
+    justify-content: space-between;
+  }
+
+  .page-footer {
+    font-size: 8.5pt;
+    color: #666;
+    border-top: 1px solid #ccc;
+    padding-top: 5pt;
+    margin-top: 20pt;
+    display: flex;
+    justify-content: space-between;
+  }
+
+  .confidential-banner {
+    font-size: 8pt;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #999;
+    text-align: center;
+  }
+
+  /* ── Print ──────────────────────────────────────────────────── */
+  @media print {
+    body { background: #fff; }
+    .page { margin: 0; page-break-after: always; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════════════════════
+     COVER PAGE
+══════════════════════════════════════════════════════════════ -->
+<div class="page cover">
+
+  <div class="uspto-header">
+    <h1>United States Patent Application</h1>
+    <p>Non-Provisional Application Under 35 U.S.C. § 111(a)</p>
+  </div>
+
+  <div class="title-block">
+    <div class="label">Title of Invention</div>
+    <h2>System and Method for AI-Driven Multimodal Content Generation for Music Artists Using Content DNA Derivation, Rotary Position Embedding Transformer Language Models, and Simulated GPU Execution Engines</h2>
+  </div>
+
+  <table class="meta-table">
+    <tr>
+      <td>Applicant</td>
+      <td>B-Lawz Music LLC</td>
+    </tr>
+    <tr>
+      <td>Assignee</td>
+      <td>B-Lawz Music LLC</td>
+    </tr>
+    <tr>
+      <td>Application Number</td>
+      <td>[To Be Assigned by USPTO]</td>
+    </tr>
+    <tr>
+      <td>Filing Date</td>
+      <td>[To Be Filed]</td>
+    </tr>
+    <tr>
+      <td>Attorney Docket No.</td>
+      <td>[To Be Assigned]</td>
+    </tr>
+    <tr>
+      <td>U.S. Classification</td>
+      <td>G06N 3/04 · G06F 40/30 · G06T 13/00 · H04L 9/32</td>
+    </tr>
+    <tr>
+      <td>International Classification</td>
+      <td>G06N 3/04 · G06F 40/30 · G06T 13/00</td>
+    </tr>
+    <tr>
+      <td>Prepared</td>
+      <td>May 4, 2026</td>
+    </tr>
+  </table>
+
+  <div class="disclaimer-box">
+    <p><strong>Notice:</strong> This document is a patent application draft prepared for strategic and filing-preparation purposes. It has not been filed with the United States Patent and Trademark Office (USPTO) or any other patent authority. This document does not constitute legal advice. All claims, descriptions, and drawings are subject to review and amendment by a registered patent attorney or agent prior to filing. Consult qualified patent counsel before submission.</p>
+  </div>
+
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     CROSS-REFERENCE & FIELD
+══════════════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="page-header">
+    <span>B-Lawz Music LLC — Patent Application Draft</span>
+    <span>MaxBooster AI Content Generation System</span>
+  </div>
+
+  <div class="section-title">Cross-Reference to Related Applications</div>
+  <p>This application claims priority to and incorporates by reference any and all provisional applications filed by the same inventor(s) related to AI-based content generation, transformer language model training, and simulated computational hardware for machine learning workloads.</p>
+
+  <div class="section-title">Field of the Invention</div>
+  <p>The present invention relates generally to artificial intelligence systems for content creation, and more particularly to: (1) a decoder-only transformer language model employing rotary position embeddings (RoPE) and SwiGLU feed-forward networks for music-domain text generation; (2) a Content DNA derivation system that maps musical genre and tonal descriptors to a structured visual parameter space for deterministic video scene synthesis; (3) a multimodal content generation pipeline that orchestrates text, image, audio, and video generation workers through a planner-executor architecture; (4) a simulated GPU execution engine with instruction-level scheduling for platform-independent AI inference and training; and (5) a scoped, hash-based API key management system for securing access to AI generation endpoints.</p>
+
+  <div class="section-title">Background of the Invention</div>
+  <p>Music artists operating in the modern digital landscape are required to produce high-volume, platform-tailored content across channels including Instagram, TikTok, and YouTube. Existing AI content tools suffer from several limitations:</p>
+  <p>(a) General-purpose large language models lack domain-specific knowledge of music marketing vocabulary, platform conventions, and artist identity, leading to generic outputs that fail to reflect an artist's brand.</p>
+  <p>(b) Video generation systems typically rely on template-based approaches or require extensive prompting, producing output with low aesthetic coherence across scenes.</p>
+  <p>(c) Multimodal pipelines commonly require manual coordination between separate text, image, audio, and video generation tools, with no unified planner that derives cross-modality consistency from a single artist-defined input.</p>
+  <p>(d) Deployment of transformer inference on consumer or cloud hardware is constrained by the lack of portable, framework-independent execution layers capable of profiling and scheduling attention and matrix-multiply operations without requiring dedicated GPU hardware.</p>
+  <p>(e) AI API platforms commonly rely on opaque bearer-token authentication, lacking fine-grained scope enforcement, key rotation workflows, and usage telemetry tied to individual generation capabilities.</p>
+  <p>There exists a need for an end-to-end AI platform that addresses all of the above limitations in a unified, artist-centric system.</p>
+
+  <div class="page-footer">
+    <span>© 2026 B-Lawz Music LLC. All Rights Reserved.</span>
+    <span>Page 2</span>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SUMMARY
+══════════════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="page-header">
+    <span>B-Lawz Music LLC — Patent Application Draft</span>
+    <span>MaxBooster AI Content Generation System</span>
+  </div>
+
+  <div class="section-title">Summary of the Invention</div>
+  <p>The present invention provides a system and method designated herein as <strong>MaxBooster</strong> that comprises the following principal components:</p>
+
+  <p><strong>1. A Decoder-Only Transformer Language Model ("MaxBooster LM")</strong> implementing:</p>
+  <ul>
+    <li>Rotary Position Embeddings (RoPE) computed via precomputed cosine/sine frequency tables applied to query and key projections;</li>
+    <li>SwiGLU feed-forward networks with gated linear unit activations and two-thirds-dimensionality hidden layer sizing;</li>
+    <li>Weight-tied input embedding and output projection layers;</li>
+    <li>Causal self-attention with upper-triangular masking;</li>
+    <li>Control token conditioning for platform, tone, goal, and scene-stage targeting during music content generation.</li>
+  </ul>
+
+  <p><strong>2. A Content DNA System</strong> that:</p>
+  <ul>
+    <li>Derives a seven-dimensional normalized parameter vector (energy, darkness, warmth, saturation, grain, complexity, seed) from musical genre and tonal input;</li>
+    <li>Deterministically maps that vector to a color palette, background motion type, typography sizing, animation style, scene timing weights, vignette intensity, and film grain parameters;</li>
+    <li>Applies per-scene micro-variation via a seed-offset function to produce aesthetic variety while maintaining cross-scene visual coherence.</li>
+  </ul>
+
+  <p><strong>3. A Video Generation Pipeline ("Video Studio")</strong> that:</p>
+  <ul>
+    <li>Accepts artist-defined inputs (idea, platform, genre, tone, goal, artist name, duration);</li>
+    <li>Uses the MaxBooster LM with scene-stage control tokens to generate scene text for hook, body, build, drop, cta, and outro stages;</li>
+    <li>Converts scene text and Content DNA into structured SceneConfig objects containing rendering parameters;</li>
+    <li>Renders scenes in parallel via a thread-pool executor and composites them with DNA-derived transition types into a final MP4 output;</li>
+    <li>Exposes an asynchronous job-polling API for non-blocking video rendering.</li>
+  </ul>
+
+  <p><strong>4. A Multimodal Content Generation Pipeline</strong> that:</p>
+  <ul>
+    <li>Accepts a single artist input and an intent specification;</li>
+    <li>Executes a planner phase to produce a directed acyclic task graph of typed worker steps (text, image, audio, video);</li>
+    <li>Executes workers in dependency order, passing prior outputs as inputs to downstream steps;</li>
+    <li>Assembles a typed MultimodalPackage of assets keyed by platform slot (e.g., Instagram cover image, TikTok voiceover audio, YouTube short video).</li>
+  </ul>
+
+  <p><strong>5. A Simulated GPU Execution Engine</strong> comprising:</p>
+  <ul>
+    <li>A DigitalGPU subsystem implementing a VRAM allocator, a SIMD compute core with tiled GEMM, numerically-stable softmax, and causal batch attention operations, and an instruction scheduler with per-operation wall-time profiling;</li>
+    <li>A HyperGPU backend abstraction providing flash-attention and mixed-precision linear layer primitives for higher-fidelity training simulation.</li>
+  </ul>
+
+  <p><strong>6. A Scoped API Key Management System</strong> that:</p>
+  <ul>
+    <li>Stores API keys as SHA-256 hashes with key prefixes, scope arrays, usage counters, and expiration timestamps in a relational database;</li>
+    <li>Enforces per-request scope checks (read, write, train, generate, admin);</li>
+    <li>Supports environment-variable-based key bypass for administrative operations without database round-trips;</li>
+    <li>Provides key rotation and revocation endpoints with immediate invalidation semantics.</li>
+  </ul>
+
+  <div class="page-footer">
+    <span>© 2026 B-Lawz Music LLC. All Rights Reserved.</span>
+    <span>Page 3</span>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     BRIEF DESCRIPTION OF DRAWINGS
+══════════════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="page-header">
+    <span>B-Lawz Music LLC — Patent Application Draft</span>
+    <span>MaxBooster AI Content Generation System</span>
+  </div>
+
+  <div class="section-title">Brief Description of the Drawings</div>
+
+  <p><strong>FIG. 1</strong> is a high-level system architecture diagram showing the relationship between the AI Training Server (Python FastAPI, port 9878), the API Server (Node.js/TypeScript Express, port 8080), and the AI Dashboard (React/Vite SPA) components.</p>
+
+  <p><strong>FIG. 2</strong> is a block diagram of the MaxBooster LM transformer decoder layer, showing the RoPE application to Q and K projections, SwiGLU feed-forward network, pre-normalization, causal masking, and weight-tied output projection.</p>
+
+  <p><strong>FIG. 3</strong> is a data flow diagram of the Content DNA derivation pipeline, tracing the path from musical genre and tone inputs through genre-to-DNA mapping, tonal delta application, seed computation, palette derivation, and final SceneConfig rendering parameter generation.</p>
+
+  <p><strong>FIG. 4</strong> is a sequence diagram of the Video Studio generation and rendering workflow, illustrating the path from user input through scene planning, DNA derivation, parallel scene rendering via ThreadPoolExecutor, compositing with DNA-derived transitions, and MP4 delivery via asynchronous job polling.</p>
+
+  <p><strong>FIG. 5</strong> is a directed acyclic graph (DAG) illustrating the Multimodal Content Generation Pipeline, showing the normalize, plan, and per-modality worker execution steps and their dependency ordering.</p>
+
+  <p><strong>FIG. 6</strong> is a component diagram of the DigitalGPU execution engine, including the VRAM allocator with handle-based array storage, the OpCode instruction set (GEMM, ADD, SOFTMAX, ATTENTION, GEMM_BIAS_RELU), the SIMDCore compute unit with tiled matrix operations, and the Scheduler with wall-time profiling.</p>
+
+  <p><strong>FIG. 7</strong> is a schema and data flow diagram of the API Key Management System, showing key creation with SHA-256 hashing, scope storage, per-request authentication and scope verification, usage counter increment, and key rotation and revocation flows.</p>
+
+  <div class="section-title">Detailed Description of the Preferred Embodiments</div>
+
+  <p>The following detailed description is presented to enable any person skilled in the art to make and use the invention. For purposes of explanation, specific details are set forth to provide a thorough understanding of the present invention. However, the invention may be practiced without these specific details. The descriptions of specific applications are provided only as representative examples.</p>
+
+  <div class="subsection-title">I. System Overview</div>
+
+  <p>The MaxBooster system is implemented as a three-tier architecture:</p>
+  <p><strong>Tier 1 — AI Training Server:</strong> A Python FastAPI application hosting the MaxBooster LM, DigitalGPU/HyperGPU engines, Video Studio rendering pipeline, Content DNA system, and API key database.</p>
+  <p><strong>Tier 2 — API Server:</strong> A Node.js/TypeScript Express application acting as a reverse proxy, header propagation layer, and multimodal generation orchestrator for client-facing requests.</p>
+  <p><strong>Tier 3 — AI Dashboard:</strong> A React/Vite single-page application providing the user interface for API key management, GPU cluster monitoring, training status inspection, and the Video Studio editing interface.</p>
+  <p>All three tiers communicate via authenticated REST APIs using the scoped API key system described in Section VII below.</p>
+
+  <div class="page-footer">
+    <span>© 2026 B-Lawz Music LLC. All Rights Reserved.</span>
+    <span>Page 4</span>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     DETAILED DESCRIPTION — TRANSFORMER MODEL
+══════════════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="page-header">
+    <span>B-Lawz Music LLC — Patent Application Draft</span>
+    <span>MaxBooster AI Content Generation System</span>
+  </div>
+
+  <div class="subsection-title">II. Decoder-Only Transformer Language Model (MaxBooster LM)</div>
+
+  <p><strong>II.A. Architecture Overview.</strong> The MaxBooster LM is a decoder-only transformer of configurable dimensionality and depth, defaulting to: embedding dimension D=512, number of layers L=8, number of attention heads H=8, maximum sequence length T<sub>max</sub>=1024. The model is parameterized by environment variables (AI_MODEL_DIM, AI_MODEL_LAYERS, AI_MODEL_HEADS, AI_MODEL_MAX_LEN) to support deployment at varying scales.</p>
+
+  <p><strong>II.B. Rotary Position Embeddings (RoPE).</strong> Position information is injected via Rotary Position Embeddings rather than additive absolute or learned positional encodings. Frequency tables are precomputed as:</p>
+  <div class="code-block">theta_i  = 1 / (10000 ^ (2i / D_head))    for i in [0, D_head/2)
+freqs    = outer(t, theta)                 for t in [0, T_max)
+rope_cos = cos(freqs),  rope_sin = sin(freqs)</div>
+  <p>These tables are stored as non-trainable buffers. During the forward pass, for each attention layer, the query and key tensors of shape [B, T, H, D<sub>h</sub>] are transformed as:</p>
+  <div class="code-block">[x1, x2] = split(x, dim=-1)
+x_rope   = concat(x1*c - x2*s,  x1*s + x2*c, dim=-1)</div>
+  <p>where c and s are the cosine and sine tables sliced to the current sequence length T. This transformation encodes relative positional relationships directly into the dot-product attention scores, enabling the model to generalize across sequence lengths.</p>
+
+  <p><strong>II.C. RoPE-Aware Causal Self-Attention.</strong> Each attention layer computes a fused QKV projection: <code>QKV = Linear(D, 3D, bias=False)(x)</code>. QKV is reshaped to [B, T, 3, H, D<sub>h</sub>] and unbound to yield Q, K, V. RoPE is applied to Q and K independently. Attention logits are computed with scale factor 1/√D<sub>h</sub> and a precomputed upper-triangular causal mask (set to −∞ above the diagonal) is added to enforce autoregressive generation.</p>
+
+  <p><strong>II.D. SwiGLU Feed-Forward Network.</strong> Each transformer layer's feed-forward sublayer implements a gated linear unit with Swish activation:</p>
+  <div class="code-block">hidden_dim = round_up_to_multiple_of_64( D * expansion * 2/3 )
+gate_proj  = Linear(D, hidden_dim * 2, bias=False)
+[g, v]     = split(gate_proj(x), dim=-1)
+output     = Linear(hidden_dim, D, bias=False)(silu(g) * v)</div>
+  <p>The two-thirds scaling of hidden dimensions reduces parameter count relative to standard four-times expansion FFNs while maintaining model capacity.</p>
+
+  <p><strong>II.E. Weight Tying and Pre-Normalization.</strong> The output projection head shares weights with the input token embedding matrix, reducing parameter count and improving training stability. Each transformer sub-layer is preceded by LayerNorm (pre-normalization), with residual connections applied after each sub-layer.</p>
+
+  <p><strong>II.F. Control Token Conditioning.</strong> The MaxBooster LM vocabulary is augmented with structured control tokens:</p>
+  <div class="code-block">Platform: &lt;PLATFORM_TIKTOK&gt;, &lt;PLATFORM_INSTAGRAM&gt;, &lt;PLATFORM_YOUTUBE&gt;
+Tone:     &lt;TONE_ENERGETIC&gt;, &lt;TONE_EMOTIONAL&gt;, &lt;TONE_AGGRESSIVE&gt;
+Goal:     &lt;GOAL_GROWTH&gt;, &lt;GOAL_ENGAGEMENT&gt;, &lt;GOAL_AWARENESS&gt;
+Stage:    &lt;STAGE_HOOK&gt;, &lt;STAGE_DROP&gt;, &lt;STAGE_BODY&gt;, &lt;STAGE_CTA&gt;</div>
+  <p>During inference, the applicable control tokens are prepended to the artist idea text, directing the model to generate stage-appropriate marketing copy in the artist's voice.</p>
+
+  <div class="page-footer">
+    <span>© 2026 B-Lawz Music LLC. All Rights Reserved.</span>
+    <span>Page 5</span>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     DETAILED DESCRIPTION — CONTENT DNA & VIDEO STUDIO
+══════════════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="page-header">
+    <span>B-Lawz Music LLC — Patent Application Draft</span>
+    <span>MaxBooster AI Content Generation System</span>
+  </div>
+
+  <div class="subsection-title">III. Content DNA System</div>
+
+  <p><strong>III.A. DNA Parameter Vector.</strong> The Content DNA system maps a tuple (idea, genre, tone) to a normalized seven-dimensional parameter vector:</p>
+  <div class="code-block">DNA = {
+  energy:     float [0,1]  -- kinetic intensity of visuals
+  darkness:   float [0,1]  -- luminance depth
+  warmth:     float [0,1]  -- color temperature axis
+  saturation: float [0,1]  -- chromatic intensity
+  grain:      float [0,1]  -- film grain texture amount
+  complexity: float [0,1]  -- derived: energy*0.7 + saturation*0.3
+  seed:       int          -- deterministic: int(MD5(idea)[:8], 16)
+}</div>
+
+  <p><strong>III.B. Genre-to-DNA Base Mapping.</strong> A lookup table (GENRE_DNA) defines base parameter vectors per music genre. Example: the trap genre maps to energy=0.90, darkness=0.88, warmth=0.25, saturation=0.80, grain=0.30. Tone adjustments (TONE_DELTA) define additive deltas applied on top of genre base values.</p>
+
+  <p><strong>III.C. Palette Derivation.</strong> From the DNA vector, a six-color palette is derived:</p>
+  <div class="code-block">base_hue    = 0.67 - (warmth * 0.55)
+micro_shift = (seed % 31) / 360.0
+bg1, bg2    = gradient endpoints from base_hue + saturation
+accent      = complementary hue: (base_hue + 0.5) % 1.0
+color_grade = categorical tag (vintage | neon | warm | cinematic)</div>
+
+  <p><strong>III.D. Background Motion Type Selection.</strong> Background motion type is selected from a two-dimensional energy/darkness grid: HIGH energy + HIGH darkness → "plasma"; HIGH energy + LOW darkness → "wave"; LOW energy + HIGH darkness → "aurora"; LOW energy + LOW darkness → "radial" or "animated_gradient". Selection is randomized using the deterministic seed.</p>
+
+  <p><strong>III.E. Per-Scene Micro-Variation.</strong> Each scene index <em>idx</em> receives a hue offset: <code>scene_seed = (dna.seed + idx × 17) % 360</code>, producing harmonically related color variation per scene.</p>
+
+  <div class="subsection-title">IV. Video Generation Pipeline (Video Studio)</div>
+
+  <p><strong>IV.A. Scene Text Generation.</strong> The VideoAgent constructs control-token-prefixed prompts and invokes the MaxBooster LM to generate scene text for each stage. Stage count is determined by duration thresholds, supporting short-form (hook/cta) and long-form (hook/build/drop/body/cta/outro) content.</p>
+
+  <p><strong>IV.B. SceneConfig Construction.</strong> Scene text and Content DNA parameters are combined to produce a structured SceneConfig per scene, including background type, colors, texts, font size, y-position, animation type, fade timing, effects (including "breathing" at high energy), vignette intensity (0.35 + darkness × 0.30), and film grain amount (int(grain × 18)).</p>
+
+  <p><strong>IV.C. Parallel Scene Rendering and Compositing.</strong> Scene clips are rendered in parallel using a ThreadPoolExecutor with at most three concurrent workers. DNA-derived transition type is applied during compositing: darkness > 0.70 → "fadeblack"; energy < 0.50 → "dissolve"; otherwise → "fade".</p>
+
+  <p><strong>IV.D. Asynchronous Job Polling API.</strong> Video rendering is exposed as an asynchronous job. <code>POST /video/generate-ai</code> returns a <em>job_id</em>. <code>GET /video-job/{job_id}</code> returns status and the final MP4 URL once rendering completes.</p>
+
+  <div class="subsection-title">V. Multimodal Content Generation Pipeline</div>
+
+  <p><strong>V.A. Input Normalization.</strong> All multimodal requests pass through a normalization step that analyzes the input modality and extracts a canonical representation identifying musical attributes, language style, and platform constraints.</p>
+
+  <p><strong>V.B. Task Planning.</strong> The normalized input is submitted to the MaxBooster LM in "planner" mode, which generates a validated directed acyclic task graph with typed worker steps. The plan specifies worker type, step type, and input sources.</p>
+
+  <p><strong>V.C. Worker Execution Graph.</strong> Steps are executed in dependency order with typed workers (text, image, audio, video), passing prior outputs as inputs to downstream steps.</p>
+
+  <p><strong>V.D. Pack and Slot Definitions.</strong> Hard-coded pack manifests define named campaign types with platform-specific slots such as: cover_image (Instagram), tt_voiceover_audio (TikTok), tt_short_video (TikTok), yt_description_text (YouTube).</p>
+
+  <div class="page-footer">
+    <span>© 2026 B-Lawz Music LLC. All Rights Reserved.</span>
+    <span>Page 6</span>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     DETAILED DESCRIPTION — GPU ENGINE & API KEYS
+══════════════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="page-header">
+    <span>B-Lawz Music LLC — Patent Application Draft</span>
+    <span>MaxBooster AI Content Generation System</span>
+  </div>
+
+  <div class="subsection-title">VI. Simulated GPU Execution Engine</div>
+
+  <p><strong>VI.A. DigitalGPU Architecture.</strong> The DigitalGPU provides a platform-independent execution environment for AI operations without requiring physical GPU hardware. It comprises:</p>
+  <ul>
+    <li><strong>VRAM:</strong> A handle-based allocator mapping integer handle IDs to NumPy arrays with associated shape, dtype, and size metadata.</li>
+    <li><strong>SIMDCore:</strong> A compute unit implementing tiled GEMM (with configurable tile dimensions tile_m, tile_n, tile_k), element-wise ADD, numerically-stable SOFTMAX (per-row maximum subtraction), and batched causal ATTENTION (scaled dot-product with optional upper-triangular mask).</li>
+    <li><strong>OpCode Instruction Set:</strong> GEMM, ADD, SOFTMAX, ATTENTION, GEMM_BIAS_RELU.</li>
+    <li><strong>Scheduler:</strong> Iterates an ordered program of typed instructions, dispatches to SIMDCore, writes results back to VRAM, and records per-instruction wall-clock execution time in a profiling record.</li>
+  </ul>
+
+  <p><strong>VI.B. HyperGPU Backend Abstraction.</strong> The HyperGPU provides a higher-level backend for more realistic mixed-precision training simulation, including a flash-attention primitive (configurable block_size=32), mixed-precision linear layers, and GELU-activated feed-forward networks. This dual-engine approach enables profiling of both instruction-level compute costs (DigitalGPU) and realistic training dynamics (HyperGPU) on standard CPU hardware.</p>
+
+  <div class="subsection-title">VII. API Key Management System</div>
+
+  <p><strong>VII.A. Key Structure and Storage.</strong> API keys are generated with a human-readable prefix ("mbs_") followed by a cryptographically random suffix. Keys are stored as SHA-256 hex digests (key_hash) with associated prefix, scope array (["read", "write", "train", "generate", "admin"]), is_active flag, request_count, and temporal metadata (created_at, last_used_at, expires_at). The raw key is returned to the user exactly once and never persisted.</p>
+
+  <p><strong>VII.B. Authentication Flow.</strong> On each API request: (1) extract raw key from X-Api-Key or X-Admin-Key header; (2) if the raw key matches ADMIN_KEY or AI_TRAINING_KEY_PROD environment variables, return a synthetic full-scope record (env bypass); (3) otherwise, compute SHA-256(raw_key) and query for an active, non-expired record; (4) if found, increment request_count and update last_used_at; (5) enforce required scope via dependency injection.</p>
+
+  <p><strong>VII.C. Key Lifecycle Operations.</strong> Create: generate random key, compute hash/prefix, insert record, return raw key once. Rotate: generate new key, update hash/prefix, preserve scopes/metadata, immediately invalidate prior key hash. Revoke: set is_active=FALSE, preserving usage telemetry.</p>
+
+  <p><strong>VII.D. Header Propagation.</strong> The Node.js API Server propagates X-Api-Key and X-Admin-Key headers to the Python AI Training Server, ensuring scope enforcement occurs at the authoritative backend layer regardless of which tier the request enters.</p>
+
+  <div class="page-footer">
+    <span>© 2026 B-Lawz Music LLC. All Rights Reserved.</span>
+    <span>Page 7</span>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     CLAIMS
+══════════════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="page-header">
+    <span>B-Lawz Music LLC — Patent Application Draft</span>
+    <span>MaxBooster AI Content Generation System</span>
+  </div>
+
+  <div class="section-title">Claims</div>
+  <p><strong>What is claimed is:</strong></p>
+
+  <div class="claim">
+    <span class="claim-number">1.</span> A computer-implemented system for AI-driven multimodal content generation for music artists, comprising:
+    <div class="claim-body">
+      a) at least one processor;<br/>
+      b) at least one non-transitory computer-readable medium storing instructions that, when executed by the at least one processor, cause the system to:
+      <div class="claim-indent-1">
+        i) receive an artist input comprising at least an idea, a musical genre, a tonal descriptor, and a target platform;<br/>
+        ii) derive a Content DNA parameter vector from the musical genre and tonal descriptor, wherein the Content DNA parameter vector comprises at least energy, darkness, warmth, saturation, grain, complexity, and seed dimensions;<br/>
+        iii) generate scene text using a decoder-only transformer language model conditioned on control tokens encoding the target platform, tonal descriptor, and scene stage;<br/>
+        iv) map the Content DNA parameter vector to rendering parameters comprising at least a color palette, a background motion type, scene timing weights, typography sizing, and film grain intensity;<br/>
+        v) render a plurality of video scenes in parallel using the generated scene text and the rendering parameters; and<br/>
+        vi) composite the rendered video scenes into a single video file using a transition type determined by the energy and darkness dimensions of the Content DNA parameter vector.
+      </div>
+    </div>
+  </div>
+
+  <div class="claim">
+    <span class="claim-number">2.</span> The system of claim 1, wherein the decoder-only transformer language model employs Rotary Position Embeddings (RoPE) applied to query and key projections of a multi-head self-attention mechanism via precomputed cosine and sine frequency tables derived from the formula theta_i = 1 / (base^(2i/D_head)).
+  </div>
+
+  <div class="claim">
+    <span class="claim-number">3.</span> The system of claim 2, wherein the decoder-only transformer language model further employs a SwiGLU feed-forward network wherein the hidden dimension is set to two-thirds of the product of the embedding dimension and an expansion factor, rounded up to the nearest multiple of sixty-four.
+  </div>
+
+  <div class="claim">
+    <span class="claim-number">4.</span> The system of claim 3, wherein an output projection matrix of the decoder-only transformer language model shares weights with an input token embedding matrix.
+  </div>
+
+  <div class="claim">
+    <span class="claim-number">5.</span> The system of claim 1, wherein deriving the Content DNA parameter vector further comprises:
+    <div class="claim-body">
+      a) looking up genre-specific base parameter values from a genre-to-DNA mapping;<br/>
+      b) applying additive tonal adjustment deltas from a tone-to-delta mapping;<br/>
+      c) computing a deterministic seed from a hash of the artist idea text; and<br/>
+      d) computing a complexity parameter as a weighted sum of the energy and saturation dimensions.
+    </div>
+  </div>
+
+  <div class="claim">
+    <span class="claim-number">6.</span> The system of claim 1, wherein mapping the Content DNA parameter vector to a background motion type comprises selecting a motion type from a plurality of candidate types based on a two-dimensional energy and darkness grid, wherein the selection is further randomized using the deterministic seed dimension of the Content DNA parameter vector.
+  </div>
+
+  <div class="claim">
+    <span class="claim-number">7.</span> The system of claim 1, wherein the rendering parameters further comprise per-scene micro-variation computed as a hue offset equal to the product of a scene index and a fixed offset constant modulo three hundred sixty, added to the deterministic seed dimension.
+  </div>
+
+  <div class="claim">
+    <span class="claim-number">8.</span> The system of claim 1, wherein parallel rendering of the plurality of video scenes is performed by a thread-pool executor with at most three concurrent rendering workers.
+  </div>
+
+  <div class="claim">
+    <span class="claim-number">9.</span> The system of claim 1, further comprising an asynchronous job management system wherein the rendering of the video file is initiated by a first API request returning a job identifier, and the completion status and output URL are retrievable via a second API request parameterized by the job identifier.
+  </div>
+
+  <div class="claim">
+    <span class="claim-number">10.</span> A computer-implemented system for multimodal content generation comprising a planner-executor pipeline, the system comprising:
+    <div class="claim-body">
+      a) a normalization module configured to receive an artist input and produce a canonical normalized representation;<br/>
+      b) a planning module configured to invoke a language model in planner mode to generate a directed task graph comprising typed worker steps selected from text generation, image generation, audio generation, and video generation;<br/>
+      c) an execution module configured to execute the typed worker steps in dependency order; and<br/>
+      d) an assembly module configured to collect typed asset outputs into a structured multimodal package keyed by platform-specific content slots.
+    </div>
+  </div>
+
+  <div class="page-footer">
+    <span>© 2026 B-Lawz Music LLC. All Rights Reserved.</span>
+    <span>Page 8</span>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     CLAIMS CONTINUED
+══════════════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="page-header">
+    <span>B-Lawz Music LLC — Patent Application Draft</span>
+    <span>MaxBooster AI Content Generation System</span>
+  </div>
+
+  <div class="claim">
+    <span class="claim-number">11.</span> The system of claim 10, wherein the planning module validates the generated task graph against a schema requiring each step to specify a step type, a worker type, and an input source selected from normalized input or a prior step identifier.
+  </div>
+
+  <div class="claim">
+    <span class="claim-number">12.</span> The system of claim 10, wherein the platform-specific content slots are defined by a pack manifest mapping campaign types to ordered lists of platform slots, each slot specifying a modality, target platform, and content purpose.
+  </div>
+
+  <div class="claim">
+    <span class="claim-number">13.</span> A simulated GPU execution engine for platform-independent execution of artificial intelligence inference operations, comprising:
+    <div class="claim-body">
+      a) a virtual memory allocator (VRAM) configured to store numerical arrays indexed by integer handle identifiers with associated shape, data type, and byte size metadata;<br/>
+      b) a compute core configured to execute at least the following operations:
+      <div class="claim-indent-1">
+        i) tiled general matrix multiplication (GEMM);<br/>
+        ii) element-wise tensor addition (ADD);<br/>
+        iii) numerically-stable softmax normalization (SOFTMAX); and<br/>
+        iv) batched causal self-attention (ATTENTION) comprising scaled dot-product computation with optional upper-triangular mask application;
+      </div>
+      c) an instruction scheduler configured to execute an ordered program of typed instructions, writing results back to the virtual memory allocator, and recording per-instruction wall-clock execution time in a profiling record.
+    </div>
+  </div>
+
+  <div class="claim">
+    <span class="claim-number">14.</span> The engine of claim 13, further comprising a higher-level backend abstraction layer implementing flash-attention operations with configurable block size and mixed-precision linear layer primitives, enabling simulation of training dynamics with reduced numerical precision.
+  </div>
+
+  <div class="claim">
+    <span class="claim-number">15.</span> A method for securing access to artificial intelligence generation endpoints using a scoped hash-based API key management system, the method comprising:
+    <div class="claim-body">
+      a) generating a cryptographically random API key comprising a human-readable prefix and a random suffix;<br/>
+      b) computing a cryptographic hash of the API key and storing the hash together with a key prefix, an array of authorized capability scopes, an active status flag, a usage counter, and temporal metadata in a relational database;<br/>
+      c) discarding the raw API key after returning it to the requesting party exactly once;<br/>
+      d) upon receipt of an API request, extracting a raw key from a request header, computing its cryptographic hash, and querying the database for a matching active, non-expired record;<br/>
+      e) upon a successful match, enforcing that the stored scope array contains the scope required by the requested endpoint;<br/>
+      f) incrementing the usage counter and recording the access timestamp; and<br/>
+      g) bypassing database lookup when the raw key matches a pre-authorized administrative key stored in a secure environment variable.
+    </div>
+  </div>
+
+  <div class="claim">
+    <span class="claim-number">16.</span> The method of claim 15, further comprising: rotating a key by generating a new random key and marking the prior key record as inactive in a single atomic operation; and revoking a key by setting its active status flag to false without deleting the key record, preserving usage telemetry.
+  </div>
+
+  <div class="claim">
+    <span class="claim-number">17.</span> The method of claim 15, wherein cryptographic hashing uses the SHA-256 algorithm, and wherein the key prefix stored in the database comprises the first twelve characters of the raw key.
+  </div>
+
+  <div class="claim">
+    <span class="claim-number">18.</span> The system of claim 1, wherein the control tokens conditioning the decoder-only transformer language model comprise at least one token selected from platform control tokens, tonal descriptor tokens, goal tokens, and scene-stage tokens, prepended to the artist idea text to form a conditioned generation prompt.
+  </div>
+
+  <div class="claim">
+    <span class="claim-number">19.</span> A non-transitory computer-readable medium storing instructions that, when executed by at least one processor, implement an end-to-end AI content generation platform for music artists, the instructions causing the processor to: (a) maintain a trained decoder-only transformer language model with rotary position embeddings, SwiGLU feed-forward sublayers, and control-token conditioning; (b) derive a Content DNA vector from musical genre and tonal descriptors; (c) generate platform-specific content across text, image, audio, and video modalities via a planner-directed worker pipeline; (d) render video content with DNA-derived parameters and transitions; (e) simulate GPU execution environments via instruction-scheduled virtual compute cores; and (f) authenticate all generation requests via a scoped, hash-based API key system with key rotation and revocation.
+  </div>
+
+  <div class="claim">
+    <span class="claim-number">20.</span> The medium of claim 19, wherein the platform further exposes a web-based dashboard enabling an artist or developer to manage API keys, monitor GPU cluster simulation status, inspect model training state, and operate the video generation studio through a browser-based interface without requiring installation of local software.
+  </div>
+
+  <div class="page-footer">
+    <span>© 2026 B-Lawz Music LLC. All Rights Reserved.</span>
+    <span>Page 9</span>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     ABSTRACT & DECLARATION
+══════════════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="page-header">
+    <span>B-Lawz Music LLC — Patent Application Draft</span>
+    <span>MaxBooster AI Content Generation System</span>
+  </div>
+
+  <div class="section-title">Abstract</div>
+  <div class="abstract-box">
+    <p>An end-to-end artificial intelligence platform for music artist content generation comprising: (1) a decoder-only transformer language model implementing Rotary Position Embeddings (RoPE) and SwiGLU feed-forward networks with control-token conditioning for music-domain text generation; (2) a Content DNA system that deterministically derives a seven-dimensional visual parameter vector from musical genre and tonal inputs and maps it to color palettes, background motion types, scene timing weights, and rendering constants; (3) a video generation pipeline that generates stage-structured scene text, renders scenes in parallel, and composites them with DNA-derived transitions into MP4 outputs via an asynchronous job API; (4) a multimodal content generation pipeline employing a planner-executor architecture to coordinate text, image, audio, and video generation workers into platform-slot-keyed asset packages; (5) a simulated GPU execution engine with VRAM allocation, tiled GEMM, causal attention, and instruction-level profiling for platform-independent AI workload simulation; and (6) a scoped hash-based API key management system with SHA-256 storage, scope enforcement, usage telemetry, and key rotation and revocation primitives.</p>
+  </div>
+
+  <div class="section-title" style="margin-top: 28pt;">Inventor Declaration and Assignment</div>
+
+  <p>I hereby declare that:</p>
+  <p>(a) Each claim in this application is fully supported by the specification and drawings.</p>
+  <p>(b) I am the original and sole/joint inventor(s) of the subject matter claimed herein and for which a patent is sought.</p>
+  <p>(c) I acknowledge the duty to disclose information which is material to patentability as defined in 37 C.F.R. § 1.56.</p>
+  <p>(d) I hereby assign all right, title, and interest in and to this invention and the patent application to <strong>B-Lawz Music LLC</strong>, a limited liability company, its successors and assigns.</p>
+
+  <br/>
+
+  <div class="sig-line"></div>
+  <div class="sig-label">Inventor Name (Print)</div>
+
+  <div class="sig-line"></div>
+  <div class="sig-label">Title / Role</div>
+
+  <div class="sig-line"></div>
+  <div class="sig-label">Signature</div>
+
+  <div class="sig-line" style="width: 35%;"></div>
+  <div class="sig-label">Date (MM/DD/YYYY)</div>
+
+  <br/>
+  <p><strong>On Behalf of:</strong> B-Lawz Music LLC</p>
+  <div class="sig-line"></div>
+  <div class="sig-label">Registered Address</div>
+  <div class="sig-line"></div>
+  <div class="sig-label">City, State, ZIP</div>
+
+  <div style="margin-top: 28pt; text-align: center; border-top: 2px double #000; padding-top: 10pt;">
+    <div class="confidential-banner">— End of Patent Application Draft — B-Lawz Music LLC © 2026 —</div>
+  </div>
+
+  <div class="page-footer">
+    <span>© 2026 B-Lawz Music LLC. All Rights Reserved.</span>
+    <span>Page 10</span>
+  </div>
+</div>
+
+</body>
+</html>

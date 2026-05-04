@@ -6,3 +6,9 @@ id = "mcWTj-f9X408SoicFRPOZ"
 uri = "file://MaxBooster_Patent_Application.md"
 type = "text"
 title = "MaxBooster AI — Patent Application (B-Lawz Music LLC)"
+
+[[outputs]]
+id = "5zRFfUhIxeCBXuMZY7uob"
+uri = "file://BLawzMusicLLC_MaxBooster_Patent_Application.pdf"
+type = "pdf"
+title = "B-Lawz Music LLC — MaxBooster Patent Application (Official PDF)"
