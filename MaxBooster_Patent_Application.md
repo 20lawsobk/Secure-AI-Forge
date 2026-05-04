@@ -14,7 +14,8 @@ any other patent authority.
 
 APPLICATION NUMBER:    [TO BE ASSIGNED]
 FILING DATE:           [TO BE FILED]
-APPLICANT:             [INVENTOR / ENTITY NAME]
+APPLICANT:             B-Lawz Music LLC
+ASSIGNEE:              B-Lawz Music LLC
 ATTORNEY DOCKET NO.:   [TO BE ASSIGNED]
 
 ================================================================================
@@ -751,7 +752,7 @@ and key rotation and revocation primitives.
 
 ================================================================================
 
-INVENTOR DECLARATION
+INVENTOR DECLARATION AND ASSIGNMENT
 
 I hereby declare that:
 
@@ -764,9 +765,18 @@ I hereby declare that:
 (c) I acknowledge the duty to disclose information which is material to
     patentability as defined in 37 C.F.R. § 1.56.
 
+(d) I hereby assign all right, title, and interest in and to this invention
+    and the patent application to B-Lawz Music LLC, a limited liability
+    company, its successors and assigns.
+
 Inventor Name: ___________________________
+Title/Role:    ___________________________
 Signature:     ___________________________
 Date:          ___________________________
+
+On Behalf of:  B-Lawz Music LLC
+Address:       ___________________________
+               ___________________________
 
 ================================================================================
 END OF PATENT APPLICATION DRAFT
