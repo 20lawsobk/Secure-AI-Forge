@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "mcWTj-f9X408SoicFRPOZ"
+uri = "file://MaxBooster_Patent_Application.md"
+type = "text"
+title = "MaxBooster AI — Patent Application Draft"
