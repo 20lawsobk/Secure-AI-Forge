@@ -1,258 +1,67 @@
-# MaxBooster AI Training Server
+# MaxBooster (MaxCore AI)
 
-## Overview
+A production-grade AI content generation and training platform for music artists that generates multi-platform social media content (text, images, video) powered by a custom in-house Transformer model.
 
-Production-grade AI model training server with a custom-built transformer model, GPU simulation engine, multi-platform content generation, and in-house API key management. No external AI APIs used — everything is built from scratch.
+## Run & Operate
 
-### Video Studio (InVideo-like rendering system)
-A full generative video pipeline with no predefined templates. Every video's visual style is derived fresh from content DNA computed from genre/tone/idea:
-- `ai_model/video/ai_scene_builder.py` — generates SceneConfig objects from VisualDNA (energy, darkness, warmth, saturation, grain). Produces unique hex colour palettes, selects background type, effects, typography per-video.
-- `ai_model/video/cinematic_engine.py::render_cinematic_open()` — template-free rendering path that takes pre-built scenes directly.
-- `ai_model/video/video_agent.py::build_open_scenes()` — converts VideoProduction into SceneConfigs via ai_scene_builder.
-- Dashboard route `/video` — Video Studio page with concept panel, editable scene cards, Visual DNA bars, render progress, and in-page video player.
+- **Main workflow**: `Start application` — starts both the API server (port 8080) and the Vite dev dashboard (port 5000)
+- **AI Training Server**: separate workflow running the Python FastAPI server on port 9878
+- **DB migration**: `pnpm --filter @workspace/db push` (interactive) or `push-force`
+- **Build for production**: `pnpm run build:production`
+- **Production start**: `pnpm start` (serves built dashboard via API server)
 
-Part of a tri-app music artist platform:
-1. **This server** — AI training + platform inference API
-2. **Storage server** — 7TB training dataset (`pocketdimensionstorage.replit.app`)
-3. **Main music platform** — DAW, beat marketplace, social media management, music distribution
+Required env vars: `DATABASE_URL`, `PORT`, `MODEL_API_PORT`, `ADMIN_KEY`, `STORAGE_CONNECTION_URL`, `STORAGE_HTTP_URL`, `STORAGE_BEARER_TOKEN`, `AI_TRAINING_KEY_PROD`
 
 ## Stack
 
-- **Monorepo tool**: pnpm workspaces
-- **Node.js version**: 24
-- **Package manager**: pnpm
-- **TypeScript version**: 5.9
-- **API framework**: Express 5 (proxy/orchestration layer)
-- **AI Server**: Python 3.11 + FastAPI + Uvicorn (custom transformer model)
-- **Database**: PostgreSQL + Drizzle ORM (TypeScript) + psycopg2 (Python)
-- **Validation**: Zod (zod/v4), drizzle-zod
-- **API codegen**: Orval (from OpenAPI spec)
-- **Build**: esbuild (CJS bundle)
-- **Frontend**: React + Vite (TypeScript)
+- **Frontend**: React 19, Vite 7, Tailwind CSS v4, Radix UI, TanStack Query, Framer Motion, Wouter
+- **API Server**: Express 5, TypeScript, tsx (dev) / esbuild (prod), Drizzle ORM
+- **AI Engine**: Python 3.11, FastAPI, PyTorch (custom Transformer), NumPy GPU simulation, Pillow, FFmpeg
+- **Database**: PostgreSQL via Drizzle ORM (drizzle-kit for migrations)
+- **Package manager**: pnpm (workspace monorepo)
 
-## Architecture
+## Where things live
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  Main Music Platform (DAW, Beat Marketplace, Social, Distro)     │
-│  Calls → /api/platform/* endpoints                               │
-└─────────────────────────────┬───────────────────────────────────┘
-                              │
-┌─────────────────────────────▼───────────────────────────────────┐
-│  User Browser  (React Dashboard at port 20060 / /)               │
-└─────────────────────────────┬───────────────────────────────────┘
-                              │ /api/*
-┌─────────────────────────────▼───────────────────────────────────┐
-│  Express API Server  (port 8080)                                  │
-│  - Proxy routes to Python AI server                               │
-│  - /api/platform/*, /api/training/*, /api/storage/*, etc.         │
-└─────────────────────────────┬───────────────────────────────────┘
-                              │ localhost:9878
-┌─────────────────────────────▼───────────────────────────────────┐
-│  Python FastAPI AI Training Server  (port 9878)                   │
-│  - Custom Transformer LM (RoPE attention, dim=512, 8 layers)      │
-│  - Platform API (/platform/social, /platform/daw, /platform/dist) │
-│  - Creative generation agents (Script, Visual, Distribution)      │
-│  - HyperGPU + Digital GPU simulation engine                       │
-│  - API key management with PostgreSQL                             │
-│  - Training orchestration (background threads)                    │
-│  - Storage pipeline (pull 7TB dataset from storage server)        │
-│  - Auto-loads latest checkpoint from storage on boot              │
-└──────────┬──────────────────────────────────────────────────────┘
-           │                                │
-┌──────────▼──────────┐     ┌──────────────▼──────────────────────┐
-│  PostgreSQL Database │     │  MaxBooster Storage Server           │
-│  - api_keys          │     │  pocketdimensionstorage.replit.app   │
-│  - training_logs     │     │  Instance: e50d64e610d37dd52ce85711  │
-│  - request_logs      │     │  7TB training dataset (pending)      │
-└─────────────────────┘     │  Keys: mbs:training:session,         │
-                            │        mbs:data, mbs:downloads, etc.  │
-                            └──────────────────────────────────────┘
-```
+- `artifacts/ai-dashboard/` — React frontend
+- `artifacts/api-server/` — Express orchestration/proxy layer
+- `artifacts/ai-training-server/` — Python FastAPI AI engine
+- `lib/db/` — Drizzle schema & DB client (source of truth: `lib/db/src/schema/`)
+- `lib/api-client-react/` — Generated TypeScript API client
+- `lib/api-spec/openapi.yaml` — API contract
+- `artifacts/ai-training-server/ai_model/` — Custom Transformer, GPU sim, video renderer
 
-### Data Flow: Storage → Training → Platform
+## Architecture decisions
 
-```
-Storage server (7TB) ──► POST /training/start-from-storage
-                               │
-                               ▼
-                     TrainingDataPipeline.stream_batches()
-                     Pulls: mbs:data, mbs:downloads, mbs:session
-                               │
-                               ▼
-                     CurriculumTrainer feeds TransformerLM
-                     (with per-user engagement signal bias)
-                               │
-                               ▼
-                     Checkpoint saved to storage + local disk
-                               │
-                               ▼
-                     Main platform calls /platform/* endpoints
-                     Model generates personalized content
-```
+- **Frontend proxies to API**: Vite dev server proxies `/api` and `/uploads` to the Express API server (port 8080), which in turn proxies to the Python server (port 9878). No CORS issues.
+- **API server manages Python lifecycle**: The Node.js API server spawns and monitors the Python AI server as a child process with exponential backoff restarts.
+- **No external AI APIs**: All AI inference uses the in-house custom Transformer with Digital GPU simulation (NumPy SIMD) for CPU-safe operation.
+- **In-process storage fallback**: If the pdim storage server is offline, the AI server operates in local-only mode transparently.
+- **Single external port**: Port 5000 → port 80 externally. In production, the API server serves the built React SPA directly.
 
-## Structure
+## Product
 
-```text
-artifacts/
-├── ai-training-server/         # Python FastAPI AI server
-│   ├── server.py               # Main entry point + API key mgmt + platform endpoints
-│   ├── storage_client.py       # Storage server client (Redis-like HTTP exec API)
-│   │                           # StorageClient, TrainingDataPipeline,
-│   │                           # DatasetStreamClient, ModelCheckpointClient, CurriculumStateClient
-│   ├── ai_model/               # Custom ML model code
-│   │   ├── model/              # Transformer LM, tokenizer, creative model
-│   │   ├── agents/             # Script, VisualSpec, Distribution, Optimization agents
-│   │   ├── gpu/                # Digital GPU + HyperGPU simulation
-│   │   ├── boostsheets/        # BoostSheet CRUD
-│   │   └── weights/            # Model weights (model.pt saved here after training)
-│   └── admin_key.txt           # Auto-generated admin key (first run)
-├── ai-dashboard/               # React dashboard (port 20060 at /)
-│   └── src/pages/              # Dashboard, API Keys, Training, GPU, Content, Model
-├── api-server/                 # Express proxy server (port 8080 at /api)
-│   └── src/routes/model-proxy.ts  # All proxy routes including /platform/*
-lib/
-├── api-spec/openapi.yaml       # OpenAPI 3.1 contract
-├── api-client-react/           # Generated React Query hooks
-├── api-zod/                    # Generated Zod schemas
-└── db/                         # Drizzle schema (api_keys, training_logs, request_logs)
-```
+- System overview dashboard with live GPU, model, and training metrics
+- API key management (create, rotate, delete)
+- Training controls (start/stop, continuous training, data puller)
+- Multi-platform content generation (TikTok, Instagram, YouTube, etc.)
+- Video Studio for AI-generated video content
+- Generators for social content, DAW scripts, distribution plans
+- Watchdog system health monitoring
 
-## API Key Management
+## User preferences
 
-- Keys stored as SHA-256 hashes in PostgreSQL — raw key never stored
-- Admin key pinned via `ADMIN_KEY` env var (same value in dev and production)
-- `X-Admin-Key` header for admin operations; `X-Api-Key` for regular access
-- Scopes: `read`, `write`, `train`, `admin`, `generate`
-- Admin key: `mbs_8a3edbac97ff333dda5068410227267e6d85b14a4c9caee279fbb18ddfb47edc`
+_Populate as you build_
 
-## Multimodal Generation System
+## Gotchas
 
-One request in → platform-aware pack out with text, image, audio, and video — all grounded by the MaxCore model.
+- Always use `pnpm` (not npm/yarn) — the preinstall script enforces this
+- The `Start application` workflow starts both API server (bg) and dashboard together
+- DB push is interactive by default; use `push-force` flag or pipe `""` to auto-select
+- Python typecheck (mypy) has known non-blocking type errors — these are warnings, not blockers
+- Storage warnings about "pdim storage offline" are expected in dev; the system falls back gracefully
 
-### Architecture
+## Pointers
 
-```
-POST /api/multimodal/generate
-        │
-        ▼
-Express Orchestrator (multimodal.ts)
-        │
-        ├─► POST /analyze              → unified semantic representation
-        ├─► POST /generate/text        → mode=planner: TaskPlan | mode=content: text assets
-        ├─► POST /generate/image       → image asset specs per slot
-        ├─► POST /generate/audio       → voiceover/audio asset specs per slot
-        └─► POST /generate/video       → video asset packs per slot
-                │
-                ▼
-        Python AI Server (port 9878) — applies platform rules + MaxCore model
-```
-
-### Key Files
-- `artifacts/api-server/src/routes/multimodal.ts` — TS orchestrator: types, pack definitions, workers, `handleGeneration`
-- `artifacts/api-server/src/platform_rules.json` — per-platform rules (char limits, aspect ratios, durations, hashtags)
-- `artifacts/ai-training-server/server.py` — maxcore endpoints: `/analyze`, `/generate/text`, `/generate/image`, `/generate/audio`, `/generate/video`
-
-### Packs (packId)
-| Pack | Slots | Modalities |
-|------|-------|------------|
-| `singlereleasefull_pack` | 14 | text, image, audio, video |
-| `announcement_pack` | 7 | text, image |
-| `tourdates_pack` | 8 | text, image, video |
-| `evergreenbrand_pack` | 7 | text, image, audio |
-
-### Platforms
-`facebook`, `instagram`, `threads`, `tiktok`, `youtube`, `google_business`, `linkedin`
-
-### Input Modalities
-`text`, `url`, `image`, `audio`, `video`
-
-### Discovery
-- `GET /api/multimodal/packs` — list all packs, modalities, platform rules
-
-### Example Request
-```json
-POST /api/multimodal/generate
-{
-  "id": "req_123",
-  "userId": "artist_42",
-  "input": { "modality": "text", "payload": "New single dropping Friday" },
-  "platforms": ["instagram", "tiktok", "youtube"],
-  "packId": "singlereleasefull_pack",
-  "intent": "singlereleaseannouncement",
-  "constraints": { "styleTags": ["cinematic", "emotional"] }
-}
-```
-
-### Video Generation (platform endpoint)
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/platform/video/generate` | Schema discovery — parameters + response shape |
-| POST | `/api/platform/video/generate` | Generate full video pack per user (personalized via curriculum) |
-
-## Platform API Endpoints (for main music platform)
-
-All routes accessible via Express proxy at `/api/...`:
-
-### Social Media Management
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/platform/social/generate` | Generate N variants of a social post, personalized by user engagement history |
-| POST | `/api/platform/social/autopilot` | Analyse past performance → recommend next content strategy + post schedule |
-
-### DAW / Studio
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/platform/daw/generate` | Generate lyrics, hooks, beat descriptions, or track concepts |
-
-### Music Distribution
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/platform/distribution/plan` | Generate release strategy across Spotify, Apple Music, Tidal, etc. |
-
-### Model Management
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/platform/model/info` | Current model state, training stats, storage connection |
-| POST | `/api/platform/model/reload` | Hot-reload latest checkpoint from storage server |
-
-### Training & Storage
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/training/start-from-storage` | Pull 7TB dataset from storage → train model in background |
-| GET | `/api/storage/session` | View active 7TB training session from storage server |
-| GET | `/api/storage/pipeline/status` | Live training pipeline progress |
-| GET | `/api/storage/status` | Storage server connection health |
-| POST | `/api/storage/feedback` | Record per-user engagement signal (curriculum training bias) |
-| GET | `/api/storage/curriculum/:userId` | Get user's engagement history + top-performing content |
-
-## Storage Server Credentials
-
-- **URL**: `https://pocketdimensionstorage.replit.app/api/redis/instances/f26378c8b4faf9f237a0f816/exec`
-- **Token**: `mbs_373a1368ba359b15860701559d3a7c8f91e04f3afc44577de0c8efa0430bb982`
-- **Exec format**: `{"cmd": "KEYS", "args": ["*"]}` (not `{"command": [...]}`)
-- **Session**: `sess-1773450967978` — 7TB (`7,696,581,394,432 bytes`), state: `pending`
-- Env vars: `STORAGE_HTTP_URL`, `STORAGE_BEARER_TOKEN`, `STORAGE_CONNECTION_URL`
-- **pdim instance**: `f26378c8b4faf9f237a0f816` (updated from `e50d64e610d37dd52ce85711`)
-
-## Custom AI Model
-
-- **Transformer LM** with RoPE (Rotary Position Embeddings) self-attention
-- **Creative Model wrapper** — nucleus sampling, top-k/p, temperature, repetition penalty
-- **Digital GPU** — custom SIMD compute engine with tiled GEMM, softmax, flash attention
-- **HyperGPU** — tensor core simulation (512 lanes, 8 tensor cores, mixed precision)
-- **Agents**: ScriptAgent, VisualSpecAgent, DistributionAgent, OptimizationAgent
-- **No external AI APIs** — everything runs locally
-
-## Workflows
-
-- `artifacts/ai-dashboard: web` — React dashboard (port 20060, user-facing)
-- `artifacts/api-server: API Server` — Express proxy/orchestration (port 8080)
-- `AI Training Server` — Python FastAPI model server (port 9878)
-
-## Running
-
-- `pnpm run build` — build everything
-- `pnpm run typecheck` — full type check
-- `pnpm --filter @workspace/db run push` — push DB schema changes
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API client/zod from OpenAPI spec
+- Workflows skill: `.local/skills/workflows/SKILL.md`
+- Package management: `.local/skills/package-management/SKILL.md`
+- Database skill: `.local/skills/database/SKILL.md`
