@@ -10,8 +10,8 @@ const app: Express = express();
 app.set("trust proxy", 1);
 
 const limiter = rateLimit({
-  windowMs: 1000,
-  limit: 120_000_000,
+  windowMs: 60_000,
+  limit: 300,
   standardHeaders: "draft-8",
   legacyHeaders: false,
   message: { error: "Rate limit exceeded. Please try again shortly." },

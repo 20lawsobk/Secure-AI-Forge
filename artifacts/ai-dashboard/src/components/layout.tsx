@@ -12,7 +12,7 @@ import {
   LogOut,
   ChevronRight,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "framer-motion";
 import { useAuth } from "@/hooks/use-auth";
@@ -37,6 +37,17 @@ const navItems = [
   { href: "/model", label: "Model Status", icon: Settings },
 ];
 
+function getPageTitle(location: string): string {
+  if (location === "/") return "Overview";
+  const item = navItems.find((n) => n.href === location);
+  if (item) return item.label;
+  return location
+    .replace("/", "")
+    .split("-")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
 export function Layout({ children }: { children: React.ReactNode }) {
   const [location] = useLocation();
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
@@ -51,16 +62,27 @@ export function Layout({ children }: { children: React.ReactNode }) {
       if (!res.ok) return null;
       return res.json();
     },
-    refetchInterval: 60000,
-    staleTime: 30000,
+    refetchInterval: 60_000,
+    staleTime: 30_000,
   });
 
   const serverVersion = health?.version ?? "…";
 
-  const handleSaveKey = () => {
-    setAdminKey(keyInput);
+  const handleSaveKey = useCallback(() => {
+    if (!keyInput.trim()) return;
+    setAdminKey(keyInput.trim());
     setIsAuthDialogOpen(false);
-  };
+    setKeyInput("");
+  }, [keyInput, setAdminKey]);
+
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (e.key === "Enter") handleSaveKey();
+    },
+    [handleSaveKey],
+  );
+
+  const pageTitle = getPageTitle(location);
 
   return (
     <div className="min-h-screen bg-background flex overflow-hidden selection:bg-primary/30">
@@ -160,14 +182,13 @@ export function Layout({ children }: { children: React.ReactNode }) {
               size="icon"
               onClick={() => setIsSidebarOpen(!isSidebarOpen)}
               className="text-muted-foreground hover:text-white"
+              aria-label="Toggle sidebar"
             >
               <Menu className="w-5 h-5" />
             </Button>
-            <div className="h-4 w-px bg-border"></div>
-            <h2 className="text-sm font-medium text-muted-foreground capitalize">
-              {location === "/"
-                ? "Overview"
-                : location.replace("/", "").replace("-", " ")}
+            <div className="h-4 w-px bg-border" />
+            <h2 className="text-sm font-medium text-muted-foreground">
+              {pageTitle}
             </h2>
           </div>
 
@@ -181,7 +202,6 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
         {/* Page Content Scroll Area */}
         <div className="flex-1 overflow-auto relative">
-          {/* Abstract background mesh */}
           <div
             className="absolute inset-0 pointer-events-none opacity-[0.03] mix-blend-screen z-0"
             style={{
@@ -196,7 +216,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
               key={location}
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.3 }}
+              transition={{ duration: 0.25 }}
             >
               {children}
             </motion.div>
@@ -223,7 +243,9 @@ export function Layout({ children }: { children: React.ReactNode }) {
               placeholder="Enter Admin Key..."
               value={keyInput}
               onChange={(e) => setKeyInput(e.target.value)}
+              onKeyDown={handleKeyDown}
               className="bg-black/50 border-white/10 focus:border-primary text-white"
+              autoFocus
             />
           </div>
           <DialogFooter>
@@ -232,6 +254,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
             </Button>
             <Button
               onClick={handleSaveKey}
+              disabled={!keyInput.trim()}
               className="bg-primary hover:bg-primary/90 text-primary-foreground shadow-lg shadow-primary/20"
             >
               Save Key

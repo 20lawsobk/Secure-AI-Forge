@@ -6,22 +6,7 @@ import { Cpu, Server, Activity, ArrowUpRight, Zap } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Progress } from "@/components/ui/progress";
 import { Card } from "@/components/ui/card";
-
-function formatOps(ops: number | undefined): string {
-  if (ops == null) return "—";
-  if (ops >= 1e12) return `${(ops / 1e12).toFixed(2)}T`;
-  if (ops >= 1e9) return `${(ops / 1e9).toFixed(2)}G`;
-  if (ops >= 1e6) return `${(ops / 1e6).toFixed(2)}M`;
-  return String(ops);
-}
-
-function formatUptime(seconds: number | undefined): string {
-  if (seconds == null) return "—";
-  if (seconds >= 3600)
-    return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
-  if (seconds >= 60) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-  return `${seconds}s`;
-}
+import { formatOps, formatUptime } from "@/lib/format";
 
 export default function GpuStatus() {
   const { data: gpu, isLoading: gpuLoading } = useGetGpuStatus();

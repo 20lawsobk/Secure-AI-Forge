@@ -571,24 +571,53 @@ async function handleGeneration(
 
   const stepOutputs = new Map<string, GeneratedAsset[]>();
 
-  for (const step of plan.steps) {
-    if (step.type === "analyze") continue;
+  // Separate steps into dependency tiers so independent work runs in parallel.
+  // A step is "ready" when all its inputFrom dependencies are resolved.
+  const pending = plan.steps.filter((s) => s.type !== "analyze");
+  const completed = new Set<string>(["normalizedInput"]);
 
-    const worker = workers[step.worker];
-    if (!worker) continue;
+  while (pending.length > 0) {
+    // Find all steps whose inputs are fully resolved
+    const ready = pending.filter((step) => {
+      const deps =
+        step.inputFrom === "normalizedInput"
+          ? []
+          : (step.inputFrom as string[]);
+      return deps.every((d) => completed.has(d));
+    });
 
-    const inputs =
-      step.inputFrom === "normalizedInput"
-        ? { normalized }
-        : {
-            normalized,
-            prior: (step.inputFrom as string[]).flatMap(
-              (id) => stepOutputs.get(id) ?? [],
-            ),
-          };
+    if (ready.length === 0) break; // avoid infinite loop on malformed plans
 
-    const assets = await worker.run(step, inputs);
-    stepOutputs.set(step.id, assets);
+    // Run all ready steps concurrently
+    await Promise.all(
+      ready.map(async (step) => {
+        const worker = workers[step.worker];
+        if (!worker) {
+          completed.add(step.id);
+          return;
+        }
+
+        const inputs =
+          step.inputFrom === "normalizedInput"
+            ? { normalized }
+            : {
+                normalized,
+                prior: (step.inputFrom as string[]).flatMap(
+                  (id) => stepOutputs.get(id) ?? [],
+                ),
+              };
+
+        const assets = await worker.run(step, inputs);
+        stepOutputs.set(step.id, assets);
+        completed.add(step.id);
+      }),
+    );
+
+    // Remove completed steps from pending
+    for (const step of ready) {
+      const idx = pending.indexOf(step);
+      if (idx !== -1) pending.splice(idx, 1);
+    }
   }
 
   return {

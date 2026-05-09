@@ -59,6 +59,25 @@ export default defineConfig({
   build: {
     outDir: path.resolve(import.meta.dirname, "dist/public"),
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          "vendor-react": ["react", "react-dom"],
+          "vendor-query": ["@tanstack/react-query"],
+          "vendor-motion": ["framer-motion"],
+          "vendor-radix": [
+            "@radix-ui/react-dialog",
+            "@radix-ui/react-select",
+            "@radix-ui/react-tooltip",
+            "@radix-ui/react-checkbox",
+          ],
+          "vendor-router": ["wouter"],
+          "vendor-charts": ["recharts"],
+          "vendor-date": ["date-fns"],
+        },
+      },
+    },
+    chunkSizeWarningLimit: 600,
   },
   server: {
     port,
@@ -69,11 +88,11 @@ export default defineConfig({
       deny: ["**/.*"],
     },
     proxy: {
-      "/api": {
+      "^/api/": {
         target: `http://localhost:${process.env.API_PORT ?? "8080"}`,
         changeOrigin: true,
       },
-      "/uploads": {
+      "^/uploads/": {
         target: `http://localhost:${process.env.API_PORT ?? "8080"}`,
         changeOrigin: true,
       },

@@ -178,7 +178,7 @@ function useRenderProgress(isRendering: boolean, sceneCount: number) {
       return;
     }
     setProgress(2);
-    const estimatedMs = sceneCount * 22_000;
+    const estimatedMs = Math.max(sceneCount * 22_000, 10_000);
     const tick = 800;
     let elapsed = 0;
     intervalRef.current = setInterval(() => {
@@ -262,20 +262,28 @@ export default function VideoStudio() {
     return h;
   }, [adminKey]);
 
+  const buildRequestBody = useCallback(
+    (overrideScenes?: Scene[]) => ({
+      idea: idea.trim(),
+      platform,
+      genre,
+      tone,
+      goal,
+      artist_name: artistName.trim(),
+      duration: duration || 0,
+      ...(overrideScenes && overrideScenes.length > 0
+        ? { scenes: overrideScenes }
+        : {}),
+    }),
+    [idea, platform, genre, tone, goal, artistName, duration],
+  );
+
   const generateMut = useMutation({
     mutationFn: async () => {
       const res = await fetch(`${BASE}/video/generate-ai`, {
         method: "POST",
         headers: authHeaders(),
-        body: JSON.stringify({
-          idea: idea.trim(),
-          platform,
-          genre,
-          tone,
-          goal,
-          artist_name: artistName.trim(),
-          duration: duration || 0,
-        }),
+        body: JSON.stringify(buildRequestBody()),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -304,18 +312,15 @@ export default function VideoStudio() {
 
   const renderMut = useMutation({
     mutationFn: async () => {
+      // Reuse the existing job_id if we already generated scenes (avoids a
+      // redundant API round-trip and preserves scene-level edits).
+      if (generationMeta?.job_id) {
+        return { job_id: generationMeta.job_id } as GenerateResponse;
+      }
       const res = await fetch(`${BASE}/video/generate-ai`, {
         method: "POST",
         headers: authHeaders(),
-        body: JSON.stringify({
-          idea: idea.trim(),
-          platform,
-          genre,
-          tone,
-          goal,
-          artist_name: artistName.trim(),
-          duration: duration || 0,
-        }),
+        body: JSON.stringify(buildRequestBody(scenes)),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -394,6 +399,8 @@ export default function VideoStudio() {
     setScenes((prev) =>
       prev.map((s, i) => (i === editingIdx ? { ...s, text: editText } : s)),
     );
+    // Clear cached job_id so render uses updated scenes
+    setGenerationMeta((prev) => (prev ? { ...prev, job_id: undefined } : null));
     setEditingIdx(null);
   };
 
@@ -406,10 +413,7 @@ export default function VideoStudio() {
   const isGenerating = generateMut.isPending;
   const isRendering = renderMut.isPending || isPolling;
   const videoDone = renderResult?.status === "done";
-
-  const videoUrl = renderResult?.url
-    ? `${BASE.replace("/api", "")}${renderResult.url}`
-    : null;
+  const videoUrl = renderResult?.url ?? null;
 
   // Rough DNA visualisation from genre/tone (client-side approximation)
   const dnaApprox = {
@@ -682,7 +686,7 @@ export default function VideoStudio() {
             />
             <p className="text-xs text-muted-foreground pt-1 leading-relaxed">
               These values drive background type, colour palette, effects, and
-              typography — regenerated fresh for every render. No templates.
+              typography — regenerated fresh for every render.
             </p>
           </Card>
         </div>
@@ -860,6 +864,15 @@ export default function VideoStudio() {
               </div>
             </div>
 
+            {hasScenes && (
+              <p className="text-xs text-muted-foreground bg-primary/5 border border-primary/20 rounded-lg p-2 flex items-start gap-1.5">
+                <ChevronRight className="w-3 h-3 text-primary mt-0.5 shrink-0" />
+                {generationMeta?.job_id
+                  ? "Scene edits applied — rendering with updated scenes."
+                  : "Scenes ready. Click Render Video to start."}
+              </p>
+            )}
+
             <Button
               className="w-full bg-gradient-to-r from-amber-500 to-orange-600 hover:opacity-90 text-white h-10 font-semibold shadow-lg shadow-amber-500/20 disabled:opacity-50"
               onClick={() => renderMut.mutate()}
@@ -1000,10 +1013,15 @@ export default function VideoStudio() {
                     size="sm"
                     variant="outline"
                     className="h-8 text-xs border-white/10 text-white hover:bg-white/10 gap-1.5"
-                    onClick={() => generateMut.mutate()}
+                    onClick={() => {
+                      setGenerationMeta(null);
+                      setScenes([]);
+                      setRenderResult(null);
+                      setJobId(null);
+                    }}
                     disabled={isGenerating || isRendering}
                   >
-                    <RefreshCw className="w-3 h-3" /> Regenerate
+                    <RefreshCw className="w-3 h-3" /> New Video
                   </Button>
                   <Button
                     size="sm"

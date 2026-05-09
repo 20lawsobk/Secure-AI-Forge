@@ -1,9 +1,15 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useAuth } from "@/hooks/use-auth";
-import { PenTool, Check, Copy, Sparkles, AlertCircle } from "lucide-react";
+import {
+  PenTool,
+  Copy,
+  Sparkles,
+  History,
+  ChevronDown,
+  ChevronUp,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
@@ -13,14 +19,57 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Card } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { motion, AnimatePresence } from "framer-motion";
 
 const BASE = "/api";
 
+interface GenerationResult {
+  platform: string;
+  hook: string;
+  body: string;
+  cta: string;
+  caption: string;
+  hashtags: string[];
+  processing_time_ms: number;
+  source: string;
+}
+
+const PLATFORMS = [
+  { value: "tiktok", label: "TikTok" },
+  { value: "instagram", label: "Instagram Reels" },
+  { value: "youtube", label: "YouTube Shorts" },
+  { value: "twitter", label: "X (Twitter)" },
+  { value: "linkedin", label: "LinkedIn" },
+  { value: "facebook", label: "Facebook" },
+];
+
+const TONES = [
+  { value: "energetic", label: "Energetic" },
+  { value: "professional", label: "Professional" },
+  { value: "casual", label: "Casual" },
+  { value: "playful", label: "Playful" },
+  { value: "edgy", label: "Edgy" },
+];
+
+const GOALS = [
+  { value: "growth", label: "Growth & Viral" },
+  { value: "conversion", label: "Conversion" },
+  { value: "nurture", label: "Nurture & Educate" },
+  { value: "engagement", label: "Engagement" },
+];
+
 export default function ContentGenerator() {
   const { toast } = useToast();
   const { adminKey } = useAuth();
+
+  const [platform, setPlatform] = useState("tiktok");
+  const [topic, setTopic] = useState("");
+  const [tone, setTone] = useState("energetic");
+  const [goal, setGoal] = useState("growth");
+  const [history, setHistory] = useState<GenerationResult[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   const generateMut = useMutation({
     mutationFn: async (body: {
@@ -29,7 +78,7 @@ export default function ContentGenerator() {
       tone: string;
       goal: string;
       include_hashtags: boolean;
-    }) => {
+    }): Promise<GenerationResult> => {
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
       };
@@ -45,35 +94,31 @@ export default function ContentGenerator() {
       }
       return res.json();
     },
+    onSuccess: (data) => {
+      setHistory((prev) => [data, ...prev].slice(0, 10));
+      toast({ title: "Content generated!" });
+    },
+    onError: (e: Error) => {
+      toast({
+        title: "Generation failed",
+        description: e.message,
+        variant: "destructive",
+      });
+    },
   });
 
-  const [platform, setPlatform] = useState("tiktok");
-  const [topic, setTopic] = useState("");
-  const [tone, setTone] = useState("energetic");
-  const [goal, setGoal] = useState("growth");
-
-  const handleGenerate = async () => {
-    if (!topic) {
+  const handleGenerate = () => {
+    if (!topic.trim()) {
       toast({ title: "Please enter a topic", variant: "destructive" });
       return;
     }
-
-    try {
-      await generateMut.mutateAsync({
-        platform,
-        topic,
-        tone,
-        goal,
-        include_hashtags: true,
-      });
-      toast({ title: "Content generated!" });
-    } catch (e: any) {
-      toast({
-        title: "Generation failed",
-        description: e?.message,
-        variant: "destructive",
-      });
-    }
+    generateMut.mutate({
+      platform,
+      topic: topic.trim(),
+      tone,
+      goal,
+      include_hashtags: true,
+    });
   };
 
   const copyText = (text: string) => {
@@ -93,8 +138,8 @@ export default function ContentGenerator() {
           Content Generator
         </h1>
         <p className="text-muted-foreground text-lg">
-          Harness the AI model to generate highly optimized scripts and captions
-          across 8 social platforms.
+          Harness the AI model to generate optimized scripts and captions across
+          6 social platforms.
         </p>
       </div>
 
@@ -116,11 +161,11 @@ export default function ContentGenerator() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent className="bg-card border-white/10 text-white">
-                    <SelectItem value="tiktok">TikTok</SelectItem>
-                    <SelectItem value="instagram">Instagram Reels</SelectItem>
-                    <SelectItem value="youtube">YouTube Shorts</SelectItem>
-                    <SelectItem value="twitter">X (Twitter)</SelectItem>
-                    <SelectItem value="linkedin">LinkedIn</SelectItem>
+                    {PLATFORMS.map((p) => (
+                      <SelectItem key={p.value} value={p.value}>
+                        {p.label}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
@@ -134,11 +179,11 @@ export default function ContentGenerator() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent className="bg-card border-white/10 text-white">
-                    <SelectItem value="energetic">Energetic</SelectItem>
-                    <SelectItem value="professional">Professional</SelectItem>
-                    <SelectItem value="casual">Casual</SelectItem>
-                    <SelectItem value="playful">Playful</SelectItem>
-                    <SelectItem value="edgy">Edgy</SelectItem>
+                    {TONES.map((t) => (
+                      <SelectItem key={t.value} value={t.value}>
+                        {t.label}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
@@ -152,9 +197,11 @@ export default function ContentGenerator() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent className="bg-card border-white/10 text-white">
-                    <SelectItem value="growth">Growth & Viral</SelectItem>
-                    <SelectItem value="conversion">Conversion</SelectItem>
-                    <SelectItem value="nurture">Nurture & Educate</SelectItem>
+                    {GOALS.map((g) => (
+                      <SelectItem key={g.value} value={g.value}>
+                        {g.label}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
@@ -164,11 +211,15 @@ export default function ContentGenerator() {
                   Topic / Idea
                 </label>
                 <Textarea
-                  placeholder="e.g., 3 tips for starting a tech channel..."
+                  placeholder="e.g. 3 tips for starting a tech channel..."
                   className="bg-black/50 border-white/10 text-white min-h-[100px] resize-none"
                   value={topic}
                   onChange={(e) => setTopic(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && e.metaKey) handleGenerate();
+                  }}
                 />
+                <p className="text-xs text-muted-foreground">⌘↵ to generate</p>
               </div>
 
               <Button
@@ -180,6 +231,61 @@ export default function ContentGenerator() {
               </Button>
             </div>
           </Card>
+
+          {/* History */}
+          {history.length > 0 && (
+            <Card className="glass-panel border-white/10 overflow-hidden">
+              <button
+                className="w-full flex items-center justify-between p-4 text-sm font-medium text-white hover:bg-white/5 transition-colors"
+                onClick={() => setHistoryOpen((o) => !o)}
+              >
+                <span className="flex items-center gap-2">
+                  <History className="w-4 h-4 text-muted-foreground" />
+                  Recent ({history.length})
+                </span>
+                {historyOpen ? (
+                  <ChevronUp className="w-4 h-4 text-muted-foreground" />
+                ) : (
+                  <ChevronDown className="w-4 h-4 text-muted-foreground" />
+                )}
+              </button>
+              <AnimatePresence>
+                {historyOpen && (
+                  <motion.div
+                    initial={{ height: 0 }}
+                    animate={{ height: "auto" }}
+                    exit={{ height: 0 }}
+                    className="overflow-hidden"
+                  >
+                    <div className="px-4 pb-4 space-y-2 border-t border-white/5 pt-3 max-h-64 overflow-y-auto">
+                      {history.map((h, i) => (
+                        <div
+                          key={i}
+                          className="w-full text-left p-3 rounded-xl bg-white/5 hover:bg-white/10 transition-colors cursor-pointer"
+                          onClick={() => copyText(h.caption)}
+                        >
+                          <div className="flex items-center gap-2 mb-1">
+                            <Badge
+                              variant="outline"
+                              className="text-[10px] border-white/10 text-muted-foreground capitalize"
+                            >
+                              {h.platform}
+                            </Badge>
+                            <span className="text-xs text-muted-foreground">
+                              {h.processing_time_ms.toFixed(0)}ms
+                            </span>
+                          </div>
+                          <p className="text-xs text-gray-300 line-clamp-2">
+                            {h.hook}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </Card>
+          )}
         </div>
 
         {/* Output */}
@@ -187,6 +293,7 @@ export default function ContentGenerator() {
           <AnimatePresence mode="wait">
             {!result && !generateMut.isPending ? (
               <motion.div
+                key="empty"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
@@ -194,9 +301,13 @@ export default function ContentGenerator() {
               >
                 <PenTool className="w-12 h-12 mb-4 opacity-20" />
                 <p>Configure parameters and click Generate</p>
+                <p className="text-xs mt-2 opacity-60">
+                  Or press ⌘↵ in the topic field
+                </p>
               </motion.div>
             ) : generateMut.isPending ? (
               <motion.div
+                key="loading"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
@@ -210,6 +321,7 @@ export default function ContentGenerator() {
             ) : (
               result && (
                 <motion.div
+                  key="result"
                   initial={{ opacity: 0, y: 20 }}
                   animate={{ opacity: 1, y: 0 }}
                   className="glass-panel rounded-2xl p-6 space-y-6"
@@ -235,43 +347,76 @@ export default function ContentGenerator() {
                     </Button>
                   </div>
 
-                  <div className="space-y-4">
-                    <div>
-                      <h4 className="text-xs font-bold uppercase tracking-wider text-primary mb-2">
-                        Hook
-                      </h4>
-                      <p className="text-lg text-white font-medium">
-                        {result.hook}
-                      </p>
-                    </div>
-
-                    <div>
-                      <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-2">
-                        Body
-                      </h4>
-                      <p className="text-gray-300 whitespace-pre-wrap leading-relaxed">
-                        {result.body}
-                      </p>
-                    </div>
-
-                    <div>
-                      <h4 className="text-xs font-bold uppercase tracking-wider text-amber-400 mb-2">
-                        Call to Action
-                      </h4>
-                      <p className="text-white font-medium">{result.cta}</p>
-                    </div>
+                  <div className="space-y-5">
+                    {[
+                      {
+                        label: "Hook",
+                        value: result.hook,
+                        labelColor: "text-primary",
+                        isLarge: true,
+                      },
+                      {
+                        label: "Body",
+                        value: result.body,
+                        labelColor: "text-muted-foreground",
+                        isLarge: false,
+                      },
+                      {
+                        label: "Call to Action",
+                        value: result.cta,
+                        labelColor: "text-amber-400",
+                        isLarge: false,
+                      },
+                    ].map(({ label, value, labelColor, isLarge }) => (
+                      <div key={label} className="group relative">
+                        <div className="flex items-center justify-between mb-2">
+                          <h4
+                            className={`text-xs font-bold uppercase tracking-wider ${labelColor}`}
+                          >
+                            {label}
+                          </h4>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-6 px-2 text-xs opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground"
+                            onClick={() => copyText(value)}
+                          >
+                            <Copy className="w-3 h-3 mr-1" /> Copy
+                          </Button>
+                        </div>
+                        <p
+                          className={`whitespace-pre-wrap leading-relaxed ${isLarge ? "text-lg text-white font-medium" : "text-gray-300"}`}
+                        >
+                          {value}
+                        </p>
+                      </div>
+                    ))}
                   </div>
 
                   {result.hashtags.length > 0 && (
                     <div className="pt-4 border-t border-white/10">
+                      <div className="flex items-center justify-between mb-3">
+                        <h4 className="text-xs font-bold uppercase tracking-wider text-blue-400">
+                          Hashtags
+                        </h4>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 px-2 text-xs text-muted-foreground"
+                          onClick={() => copyText(result.hashtags.join(" "))}
+                        >
+                          <Copy className="w-3 h-3 mr-1" /> Copy all
+                        </Button>
+                      </div>
                       <div className="flex flex-wrap gap-2">
                         {result.hashtags.map((tag: string) => (
-                          <span
+                          <button
                             key={tag}
-                            className="text-sm text-blue-400 bg-blue-500/10 px-2 py-1 rounded border border-blue-500/20"
+                            onClick={() => copyText(tag)}
+                            className="text-sm text-blue-400 bg-blue-500/10 px-2 py-1 rounded border border-blue-500/20 hover:bg-blue-500/20 transition-colors"
                           >
                             {tag}
-                          </span>
+                          </button>
                         ))}
                       </div>
                     </div>

@@ -17,9 +17,12 @@ import {
   ShieldCheck,
   AlertTriangle,
   Clock,
+  RefreshCw,
 } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { formatUptime } from "@/lib/format";
 
 const BASE = "/api";
 
@@ -29,12 +32,24 @@ export default function Dashboard() {
     ? { "X-Admin-Key": adminKey }
     : {};
 
-  const { data: stats, isLoading: statsLoading } = useGetDashboardStats();
-  const { data: health, isLoading: healthLoading } = useHealthCheck({
-    query: { refetchInterval: 10000 },
+  const {
+    data: stats,
+    isLoading: statsLoading,
+    refetch: refetchStats,
+    isFetching: statsFetching,
+  } = useGetDashboardStats({
+    query: { refetchInterval: 15_000 },
   });
 
-  const { data: storageStatus } = useQuery({
+  const {
+    data: health,
+    isLoading: healthLoading,
+    refetch: refetchHealth,
+  } = useHealthCheck({
+    query: { refetchInterval: 20_000 },
+  });
+
+  const { data: storageStatus, refetch: refetchStorage } = useQuery({
     queryKey: ["storage-status", adminKey],
     queryFn: async () => {
       const res = await fetch(`${BASE}/storage/status`, { headers: authHdr });
@@ -42,11 +57,11 @@ export default function Dashboard() {
       return res.json();
     },
     enabled: !!adminKey,
-    refetchInterval: 15000,
+    refetchInterval: 20_000,
     retry: false,
   });
 
-  const { data: watchdog } = useQuery({
+  const { data: watchdog, refetch: refetchWatchdog } = useQuery({
     queryKey: ["watchdog-status", adminKey],
     queryFn: async () => {
       const res = await fetch(`${BASE}/watchdog/status`, { headers: authHdr });
@@ -54,16 +69,20 @@ export default function Dashboard() {
       return res.json();
     },
     enabled: !!adminKey,
-    refetchInterval: 20000,
+    refetchInterval: 25_000,
     retry: false,
   });
 
-  const uptimeFormatted = health?.uptime_seconds
-    ? health.uptime_seconds >= 3600
-      ? `${Math.floor(health.uptime_seconds / 3600)}h ${Math.floor((health.uptime_seconds % 3600) / 60)}m`
-      : `${Math.floor(health.uptime_seconds / 60)}m ${health.uptime_seconds % 60}s`
-    : null;
+  const handleRefreshAll = () => {
+    refetchStats();
+    refetchHealth();
+    if (adminKey) {
+      refetchStorage();
+      refetchWatchdog();
+    }
+  };
 
+  const uptimeFormatted = formatUptime(health?.uptime_seconds);
   const storageOnline = storageStatus?.connected === true;
   const watchdogAlerts: string[] = watchdog?.active_alerts ?? [];
 
@@ -96,27 +115,42 @@ export default function Dashboard() {
           </p>
         </div>
 
-        <div className="glass-panel px-4 py-2 rounded-xl flex items-center gap-3">
-          <div className="flex items-center gap-2">
-            <div
-              className={`w-2.5 h-2.5 rounded-full ${health?.status === "healthy" ? "bg-green-500 animate-pulse" : "bg-destructive"}`}
+        <div className="flex items-center gap-3">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleRefreshAll}
+            disabled={statsFetching}
+            className="text-muted-foreground hover:text-white h-8 px-3"
+          >
+            <RefreshCw
+              className={`w-3.5 h-3.5 mr-1.5 ${statsFetching ? "animate-spin" : ""}`}
             />
-            <span className="text-sm font-medium text-white capitalize">
-              {health?.status || "Unknown"}
-            </span>
-          </div>
-          <div className="w-px h-4 bg-border" />
-          <span className="text-xs text-muted-foreground font-mono">
-            v{health?.version || "1.0.0"}
-          </span>
-          {uptimeFormatted && (
-            <>
-              <div className="w-px h-4 bg-border" />
-              <span className="text-xs text-muted-foreground font-mono flex items-center gap-1">
-                <Clock className="w-3 h-3" /> {uptimeFormatted}
+            Refresh
+          </Button>
+
+          <div className="glass-panel px-4 py-2 rounded-xl flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              <div
+                className={`w-2.5 h-2.5 rounded-full ${health?.status === "healthy" ? "bg-green-500 animate-pulse" : "bg-destructive"}`}
+              />
+              <span className="text-sm font-medium text-white capitalize">
+                {health?.status || "Unknown"}
               </span>
-            </>
-          )}
+            </div>
+            <div className="w-px h-4 bg-border" />
+            <span className="text-xs text-muted-foreground font-mono">
+              v{health?.version || "1.0.0"}
+            </span>
+            {uptimeFormatted && uptimeFormatted !== "—" && (
+              <>
+                <div className="w-px h-4 bg-border" />
+                <span className="text-xs text-muted-foreground font-mono flex items-center gap-1">
+                  <Clock className="w-3 h-3" /> {uptimeFormatted}
+                </span>
+              </>
+            )}
+          </div>
         </div>
       </div>
 
@@ -126,11 +160,11 @@ export default function Dashboard() {
           <AlertTriangle className="w-5 h-5 text-amber-400 mt-0.5 shrink-0" />
           <div className="space-y-1">
             <p className="text-sm font-medium text-amber-300">
-              Watchdog Alerts
+              Watchdog Alerts ({watchdogAlerts.length})
             </p>
             {watchdogAlerts.map((alert: string, i: number) => (
               <p key={i} className="text-xs text-amber-400/80">
-                {alert}
+                • {alert}
               </p>
             ))}
           </div>
@@ -141,25 +175,25 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
         <StatCard
           title="Active API Keys"
-          value={stats?.active_api_keys || 0}
+          value={stats?.active_api_keys ?? 0}
           icon={KeySquare}
-          description={`Out of ${stats?.total_api_keys || 0} total keys`}
+          description={`Out of ${stats?.total_api_keys ?? 0} total keys`}
         />
         <StatCard
           title="Requests Today"
-          value={(stats?.total_requests_today || 0).toLocaleString()}
+          value={(stats?.total_requests_today ?? 0).toLocaleString()}
           icon={Activity}
           description="Across all endpoints"
         />
         <StatCard
           title="GPU Lanes"
-          value={stats?.gpu_lanes || 0}
+          value={stats?.gpu_lanes ?? 0}
           icon={Cpu}
           description="HyperGPU Cluster"
         />
         <StatCard
           title="Vocab Size"
-          value={(stats?.vocab_size || 0).toLocaleString()}
+          value={(stats?.vocab_size ?? 0).toLocaleString()}
           icon={Database}
           description="Tokens in vocabulary"
         />
@@ -179,49 +213,59 @@ export default function Dashboard() {
           </div>
 
           <div className="space-y-3">
-            <div className="flex justify-between items-center p-3 bg-black/20 rounded-xl border border-white/5">
-              <span className="text-sm text-muted-foreground">
-                Engine Status
-              </span>
-              <Badge
-                variant="outline"
-                className={
-                  stats?.model_status === "running"
-                    ? "border-green-500/50 text-green-400"
-                    : ""
-                }
+            {[
+              {
+                label: "Engine Status",
+                content: (
+                  <Badge
+                    variant="outline"
+                    className={
+                      stats?.model_status === "running"
+                        ? "border-green-500/50 text-green-400"
+                        : ""
+                    }
+                  >
+                    {stats?.model_status || "Unknown"}
+                  </Badge>
+                ),
+              },
+              {
+                label: "Weights Loaded",
+                content: (
+                  <Badge
+                    variant="outline"
+                    className={
+                      stats?.weights_exist
+                        ? "border-primary/50 text-primary"
+                        : "border-destructive/50 text-destructive"
+                    }
+                  >
+                    {stats?.weights_exist ? "Yes" : "No"}
+                  </Badge>
+                ),
+              },
+              {
+                label: "Training State",
+                content: (
+                  <div className="flex items-center gap-2">
+                    {stats?.training_state === "running" && (
+                      <Zap className="w-4 h-4 text-amber-400" />
+                    )}
+                    <span className="text-sm font-medium text-white capitalize">
+                      {stats?.training_state || "Idle"}
+                    </span>
+                  </div>
+                ),
+              },
+            ].map(({ label, content }) => (
+              <div
+                key={label}
+                className="flex justify-between items-center p-3 bg-black/20 rounded-xl border border-white/5"
               >
-                {stats?.model_status || "Unknown"}
-              </Badge>
-            </div>
-            <div className="flex justify-between items-center p-3 bg-black/20 rounded-xl border border-white/5">
-              <span className="text-sm text-muted-foreground">
-                Weights Loaded
-              </span>
-              <Badge
-                variant="outline"
-                className={
-                  stats?.weights_exist
-                    ? "border-primary/50 text-primary-foreground"
-                    : "border-destructive/50 text-destructive-foreground"
-                }
-              >
-                {stats?.weights_exist ? "Yes" : "No"}
-              </Badge>
-            </div>
-            <div className="flex justify-between items-center p-3 bg-black/20 rounded-xl border border-white/5">
-              <span className="text-sm text-muted-foreground">
-                Training State
-              </span>
-              <div className="flex items-center gap-2">
-                {stats?.training_state === "running" && (
-                  <Zap className="w-4 h-4 text-amber-400" />
-                )}
-                <span className="text-sm font-medium text-white capitalize">
-                  {stats?.training_state || "Idle"}
-                </span>
+                <span className="text-sm text-muted-foreground">{label}</span>
+                {content}
               </div>
-            </div>
+            ))}
           </div>
         </div>
 
@@ -247,11 +291,7 @@ export default function Dashboard() {
                     : "border-amber-500/50 text-amber-400"
                 }
               >
-                {storageOnline
-                  ? "Online"
-                  : storageStatus
-                    ? "Offline"
-                    : "Checking…"}
+                {storageOnline ? "Online" : storageStatus ? "Offline" : "Checking…"}
               </Badge>
             </div>
             {storageStatus?.instance_id && (
@@ -264,9 +304,7 @@ export default function Dashboard() {
             )}
             {storageStatus?.keys_count != null && (
               <div className="flex justify-between items-center p-3 bg-black/20 rounded-xl border border-white/5">
-                <span className="text-sm text-muted-foreground">
-                  Keys stored
-                </span>
+                <span className="text-sm text-muted-foreground">Keys stored</span>
                 <span className="text-sm font-mono text-white">
                   {storageStatus.keys_count}
                 </span>

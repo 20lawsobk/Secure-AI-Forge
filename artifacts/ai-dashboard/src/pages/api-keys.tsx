@@ -3,7 +3,15 @@ import { format } from "date-fns";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
-import { Copy, Plus, Trash2, RefreshCw, Key, ShieldAlert } from "lucide-react";
+import {
+  Copy,
+  Plus,
+  Trash2,
+  RefreshCw,
+  Key,
+  ShieldAlert,
+  Search,
+} from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -12,6 +20,7 @@ import {
   useRevokeApiKey,
   useRotateApiKey,
 } from "@workspace/api-client-react";
+import { useDebounce } from "@/hooks/use-debounce";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -34,6 +43,16 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
   Form,
   FormControl,
   FormDescription,
@@ -52,6 +71,11 @@ const createKeySchema = z.object({
   expires_in_days: z.coerce.number().optional().nullable(),
 });
 
+type ConfirmAction =
+  | { type: "revoke"; id: string; name: string }
+  | { type: "rotate"; id: string; name: string }
+  | null;
+
 export default function ApiKeys() {
   const { adminKey } = useAuth();
   const { toast } = useToast();
@@ -60,6 +84,9 @@ export default function ApiKeys() {
     key: string;
     name: string;
   } | null>(null);
+  const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
+  const [search, setSearch] = useState("");
+  const debouncedSearch = useDebounce(search, 200);
 
   const { data, isLoading, refetch } = useListApiKeys({
     query: { enabled: !!adminKey },
@@ -86,32 +113,31 @@ export default function ApiKeys() {
       form.reset();
       refetch();
       toast({ title: "API Key created successfully" });
-    } catch (e) {
+    } catch {
       toast({ variant: "destructive", title: "Failed to create key" });
     }
   };
 
-  const handleRevoke = async (id: string) => {
-    if (!confirm("Are you sure you want to revoke this key?")) return;
+  const handleConfirm = async () => {
+    if (!confirmAction) return;
     try {
-      await revokeMut.mutateAsync({ keyId: id });
-      refetch();
-      toast({ title: "Key revoked" });
-    } catch (e) {
-      toast({ variant: "destructive", title: "Failed to revoke key" });
-    }
-  };
-
-  const handleRotate = async (id: string) => {
-    if (!confirm("Rotating will invalidate the old key immediately. Continue?"))
-      return;
-    try {
-      const result = await rotateMut.mutateAsync({ keyId: id });
-      setNewKeyData({ key: result.key, name: result.name });
-      refetch();
-      toast({ title: "Key rotated" });
-    } catch (e) {
-      toast({ variant: "destructive", title: "Failed to rotate key" });
+      if (confirmAction.type === "revoke") {
+        await revokeMut.mutateAsync({ keyId: confirmAction.id });
+        refetch();
+        toast({ title: "Key revoked" });
+      } else {
+        const result = await rotateMut.mutateAsync({ keyId: confirmAction.id });
+        setNewKeyData({ key: result.key, name: result.name });
+        refetch();
+        toast({ title: "Key rotated" });
+      }
+    } catch {
+      toast({
+        variant: "destructive",
+        title: `Failed to ${confirmAction.type} key`,
+      });
+    } finally {
+      setConfirmAction(null);
     }
   };
 
@@ -119,6 +145,16 @@ export default function ApiKeys() {
     navigator.clipboard.writeText(text);
     toast({ title: "Copied to clipboard" });
   };
+
+  const filteredKeys = (data?.keys ?? []).filter(
+    (k) =>
+      !debouncedSearch ||
+      k.name.toLowerCase().includes(debouncedSearch.toLowerCase()) ||
+      k.prefix.toLowerCase().includes(debouncedSearch.toLowerCase()) ||
+      k.scopes.some((s) =>
+        s.toLowerCase().includes(debouncedSearch.toLowerCase()),
+      ),
+  );
 
   if (!adminKey) {
     return (
@@ -156,6 +192,17 @@ export default function ApiKeys() {
         </Button>
       </div>
 
+      {/* Search bar */}
+      <div className="relative max-w-sm">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+        <Input
+          placeholder="Search by name, prefix, or scope…"
+          className="pl-9 bg-black/30 border-white/10 text-white placeholder:text-muted-foreground"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
+      </div>
+
       <div className="glass-panel rounded-2xl overflow-hidden">
         <Table>
           <TableHeader className="bg-black/20">
@@ -173,40 +220,26 @@ export default function ApiKeys() {
             {isLoading ? (
               [...Array(3)].map((_, i) => (
                 <TableRow key={i} className="border-white/5">
-                  <TableCell>
-                    <Skeleton className="h-5 w-32 bg-white/5" />
-                  </TableCell>
-                  <TableCell>
-                    <Skeleton className="h-5 w-24 bg-white/5" />
-                  </TableCell>
-                  <TableCell>
-                    <Skeleton className="h-5 w-40 bg-white/5" />
-                  </TableCell>
-                  <TableCell>
-                    <Skeleton className="h-5 w-16 bg-white/5" />
-                  </TableCell>
-                  <TableCell>
-                    <Skeleton className="h-5 w-24 bg-white/5" />
-                  </TableCell>
-                  <TableCell>
-                    <Skeleton className="h-5 w-24 bg-white/5" />
-                  </TableCell>
-                  <TableCell>
-                    <Skeleton className="h-8 w-20 bg-white/5 ml-auto" />
-                  </TableCell>
+                  {[...Array(7)].map((_, j) => (
+                    <TableCell key={j}>
+                      <Skeleton className="h-5 w-full bg-white/5" />
+                    </TableCell>
+                  ))}
                 </TableRow>
               ))
-            ) : data?.keys.length === 0 ? (
+            ) : filteredKeys.length === 0 ? (
               <TableRow>
                 <TableCell
                   colSpan={7}
                   className="h-32 text-center text-muted-foreground"
                 >
-                  No API keys found. Create one to get started.
+                  {search
+                    ? "No keys match your search."
+                    : "No API keys found. Create one to get started."}
                 </TableCell>
               </TableRow>
             ) : (
-              data?.keys.map((key) => (
+              filteredKeys.map((key) => (
                 <TableRow
                   key={key.id}
                   className="border-white/5 hover:bg-white/5"
@@ -249,7 +282,13 @@ export default function ApiKeys() {
                         variant="ghost"
                         size="icon"
                         className="h-8 w-8 text-muted-foreground hover:text-white"
-                        onClick={() => handleRotate(key.id)}
+                        onClick={() =>
+                          setConfirmAction({
+                            type: "rotate",
+                            id: key.id,
+                            name: key.name,
+                          })
+                        }
                         title="Rotate Key"
                       >
                         <RefreshCw className="w-4 h-4" />
@@ -258,7 +297,13 @@ export default function ApiKeys() {
                         variant="ghost"
                         size="icon"
                         className="h-8 w-8 text-destructive hover:text-red-400 hover:bg-destructive/10"
-                        onClick={() => handleRevoke(key.id)}
+                        onClick={() =>
+                          setConfirmAction({
+                            type: "revoke",
+                            id: key.id,
+                            name: key.name,
+                          })
+                        }
                         title="Revoke Key"
                       >
                         <Trash2 className="w-4 h-4" />
@@ -271,6 +316,55 @@ export default function ApiKeys() {
           </TableBody>
         </Table>
       </div>
+
+      {/* Confirm Action AlertDialog */}
+      <AlertDialog
+        open={!!confirmAction}
+        onOpenChange={(open) => !open && setConfirmAction(null)}
+      >
+        <AlertDialogContent className="glass-panel border-white/10">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-white">
+              {confirmAction?.type === "revoke" ? "Revoke Key?" : "Rotate Key?"}
+            </AlertDialogTitle>
+            <AlertDialogDescription className="text-muted-foreground">
+              {confirmAction?.type === "revoke" ? (
+                <>
+                  This will permanently revoke{" "}
+                  <span className="text-white font-medium">
+                    {confirmAction?.name}
+                  </span>
+                  . Any services using it will lose access immediately.
+                </>
+              ) : (
+                <>
+                  Rotating{" "}
+                  <span className="text-white font-medium">
+                    {confirmAction?.name}
+                  </span>{" "}
+                  will invalidate the old key immediately. A new key will be
+                  generated — copy it before closing.
+                </>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="border-white/10 text-white hover:bg-white/5">
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleConfirm}
+              className={
+                confirmAction?.type === "revoke"
+                  ? "bg-destructive hover:bg-destructive/90 text-white"
+                  : "bg-amber-600 hover:bg-amber-600/90 text-white"
+              }
+            >
+              {confirmAction?.type === "revoke" ? "Revoke Key" : "Rotate Key"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Create Key Dialog */}
       <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
@@ -325,35 +419,30 @@ export default function ApiKeys() {
                           key={scope}
                           control={form.control}
                           name="scopes"
-                          render={({ field }) => {
-                            return (
-                              <FormItem
-                                key={scope}
-                                className="flex flex-row items-start space-x-3 space-y-0 rounded-md border border-white/10 bg-black/20 p-3"
-                              >
-                                <FormControl>
-                                  <Checkbox
-                                    checked={field.value?.includes(scope)}
-                                    onCheckedChange={(checked) => {
-                                      return checked
-                                        ? field.onChange([
-                                            ...field.value,
-                                            scope,
-                                          ])
-                                        : field.onChange(
-                                            field.value?.filter(
-                                              (value) => value !== scope,
-                                            ),
-                                          );
-                                    }}
-                                  />
-                                </FormControl>
-                                <FormLabel className="font-normal text-sm capitalize text-white cursor-pointer">
-                                  {scope}
-                                </FormLabel>
-                              </FormItem>
-                            );
-                          }}
+                          render={({ field }) => (
+                            <FormItem className="flex flex-row items-start space-x-3 space-y-0 rounded-md border border-white/10 bg-black/20 p-3">
+                              <FormControl>
+                                <Checkbox
+                                  checked={field.value?.includes(scope)}
+                                  onCheckedChange={(checked) =>
+                                    checked
+                                      ? field.onChange([
+                                          ...field.value,
+                                          scope,
+                                        ])
+                                      : field.onChange(
+                                          field.value?.filter(
+                                            (v) => v !== scope,
+                                          ),
+                                        )
+                                  }
+                                />
+                              </FormControl>
+                              <FormLabel className="font-normal text-sm capitalize text-white cursor-pointer">
+                                {scope}
+                              </FormLabel>
+                            </FormItem>
+                          )}
                         />
                       ))}
                     </div>

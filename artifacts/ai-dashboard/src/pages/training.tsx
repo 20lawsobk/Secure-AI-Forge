@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useState, useRef, useEffect } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   useGetTrainingStatus,
   useGetTrainingLogs,
@@ -14,6 +14,7 @@ import {
   Database,
   Clock,
   RotateCcw,
+  ChevronDown,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/use-auth";
@@ -21,6 +22,7 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { formatUptime } from "@/lib/format";
 
 const BASE = "/api";
 
@@ -37,6 +39,10 @@ async function apiFetch(path: string, opts: RequestInit = {}) {
 export default function Training() {
   const { toast } = useToast();
   const { adminKey } = useAuth();
+  const qc = useQueryClient();
+  const logContainerRef = useRef<HTMLDivElement>(null);
+  const [autoScroll, setAutoScroll] = useState(true);
+
   const headers = {
     "Content-Type": "application/json",
     ...authHeaders(adminKey),
@@ -51,13 +57,28 @@ export default function Training() {
   } = useGetTrainingStatus({
     query: {
       refetchInterval: (query) =>
-        isRunning((query.state as any)?.data?.state) ? 3000 : 10000,
+        isRunning((query.state as any)?.data?.state) ? 3000 : 10_000,
     },
   });
 
   const { data: logs, isLoading: logsLoading } = useGetTrainingLogs({
-    query: { refetchInterval: () => (isRunning(status?.state) ? 3000 : 10000) },
+    query: {
+      refetchInterval: () => (isRunning(status?.state) ? 3000 : 15_000),
+    },
   });
+
+  useEffect(() => {
+    if (!autoScroll || !logContainerRef.current) return;
+    const el = logContainerRef.current;
+    el.scrollTop = el.scrollHeight;
+  }, [logs, autoScroll]);
+
+  const handleScroll = () => {
+    const el = logContainerRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    setAutoScroll(atBottom);
+  };
 
   const startMut = useMutation({
     mutationFn: () =>
@@ -71,7 +92,7 @@ export default function Training() {
         }),
       }),
     onSuccess: () => {
-      toast({ title: "Training started successfully" });
+      toast({ title: "Training started" });
       refetchStatus();
     },
     onError: () =>
@@ -88,12 +109,11 @@ export default function Training() {
       toast({ variant: "destructive", title: "Failed to stop training" }),
   });
 
-  // ── Continuous Training ──
   const { data: contStatus, refetch: refetchCont } = useQuery({
     queryKey: ["continuous-status", adminKey],
     queryFn: () => apiFetch("/training/continuous/status", { headers }),
     enabled: !!adminKey,
-    refetchInterval: 8000,
+    refetchInterval: 8_000,
   });
 
   const contStartMut = useMutation({
@@ -104,10 +124,7 @@ export default function Training() {
       refetchCont();
     },
     onError: () =>
-      toast({
-        variant: "destructive",
-        title: "Failed to start continuous training",
-      }),
+      toast({ variant: "destructive", title: "Failed to start continuous training" }),
   });
 
   const contStopMut = useMutation({
@@ -118,18 +135,14 @@ export default function Training() {
       refetchCont();
     },
     onError: () =>
-      toast({
-        variant: "destructive",
-        title: "Failed to stop continuous training",
-      }),
+      toast({ variant: "destructive", title: "Failed to stop continuous training" }),
   });
 
-  // ── Data Puller ──
   const { data: pullerStatus, refetch: refetchPuller } = useQuery({
     queryKey: ["puller-status", adminKey],
     queryFn: () => apiFetch("/training/puller/status", { headers }),
     enabled: !!adminKey,
-    refetchInterval: 10000,
+    refetchInterval: 12_000,
   });
 
   const pullNowMut = useMutation({
@@ -142,21 +155,17 @@ export default function Training() {
     onError: () => toast({ variant: "destructive", title: "Pull failed" }),
   });
 
-  const handleStart = () => startMut.mutate();
-
   const progress =
     status?.total_epochs && status?.epoch
       ? (status.epoch / status.total_epochs) * 100
       : 0;
 
-  const etaFormatted = status?.eta_seconds
-    ? status.eta_seconds >= 3600
-      ? `${Math.floor(status.eta_seconds / 3600)}h ${Math.floor((status.eta_seconds % 3600) / 60)}m`
-      : `${Math.floor(status.eta_seconds / 60)}m ${status.eta_seconds % 60}s`
-    : null;
+  const etaFormatted = formatUptime(status?.eta_seconds);
+  const elapsedFormatted = formatUptime(status?.elapsed_seconds);
 
   const contRunning = contStatus?.status === "running";
   const pullerRunning = pullerStatus?.status === "running";
+  const logList = logs?.logs ?? [];
 
   return (
     <div className="space-y-6">
@@ -172,7 +181,7 @@ export default function Training() {
         <div className="flex gap-3">
           <Button
             disabled={isRunning(status?.state) || startMut.isPending}
-            onClick={handleStart}
+            onClick={() => startMut.mutate()}
             className="bg-primary hover:bg-primary/90 text-white shadow-lg shadow-primary/20"
           >
             {startMut.isPending ? (
@@ -249,9 +258,7 @@ export default function Training() {
                   <div className="flex justify-between p-2 rounded bg-white/5 text-sm">
                     <span className="text-muted-foreground">State</span>
                     <Badge
-                      variant={
-                        isRunning(status?.state) ? "default" : "secondary"
-                      }
+                      variant={isRunning(status?.state) ? "default" : "secondary"}
                       className={
                         isRunning(status?.state)
                           ? "bg-amber-500/20 text-amber-400 hover:bg-amber-500/20"
@@ -262,29 +269,21 @@ export default function Training() {
                     </Badge>
                   </div>
                   <div className="flex justify-between p-2 rounded bg-white/5 text-sm">
-                    <span className="text-muted-foreground">
-                      Samples Trained
-                    </span>
+                    <span className="text-muted-foreground">Samples Trained</span>
                     <span className="text-white font-mono">
-                      {status?.samples_trained?.toLocaleString() || 0}
+                      {(status?.samples_trained ?? 0).toLocaleString()}
                     </span>
                   </div>
                   <div className="flex justify-between p-2 rounded bg-white/5 text-sm">
                     <span className="text-muted-foreground">Time Elapsed</span>
-                    <span className="text-white font-mono">
-                      {status?.elapsed_seconds
-                        ? `${Math.floor(status.elapsed_seconds / 60)}m ${status.elapsed_seconds % 60}s`
-                        : "—"}
-                    </span>
+                    <span className="text-white font-mono">{elapsedFormatted}</span>
                   </div>
-                  {etaFormatted && (
+                  {status?.eta_seconds != null && (
                     <div className="flex justify-between p-2 rounded bg-primary/10 border border-primary/20 text-sm">
                       <span className="text-primary-foreground flex items-center gap-1.5">
                         <Clock className="w-3.5 h-3.5" /> ETA
                       </span>
-                      <span className="text-white font-mono">
-                        {etaFormatted}
-                      </span>
+                      <span className="text-white font-mono">{etaFormatted}</span>
                     </div>
                   )}
                 </div>
@@ -408,24 +407,54 @@ export default function Training() {
 
         {/* Logs Terminal */}
         <div className="lg:col-span-2 glass-panel rounded-2xl flex flex-col overflow-hidden">
-          <div className="bg-black/40 p-3 border-b border-white/5 flex items-center gap-2">
-            <Terminal className="w-4 h-4 text-muted-foreground" />
-            <span className="text-sm font-mono text-muted-foreground">
-              training_output.log
-            </span>
+          <div className="bg-black/40 p-3 border-b border-white/5 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Terminal className="w-4 h-4 text-muted-foreground" />
+              <span className="text-sm font-mono text-muted-foreground">
+                training_output.log
+              </span>
+              {logList.length > 0 && (
+                <span className="text-xs text-muted-foreground/50 font-mono">
+                  ({logList.length} entries)
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              {!autoScroll && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-6 text-xs text-muted-foreground hover:text-white px-2"
+                  onClick={() => {
+                    setAutoScroll(true);
+                    logContainerRef.current?.scrollTo({
+                      top: logContainerRef.current.scrollHeight,
+                      behavior: "smooth",
+                    });
+                  }}
+                >
+                  <ChevronDown className="w-3 h-3 mr-1" />
+                  Jump to bottom
+                </Button>
+              )}
+            </div>
           </div>
-          <div className="p-4 bg-[#0a0a0c] flex-1 font-mono text-xs overflow-y-auto max-h-[600px] min-h-[400px]">
+          <div
+            ref={logContainerRef}
+            onScroll={handleScroll}
+            className="p-4 bg-[#0a0a0c] flex-1 font-mono text-xs overflow-y-auto max-h-[600px] min-h-[400px] scroll-smooth"
+          >
             {logsLoading ? (
               <div className="text-muted-foreground animate-pulse">
                 Loading logs...
               </div>
-            ) : logs?.logs.length === 0 ? (
+            ) : logList.length === 0 ? (
               <div className="text-muted-foreground">
                 No logs available for current session.
               </div>
             ) : (
               <div className="space-y-1.5">
-                {logs?.logs.map((log, i) => (
+                {logList.map((log, i) => (
                   <div
                     key={i}
                     className="flex gap-3 hover:bg-white/5 p-1 rounded transition-colors"
