@@ -1,9 +1,58 @@
 import { Router, type IRouter, type Request, type Response } from "express";
+import { Agent, type Dispatcher } from "undici";
 
 const router: IRouter = Router();
 
 const MODEL_API_PORT = process.env.MODEL_API_PORT || "9878";
 const MODEL_API_BASE = `http://localhost:${MODEL_API_PORT}`;
+
+// ─── Keep-alive connection pool ─────────────────────────────────────────────
+// Reuse TCP connections to the Python server instead of opening a new socket
+// on every request — eliminates per-request TCP + TLS handshake overhead.
+
+const _keepAlivePool: Dispatcher = new Agent({
+  keepAliveTimeout: 30_000,
+  keepAliveMaxTimeout: 60_000,
+  connections: 32,
+  pipelining: 1,
+});
+
+// ─── Circuit Breaker ────────────────────────────────────────────────────────
+// After CB_FAILURE_THRESHOLD consecutive upstream failures the circuit opens
+// and requests fail-fast with 503 for CB_RECOVERY_MS, then enter half-open
+// (one probe allowed through). Resets fully on any successful response.
+
+const CB_FAILURE_THRESHOLD = 5;
+const CB_RECOVERY_MS = 15_000;
+
+let _cbFailures = 0;
+let _cbOpenSince: number | null = null;
+
+function _cbIsOpen(): boolean {
+  if (_cbOpenSince === null) return false;
+  if (Date.now() - _cbOpenSince >= CB_RECOVERY_MS) {
+    // half-open: reset so the next request probes the upstream
+    _cbOpenSince = null;
+    _cbFailures = 0;
+    return false;
+  }
+  return true;
+}
+
+function _cbRecordSuccess(): void {
+  _cbFailures = 0;
+  _cbOpenSince = null;
+}
+
+function _cbRecordFailure(): void {
+  _cbFailures++;
+  if (_cbFailures >= CB_FAILURE_THRESHOLD && _cbOpenSince === null) {
+    _cbOpenSince = Date.now();
+    console.warn(
+      `[CircuitBreaker] Opened after ${_cbFailures} consecutive failures — fast-failing for ${CB_RECOVERY_MS / 1000}s`,
+    );
+  }
+}
 
 // ─── TTL Cache for hot read-only endpoints ─────────────────────────────────
 
@@ -74,15 +123,28 @@ async function proxyRequest(
     }
   }
 
+  // Circuit breaker — fail fast when the upstream is known to be down
+  if (_cbIsOpen()) {
+    const retryIn = Math.ceil(
+      (CB_RECOVERY_MS - (Date.now() - (_cbOpenSince ?? Date.now()))) / 1000,
+    );
+    res.status(503).json({
+      error: "AI model server temporarily unavailable",
+      detail: `Circuit breaker open — retry in ~${retryIn}s.`,
+    });
+    return;
+  }
+
   try {
     const url = `${MODEL_API_BASE}${path}`;
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 45_000);
 
-    const fetchOptions: RequestInit = {
+    const fetchOptions: RequestInit & { dispatcher?: Dispatcher } = {
       method: req.method,
       signal: controller.signal,
+      dispatcher: _keepAlivePool,
       headers: {
         "Content-Type": "application/json",
         ...(req.headers["x-admin-key"]
@@ -106,6 +168,13 @@ async function proxyRequest(
     }
     const data = await parseResponseBody(response);
 
+    // Treat 5xx upstream responses as failures for the circuit breaker
+    if (response.status >= 500) {
+      _cbRecordFailure();
+    } else {
+      _cbRecordSuccess();
+    }
+
     // Populate cache for successful GET responses
     if (isGet && response.ok) {
       setCached(path, response.status, data);
@@ -117,7 +186,9 @@ async function proxyRequest(
     const elapsed = Date.now() - startTime;
     console.error(`[Proxy] Error proxying to ${path} (${elapsed}ms):`, err);
     const e = err as any;
+
     if (e.name === "AbortError" || e.code === "ABORT_ERR") {
+      _cbRecordFailure();
       res.status(504).json({
         error: "Upstream timeout",
         detail: `AI training server did not respond within 45 s.`,
@@ -126,6 +197,7 @@ async function proxyRequest(
       (e as NodeJS.ErrnoException).code === "ECONNREFUSED" ||
       e.cause?.code === "ECONNREFUSED"
     ) {
+      _cbRecordFailure();
       res.status(503).json({
         error: "AI model server unavailable",
         detail:
@@ -136,6 +208,7 @@ async function proxyRequest(
       e.cause?.message?.includes("other side closed") ||
       e.code === "UND_ERR_SOCKET"
     ) {
+      _cbRecordFailure();
       res.status(503).json({
         error: "AI model server closed connection",
         detail:

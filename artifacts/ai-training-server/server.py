@@ -4768,7 +4768,22 @@ async def train_feedback_endpoint(req: ApiTrainFeedbackRequest, _key=Depends(req
 # ─── Entry Point ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    import multiprocessing
     import uvicorn
     port = int(os.environ.get("MODEL_API_PORT", 9878))
-    print(f"[Server] Starting MaxBooster AI Training Server on port {port}")
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    # Use 1 worker per CPU core, capped at 4 — beyond that the GIL and shared
+    # model state become the bottleneck rather than I/O concurrency.
+    cpu_count = multiprocessing.cpu_count()
+    worker_count = min(max(cpu_count, 1), 4)
+    print(f"[Server] Starting MaxBooster AI Training Server on port {port} "
+          f"({worker_count} uvicorn workers, {cpu_count} CPUs detected)")
+    uvicorn.run(
+        "server:app",
+        host="0.0.0.0",
+        port=port,
+        log_level="info",
+        workers=worker_count,
+        timeout_keep_alive=30,
+        limit_concurrency=256,
+        backlog=512,
+    )

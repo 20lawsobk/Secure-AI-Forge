@@ -2,6 +2,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import express, { type Express, type Request, type Response } from "express";
 import cors from "cors";
+import compression from "compression";
 import rateLimit from "express-rate-limit";
 import router from "./routes";
 
@@ -18,6 +19,7 @@ const limiter = rateLimit({
 });
 
 app.use(cors());
+app.use(compression());
 app.use(limiter);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
