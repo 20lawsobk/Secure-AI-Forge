@@ -37,7 +37,7 @@ if (cluster.isPrimary) {
   cluster.on("exit", (worker, code, signal) => {
     if (signal === "SIGTERM" || signal === "SIGINT") return;
     console.log(
-      `[Cluster] Worker ${worker.pid} died (code=${code ?? "?"}, signal=${signal ?? "none"}) — respawning…`,
+      `[Cluster] Worker ${worker.process.pid} died (code=${code ?? "?"}, signal=${signal ?? "none"}) — respawning…`,
     );
     cluster.fork();
   });

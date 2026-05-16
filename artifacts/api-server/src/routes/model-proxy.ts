@@ -1,5 +1,5 @@
 import { Router, type IRouter, type Request, type Response } from "express";
-import { Agent, type Dispatcher } from "undici";
+import { Agent, request as undiciRequest } from "undici";
 
 const router: IRouter = Router();
 
@@ -10,7 +10,7 @@ const MODEL_API_BASE = `http://localhost:${MODEL_API_PORT}`;
 // Reuse TCP connections to the Python server instead of opening a new socket
 // on every request — eliminates per-request TCP + TLS handshake overhead.
 
-const _keepAlivePool: Dispatcher = new Agent({
+const _keepAlivePool = new Agent({
   keepAliveTimeout: 30_000,
   keepAliveMaxTimeout: 60_000,
   connections: 32,
@@ -92,10 +92,8 @@ function setCached(path: string, status: number, data: unknown): void {
 
 // ─── Safe JSON parsing (handles non-JSON upstream error bodies) ─────────────
 
-async function parseResponseBody(
-  response: globalThis.Response,
-): Promise<unknown> {
-  const text = await response.text();
+async function parseBodyText(body: { text(): Promise<string> }): Promise<unknown> {
+  const text = await body.text();
   try {
     return JSON.parse(text);
   } catch {
@@ -141,47 +139,43 @@ async function proxyRequest(
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 45_000);
 
-    const fetchOptions: RequestInit & { dispatcher?: Dispatcher } = {
-      method: req.method,
-      signal: controller.signal,
-      dispatcher: _keepAlivePool,
-      headers: {
-        "Content-Type": "application/json",
-        ...(req.headers["x-admin-key"]
-          ? { "X-Admin-Key": req.headers["x-admin-key"] as string }
-          : {}),
-        ...(req.headers["x-api-key"]
-          ? { "X-Api-Key": req.headers["x-api-key"] as string }
-          : {}),
-      },
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
     };
+    if (req.headers["x-admin-key"])
+      headers["X-Admin-Key"] = req.headers["x-admin-key"] as string;
+    if (req.headers["x-api-key"])
+      headers["X-Api-Key"] = req.headers["x-api-key"] as string;
 
-    if (!isGet && req.body) {
-      fetchOptions.body = JSON.stringify(req.body);
-    }
-
-    let response: globalThis.Response;
+    let upstreamRes: Awaited<ReturnType<typeof undiciRequest>>;
     try {
-      response = await fetch(url, fetchOptions);
+      upstreamRes = await undiciRequest(url, {
+        method: req.method as any,
+        signal: controller.signal,
+        dispatcher: _keepAlivePool,
+        headers,
+        body: !isGet && req.body ? JSON.stringify(req.body) : undefined,
+      });
     } finally {
       clearTimeout(timeoutId);
     }
-    const data = await parseResponseBody(response);
+
+    const data = await parseBodyText(upstreamRes.body);
 
     // Treat 5xx upstream responses as failures for the circuit breaker
-    if (response.status >= 500) {
+    if (upstreamRes.statusCode >= 500) {
       _cbRecordFailure();
     } else {
       _cbRecordSuccess();
     }
 
     // Populate cache for successful GET responses
-    if (isGet && response.ok) {
-      setCached(path, response.status, data);
+    if (isGet && upstreamRes.statusCode < 300) {
+      setCached(path, upstreamRes.statusCode, data);
     }
 
     res.setHeader("X-Cache", "MISS");
-    res.status(response.status).json(data);
+    res.status(upstreamRes.statusCode).json(data);
   } catch (err) {
     const elapsed = Date.now() - startTime;
     console.error(`[Proxy] Error proxying to ${path} (${elapsed}ms):`, err);
