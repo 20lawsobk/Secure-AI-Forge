@@ -2,6 +2,7 @@ import cluster from "cluster";
 import os from "os";
 import app from "./app";
 import { ensurePythonServer, stopPythonServer } from "./python-server";
+import { startKeepalive, stopKeepalive } from "./keepalive";
 
 const rawPort = process.env["PORT"];
 
@@ -30,6 +31,9 @@ if (cluster.isPrimary) {
     console.error("[Python] Failed to start AI server:", err);
   });
 
+  // Keepalive: warm all endpoints on a 20s cycle so the AI server never idles
+  startKeepalive();
+
   for (let i = 0; i < NUM_WORKERS; i++) {
     cluster.fork();
   }
@@ -44,6 +48,7 @@ if (cluster.isPrimary) {
 
   const shutdown = () => {
     console.log("[Cluster] Primary shutting down…");
+    stopKeepalive();
     stopPythonServer();
     for (const id in cluster.workers) {
       cluster.workers[id]?.kill("SIGTERM");

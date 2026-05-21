@@ -170,5 +170,25 @@ STORAGE_BEARER_TOKEN = "mbs_373a1368ba359b15860701559d3a7c8f91e04f3afc44577de0c8
 AI_TRAINING_KEY_PROD = "mbs_c6fe3b6e7eb7f4c6957f256ef20ae072c2c6ae75b0c88d5448b35707249f3a0d"
 
 [[ports]]
+localPort = 3000
+externalPort = 3002
+
+[[ports]]
+localPort = 3001
+externalPort = 3001
+
+[[ports]]
 localPort = 5000
 externalPort = 80
+
+[[ports]]
+localPort = 8080
+externalPort = 8080
+
+[[ports]]
+localPort = 8081
+externalPort = 8081
+
+[[ports]]
+localPort = 9878
+externalPort = 3000
