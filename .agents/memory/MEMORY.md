@@ -1,0 +1,2 @@
+- [KV-cache inference](kv-cache-inference.md) — transformer needs KV-cache (prefill+decode_one) or plan() takes 3+ min per call
+- [Video pipeline architecture](video-pipeline.md) — non-blocking job pattern, ffmpeg framerate fix, text cleaning rules

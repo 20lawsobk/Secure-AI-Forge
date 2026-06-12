@@ -15,7 +15,7 @@ from typing import List, Dict, Any
 from ..model.creative_model import CreativeModel
 from ..agents.script_agent import ScriptAgent, ScriptRequest, PLATFORM_CTAS
 from ..agents.visual_spec_agent import VisualSpecAgent
-from .cinematic_engine import CinematicRequest, CinematicResult
+from .cinematic_engine import CinematicResult
 from .cinematic_engine import render_cinematic_open
 from .renderer import ASPECT_RATIOS, PLATFORM_RATIOS
 from .scenes import SceneConfig
@@ -107,22 +107,49 @@ _PLATFORM_SPECS: Dict[str, Dict[str, Any]] = {
 }
 
 
+_SECRET_RE = re.compile(r"\S{25,}")          # any 25+ char token ≈ hash / API key / URL
+_NUMBER_RE = re.compile(r"\b\d{2,}\b")      # bare numbers like "128", "49"
+_CTRL_RE   = re.compile(r"<[A-Z_]+>")       # model control tokens
+_MAX_WORDS = 10   # max words shown on a social-media overlay
+
 def _clean(text: str) -> str:
-    text = re.sub(r"<[A-Z_]+>", "", text)
+    """
+    Post-process unlimited model output into a short, safe display phrase.
+      - Strip control tokens and hex secrets (API keys / hashes)
+      - Remove standalone bare numbers (model vocab IDs)
+      - Stop at first sentence boundary; fall back to first _MAX_WORDS words
+      - Strip characters that break ffmpeg drawtext single-quoting
+    """
+    text = _CTRL_RE.sub("", text)
+    text = _SECRET_RE.sub("", text)    # remove 25+ char tokens (API keys, hashes)
+    text = _NUMBER_RE.sub("", text)    # remove bare numbers like "128", "49"
+    text = re.sub(r"\s+", " ", text).strip()
+
+    # Stop at the first sentence boundary if present
+    m = re.search(r"[.!?]", text)
+    if m and m.start() > 3:
+        text = text[: m.start() + 1].strip()
+
+    # Otherwise cap at _MAX_WORDS words
+    words = text.split()
+    if len(words) > _MAX_WORDS:
+        text = " ".join(words[:_MAX_WORDS])
+
+    # Strip chars that break ffmpeg drawtext inside text='...'
+    text = re.sub(r"['\"\[\]:;\\=]", "", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
 
-def _is_meaningful(text: str, min_words: int = 2, min_chars: int = 8) -> bool:
+def _is_meaningful(text: str, min_words: int = 2, min_chars: int = 6) -> bool:
     if not text or len(text) < min_chars:
         return False
     words = text.split()
     if len(words) < min_words:
         return False
+    # Reject if more than 40% are control tokens
     ctrl = sum(1 for w in words if w.startswith("<") and w.endswith(">"))
     if ctrl / len(words) > 0.4:
-        return False
-    if len(set(w.lower() for w in words)) < len(words) * 0.25:
         return False
     return True
 
@@ -367,11 +394,12 @@ class VideoAgent:
         try:
             raw = self.model.generate(
                 prompt,
-                max_new_tokens=70,
+                max_new_tokens=200,
                 temperature=0.88,
                 top_p=0.92,
                 top_k=50,
                 repetition_penalty=1.2,
+                min_length=5,
             )
             # Strip anything before the stage token (the conditioned prefix)
             if stage_tok in raw:
@@ -411,32 +439,3 @@ class VideoAgent:
             return "scale_in" if tone in energetic_tones else "fade"
         return "fade"
 
-    def _build_cinematic_request(
-        self,
-        req: VideoAgentRequest,
-        prod: VideoProduction,
-    ) -> CinematicRequest:
-        """
-        Collapse the multi-scene VideoProduction into a CinematicRequest.
-        The cinematic engine's template.build_scenes() maps hook/body/cta
-        to its scene layout — we pass the AI-generated text directly.
-        """
-        texts_by_type: Dict[str, str] = {s.scene_type: s.text for s in prod.scenes}
-
-        hook  = texts_by_type.get("hook", "")
-        build = texts_by_type.get("build", "")
-        body  = texts_by_type.get("body", "") or build
-        cta   = texts_by_type.get("cta", "")
-
-        return CinematicRequest(
-            hook=hook,
-            body=body,
-            cta=cta,
-            platform=prod.platform,
-            aspect_ratio=prod.aspect_ratio,
-            template=prod.template_id,
-            duration=prod.total_duration,
-            artist_name=req.artist_name,
-            quality="cinematic",
-            audio_path=req.artist_context.get("audio_path"),
-        )

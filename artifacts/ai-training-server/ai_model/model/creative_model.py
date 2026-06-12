@@ -8,10 +8,10 @@ from .tokenizer import SimpleTokenizer
 class CreativeModel:
     """
     Wrapper around TransformerLM that provides:
-    - Nucleus (top-p) + top-k sampling with temperature
-    - Repetition penalty (vectorized)
+    - KV-cache nucleus sampling (prefill once, decode O(1) per token)
     - Beam search (contrastive decoding)
-    - Min/max length control
+    - Min length control
+    - Repetition penalty (vectorized)
     """
 
     def __init__(self, model: nn.Module, tokenizer: SimpleTokenizer, device="cpu"):
@@ -19,7 +19,6 @@ class CreativeModel:
         self.tokenizer = tokenizer
         self.device = device
         self.tokenizer.freeze()
-        # Put model in eval mode once — not on every generate() call
         self.model.eval()
 
     def resize_embeddings(self):
@@ -31,7 +30,6 @@ class CreativeModel:
             new_emb = nn.Embedding(new_vocab, dim).to(self.device)
             new_emb.weight.data[:old_emb.num_embeddings] = old_emb.weight.data
             self.model.token_emb = new_emb
-            # Weight tying: head shares embedding weights
             new_head = nn.Linear(dim, new_vocab, bias=False).to(self.device)
             new_head.weight = new_emb.weight
             self.model.head = new_head
@@ -43,10 +41,7 @@ class CreativeModel:
         penalty: float,
         special_ids: tuple[int, ...],
     ) -> torch.Tensor:
-        """
-        Vectorized repetition penalty — replaces the Python loop with a
-        single scatter operation. Logits shape: [1, vocab].
-        """
+        """Vectorized repetition penalty — single scatter operation. Logits: [1, vocab]."""
         seen_ids = [t for t in set(token_window) if t not in special_ids]
         if not seen_ids:
             return logits
@@ -56,7 +51,32 @@ class CreativeModel:
         logits[0, idx] = penalized
         return logits
 
-    # ── Sampling generation ───────────────────────────────────────────────────
+    def _sample_next(
+        self,
+        logits: torch.Tensor,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+    ) -> torch.Tensor:
+        """Apply temperature + top-k + nucleus sampling. Returns next token id [B, 1]."""
+        logits = logits / max(temperature, 1e-8)
+
+        if top_k > 0:
+            top_k_vals, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+            logits[logits < top_k_vals[:, -1].unsqueeze(-1)] = float('-inf')
+
+        if 0.0 < top_p < 1.0:
+            sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+            probs = F.softmax(sorted_logits, dim=-1)
+            cumulative = torch.cumsum(probs, dim=-1)
+            mask = (cumulative - probs) > top_p
+            sorted_logits[mask] = float('-inf')
+            logits = sorted_logits.scatter(1, sorted_indices, sorted_logits)
+
+        probs = F.softmax(logits, dim=-1)
+        return torch.multinomial(probs, num_samples=1)
+
+    # ── KV-cache sampling generation ──────────────────────────────────────────
 
     def generate(
         self,
@@ -68,65 +88,68 @@ class CreativeModel:
         repetition_penalty: float = 1.15,
         min_length: int = 10,
     ) -> str:
+        """
+        Unlimited autoregressive generation with KV-cache.
+
+        Prefills the prompt in one batched forward pass, then generates
+        each new token in O(1) time (single-position forward, no context
+        re-computation). Generation stops when the model emits <EOS> or
+        max_new_tokens is reached — no artificial cap otherwise.
+        """
         ids = self.tokenizer.encode(prompt).ids
         if not ids:
             ids = [self.tokenizer.token_to_id("<BOS>")]
-        x = torch.tensor([ids], device=self.device)
 
-        eos_id = self.tokenizer.token_to_id("<EOS>")
-        pad_id = self.tokenizer.token_to_id("<PAD>")
-        unk_id = self.tokenizer.token_to_id("<UNK>")
+        eos_id   = self.tokenizer.token_to_id("<EOS>")
+        pad_id   = self.tokenizer.token_to_id("<PAD>")
+        unk_id   = self.tokenizer.token_to_id("<UNK>")
         special_ids = (pad_id, unk_id, eos_id)
-        max_ctx = getattr(self.model, 'max_len', 1024)
+        max_ctx  = getattr(self.model, 'max_len', 1024)
+
+        # Truncate prompt if needed
+        if len(ids) > max_ctx:
+            ids = ids[-max_ctx:]
 
         generated_ids: list[int] = []
 
         _autocast = torch.autocast("cpu", dtype=torch.bfloat16, enabled=True)
         with torch.no_grad(), _autocast:
-            for step in range(max_new_tokens):
-                logits = self.model(x[:, -max_ctx:]).float()
-                next_logits = logits[:, -1, :].clone()
+            # ── Prefill: full prompt in one batched pass, build KV cache ──────
+            x_prompt = torch.tensor([ids], device=self.device)
+            logits_all, kv_cache = self.model.prefill(x_prompt)
 
-                # Suppress special tokens
+            # Logits for the first token to generate (after the prompt)
+            next_logits = logits_all[:, -1, :].float().clone()  # [1, vocab]
+
+            # ── Decode: O(1) per step via KV cache ────────────────────────────
+            for step in range(max_new_tokens):
                 next_logits[:, pad_id] = float('-inf')
                 next_logits[:, unk_id] = float('-inf')
                 if step < min_length:
                     next_logits[:, eos_id] = float('-inf')
 
-                # Vectorized repetition penalty
                 if generated_ids:
                     next_logits = self._apply_repetition_penalty(
                         next_logits, generated_ids[-64:], repetition_penalty, special_ids
                     )
 
-                # Temperature scaling
-                next_logits = next_logits / max(temperature, 1e-8)
-
-                # Top-k filter
-                if top_k > 0:
-                    top_k_vals, _ = torch.topk(next_logits, min(top_k, next_logits.size(-1)))
-                    threshold = top_k_vals[:, -1].unsqueeze(-1)
-                    next_logits[next_logits < threshold] = float('-inf')
-
-                # Nucleus (top-p) filter
-                if 0.0 < top_p < 1.0:
-                    sorted_logits, sorted_indices = torch.sort(next_logits, descending=True)
-                    probs = F.softmax(sorted_logits, dim=-1)
-                    cumulative = torch.cumsum(probs, dim=-1)
-                    mask = (cumulative - probs) > top_p
-                    sorted_logits[mask] = float('-inf')
-                    next_logits = sorted_logits.scatter(1, sorted_indices, sorted_logits)
-
-                probs = F.softmax(next_logits, dim=-1)
-                next_id = torch.multinomial(probs, num_samples=1)
-
-                token_id = int(next_id.item())
+                next_id   = self._sample_next(next_logits, temperature, top_p, top_k)
+                token_id  = int(next_id.item())
                 generated_ids.append(token_id)
-                x = torch.cat([x, next_id], dim=1)
+
                 if token_id == eos_id:
                     break
 
-        return self.tokenizer.decode(x[0].tolist())
+                # Context window guard: drop oldest KV entries when full
+                ctx_used = len(ids) + len(generated_ids)
+                if ctx_used >= max_ctx:
+                    kv_cache = [(k[:, :, 1:, :], v[:, :, 1:, :]) for k, v in kv_cache]
+
+                # One-token forward with KV cache
+                logits_new, kv_cache = self.model.decode_one(next_id, kv_cache)
+                next_logits = logits_new[:, 0, :].float().clone()
+
+        return self.tokenizer.decode(ids + generated_ids)
 
     # ── Beam search generation ────────────────────────────────────────────────
 
@@ -140,22 +163,18 @@ class CreativeModel:
         min_length: int = 8,
         temperature: float = 1.0,
     ) -> str:
-        """
-        Beam search with length penalty.
-        Returns the highest-scoring complete sequence.
-        """
+        """Beam search with length penalty."""
         ids = self.tokenizer.encode(prompt).ids
         if not ids:
             ids = [self.tokenizer.token_to_id("<BOS>")]
 
-        eos_id = self.tokenizer.token_to_id("<EOS>")
-        pad_id = self.tokenizer.token_to_id("<PAD>")
-        unk_id = self.tokenizer.token_to_id("<UNK>")
+        eos_id   = self.tokenizer.token_to_id("<EOS>")
+        pad_id   = self.tokenizer.token_to_id("<PAD>")
+        unk_id   = self.tokenizer.token_to_id("<UNK>")
         special_ids = (pad_id, unk_id, eos_id)
-        max_ctx = getattr(self.model, 'max_len', 1024)
+        max_ctx  = getattr(self.model, 'max_len', 1024)
         vocab_size = self.model.token_emb.num_embeddings
 
-        # Each beam: (score, token_ids_list)
         beams: list[tuple[float, list[int]]] = [(0.0, list(ids))]
         completed: list[tuple[float, list[int]]] = []
 
@@ -175,13 +194,11 @@ class CreativeModel:
                     logits = self.model(x).float()
                     next_logits = logits[0, -1, :].clone().unsqueeze(0)
 
-                    # Suppress specials
                     next_logits[0, pad_id] = float('-inf')
                     next_logits[0, unk_id] = float('-inf')
                     if len(beam_ids) - len(ids) < min_length:
                         next_logits[0, eos_id] = float('-inf')
 
-                    # Vectorized repetition penalty
                     next_logits = self._apply_repetition_penalty(
                         next_logits, beam_ids[-64:], repetition_penalty, special_ids
                     )
@@ -194,15 +211,15 @@ class CreativeModel:
                     top_vals, top_idxs = torch.topk(log_probs, topk)
 
                     for lp, tid in zip(top_vals.tolist(), top_idxs.tolist()):
-                        new_ids = beam_ids + [tid]
-                        new_score = score + lp
-                        all_candidates.append((new_score, new_ids))
+                        all_candidates.append((score + lp, beam_ids + [tid]))
 
                 if not all_candidates:
                     break
 
-                all_candidates.sort(key=lambda c: c[0] / max(1, len(c[1])) ** length_penalty,
-                                    reverse=True)
+                all_candidates.sort(
+                    key=lambda c: c[0] / max(1, len(c[1])) ** length_penalty,
+                    reverse=True,
+                )
                 beams = all_candidates[:num_beams]
 
             completed.extend(beams)
@@ -213,7 +230,7 @@ class CreativeModel:
         best = max(completed, key=lambda c: c[0] / max(1, len(c[1])) ** length_penalty)
         return self.tokenizer.decode(best[1])
 
-    # ── Contrastive decoding (CD) ─────────────────────────────────────────────
+    # ── Contrastive decoding (delegates to generate with stronger rep penalty) ─
 
     def contrastive_generate(
         self,
@@ -225,11 +242,6 @@ class CreativeModel:
         min_length: int = 10,
         repetition_penalty: float = 1.1,
     ) -> str:
-        """
-        Contrastive decoding: penalizes tokens that are equally probable
-        under a smaller/amateur model (simulated by a shallower forward pass).
-        Falls back to nucleus sampling when contrastive signal is weak.
-        """
         return self.generate(
             prompt,
             max_new_tokens=max_new_tokens,

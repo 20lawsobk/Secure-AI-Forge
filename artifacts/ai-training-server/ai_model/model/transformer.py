@@ -16,12 +16,28 @@ def precompute_rope_freqs(dim: int, max_len: int, base: float = 10000.0, device=
 
 
 def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    """Apply rotary embeddings to a query or key tensor  [B, T, H, D]."""
+    """Apply rotary embeddings to a query or key tensor [B, T, H, D_h].
+    Positions are 0..T-1 (standard prefill / training path).
+    """
     d = x.shape[-1]
     x1 = x[..., : d // 2]
     x2 = x[..., d // 2 :]
-    c = cos[: x.shape[-3], :].unsqueeze(0).unsqueeze(2)  # [1,T,1,D/2]
+    c = cos[: x.shape[-3], :].unsqueeze(0).unsqueeze(2)  # [1, T, 1, D/2]
     s = sin[: x.shape[-3], :].unsqueeze(0).unsqueeze(2)
+    return torch.cat([x1 * c - x2 * s, x1 * s + x2 * c], dim=-1)
+
+
+def apply_rope_offset(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
+                      offset: int) -> torch.Tensor:
+    """Apply rotary embeddings starting at `offset` (KV-cache decode path).
+    x: [B, T, H, D_h]  —  T==1 during single-token decode steps.
+    """
+    T = x.shape[-3]
+    d = x.shape[-1]
+    x1 = x[..., : d // 2]
+    x2 = x[..., d // 2 :]
+    c = cos[offset : offset + T, :].unsqueeze(0).unsqueeze(2)
+    s = sin[offset : offset + T, :].unsqueeze(0).unsqueeze(2)
     return torch.cat([x1 * c - x2 * s, x1 * s + x2 * c], dim=-1)
 
 
@@ -43,12 +59,11 @@ class RoPESelfAttention(nn.Module):
                 mask: torch.Tensor | None = None) -> torch.Tensor:
         B, T, C = x.shape
         qkv = self.qkv(x).reshape(B, T, 3, self.n_heads, self.head_dim)
-        q, k, v = qkv.unbind(2)  # each [B,T,H,D_h]
+        q, k, v = qkv.unbind(2)  # each [B, T, H, D_h]
 
         q = apply_rope(q, cos, sin)
         k = apply_rope(k, cos, sin)
 
-        # [B,H,T,D_h]
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
@@ -61,6 +76,60 @@ class RoPESelfAttention(nn.Module):
 
         out = (attn @ v).transpose(1, 2).contiguous().reshape(B, T, C)
         return self.out(out)
+
+    def forward_with_kv(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
+                        mask: torch.Tensor | None = None,
+                        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Prefill pass — identical to forward() but also returns K, V for cache seeding."""
+        B, T, C = x.shape
+        qkv = self.qkv(x).reshape(B, T, 3, self.n_heads, self.head_dim)
+        q, k, v = qkv.unbind(2)
+
+        q = apply_rope(q, cos, sin)
+        k = apply_rope(k, cos, sin)
+
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        if mask is not None:
+            attn = attn + mask.unsqueeze(0).unsqueeze(0)
+        attn = F.softmax(attn, dim=-1)
+        attn = self.attn_drop(attn)
+
+        out = (attn @ v).transpose(1, 2).contiguous().reshape(B, T, C)
+        return self.out(out), k, v  # k, v: [B, H, T, D_h]
+
+    def decode_one(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
+                   past_k: torch.Tensor, past_v: torch.Tensor,
+                   ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Single-token KV-cache decode step.
+        x: [B, 1, C]  —  past_k / past_v: [B, H, T_past, D_h]
+        Returns: (out [B, 1, C], new_k [B, H, T_past+1, D_h], new_v)
+        """
+        offset = past_k.shape[2]
+        B, T, C = x.shape  # T == 1
+
+        qkv = self.qkv(x).reshape(B, T, 3, self.n_heads, self.head_dim)
+        q, k, v = qkv.unbind(2)  # each [B, 1, H, D_h]
+
+        q = apply_rope_offset(q, cos, sin, offset)
+        k = apply_rope_offset(k, cos, sin, offset)
+
+        q = q.transpose(1, 2)  # [B, H, 1, D_h]
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        k_cat = torch.cat([past_k, k], dim=2)  # [B, H, T_past+1, D_h]
+        v_cat = torch.cat([past_v, v], dim=2)
+
+        # Single query attends to entire causal context — no mask needed
+        attn = (q @ k_cat.transpose(-2, -1)) * self.scale  # [B, H, 1, T_past+1]
+        attn = F.softmax(attn, dim=-1)
+
+        out = (attn @ v_cat).transpose(1, 2).contiguous().reshape(B, T, C)
+        return self.out(out), k_cat, v_cat
 
 
 # ─── Feed-forward with SwiGLU activation ─────────────────────────────────────
@@ -97,6 +166,24 @@ class TransformerDecoderLayer(nn.Module):
         x = x + self.drop(self.ffn(self.ln2(x)))
         return x
 
+    def forward_with_kv(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
+                        mask: torch.Tensor | None = None,
+                        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Prefill: returns (output, k, v) for KV cache seeding."""
+        attn_out, k, v = self.attn.forward_with_kv(self.ln1(x), cos, sin, mask)
+        x = x + self.drop(attn_out)
+        x = x + self.drop(self.ffn(self.ln2(x)))
+        return x, k, v
+
+    def decode_one(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
+                   past_k: torch.Tensor, past_v: torch.Tensor,
+                   ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Single-token decode with KV cache. No dropout at inference."""
+        attn_out, new_k, new_v = self.attn.decode_one(self.ln1(x), cos, sin, past_k, past_v)
+        x = x + attn_out
+        x = x + self.ffn(self.ln2(x))
+        return x, new_k, new_v
+
 
 # ─── Full Language Model ───────────────────────────────────────────────────────
 
@@ -108,6 +195,7 @@ class TransformerLM(nn.Module):
     - Pre-norm (LayerNorm before each sub-layer)
     - Weight tying between token embedding and output head
     - Scaled initialization (GPT-2 style)
+    - KV-cache support via prefill() + decode_one()
     """
     def __init__(self, vocab_size: int, dim: int = 512, n_layers: int = 8,
                  n_heads: int = 8, max_len: int = 1024, dropout: float = 0.1):
@@ -156,14 +244,13 @@ class TransformerLM(nn.Module):
         nn.init.normal_(self.token_emb.weight, mean=0.0, std=std)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Standard training / non-cached forward pass."""
         B, T = x.shape
         assert T <= self.max_len, f"Sequence length {T} exceeds max_len {self.max_len}"
 
         h = self.emb_dropout(self.token_emb(x))
 
-        # Slice pre-computed causal mask — no recomputation per forward pass
         mask = self.causal_mask[:T, :T]
-
         cos = self.rope_cos[:T]
         sin = self.rope_sin[:T]
 
@@ -172,6 +259,46 @@ class TransformerLM(nn.Module):
 
         h = self.ln_final(h)
         return self.head(h)
+
+    def prefill(self, x: torch.Tensor) -> tuple[torch.Tensor, list]:
+        """
+        KV-cache prefill: process the full prompt in one batched pass.
+        Returns (logits [B, T, vocab], kv_cache).
+        kv_cache is a list of (k, v) per layer — [B, H, T, D_h] each.
+        Use kv_cache with decode_one() for O(1)-per-step generation.
+        """
+        B, T = x.shape
+        h = self.emb_dropout(self.token_emb(x))
+        mask = self.causal_mask[:T, :T]
+        cos = self.rope_cos[:T]
+        sin = self.rope_sin[:T]
+
+        kv_cache: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for layer in self.layers:
+            h, k, v = layer.forward_with_kv(h, cos, sin, mask)
+            kv_cache.append((k, v))
+
+        h = self.ln_final(h)
+        return self.head(h), kv_cache
+
+    def decode_one(self, x_new: torch.Tensor,
+                   kv_cache: list[tuple[torch.Tensor, torch.Tensor]],
+                   ) -> tuple[torch.Tensor, list]:
+        """
+        Single-token KV-cache decode step — O(1) per token (constant context cost).
+        x_new: [B, 1] — single new token id.
+        Returns (logits [B, 1, vocab], new_kv_cache).
+        """
+        h = self.token_emb(x_new)  # [B, 1, dim] — no dropout at inference
+
+        new_cache: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for i, layer in enumerate(self.layers):
+            past_k, past_v = kv_cache[i]
+            h, new_k, new_v = layer.decode_one(h, self.rope_cos, self.rope_sin, past_k, past_v)
+            new_cache.append((new_k, new_v))
+
+        h = self.ln_final(h)
+        return self.head(h), new_cache
 
     # Legacy compatibility: some code checks pos_emb.num_embeddings
     @property

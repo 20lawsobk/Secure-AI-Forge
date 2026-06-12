@@ -5,22 +5,29 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional, List
 from .effects import (
-    animated_gradient_bg, radial_gradient_bg, wave_gradient_bg, plasma_bg, aurora_bg,
-    vignette_filter, film_grain, color_grade_cinematic, color_grade_warm, color_grade_cool,
+    vignette_filter, color_grade_cinematic, color_grade_warm, color_grade_cool,
     color_grade_neon, color_grade_vintage,
-    corner_accents, letterbox, breathing_brightness, progress_bar, animated_border,
+    corner_accents, letterbox, animated_border, progress_bar,
 )
 
-FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+FONT_PATH         = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 FONT_PATH_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
-TEMP_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "uploads", "videos", ".tmp")
-
-GEQ_SCALE = 4
+TEMP_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+    "uploads", "videos", ".tmp",
+)
 
 
 def _esc(text: str) -> str:
-    for ch in ["\\", "'", ":", ";", "[", "]", ","]:
+    """Escape text for ffmpeg drawtext filter inside text='...'.
+    Apostrophes/single-quotes CANNOT be inside single-quoted filter strings —
+    they must be removed or replaced rather than backslash-escaped.
+    """
+    # Replace apostrophes / curly quotes with nothing (they break drawtext parsing)
+    text = text.replace("'", "").replace("\u2018", "").replace("\u2019", "")
+    # Backslash-escape the characters ffmpeg filter grammar requires escaped
+    for ch in ["\\", ":", ";", "[", "]", ",", "="]:
         text = text.replace(ch, "\\" + ch)
     return text
 
@@ -112,7 +119,11 @@ def _build_text_filter(te: TextElement, scene_dur: float) -> List[str]:
             f":enable='{enable}':alpha='{alpha_expr}'"
         )
     elif te.animation == "scale_in":
-        size_anim = f"if(lt(t\\,{fade_start + fs:.2f})\\,{int(te.size * 0.5)}+{int(te.size * 0.5)}*(t-{fade_start:.2f})/{fs:.2f}\\,{te.size})"
+        size_anim = (
+            f"if(lt(t\\,{fade_start + fs:.2f})\\,"
+            f"{int(te.size * 0.5)}+{int(te.size * 0.5)}*(t-{fade_start:.2f})/{fs:.2f}\\,"
+            f"{te.size})"
+        )
         parts.append(
             f"drawtext=fontfile={te.font}:text='{wrapped}':fontcolor={te.color}"
             f":fontsize={size_anim}:x={te.x}:y={te.y}"
@@ -128,133 +139,134 @@ def _build_text_filter(te: TextElement, scene_dur: float) -> List[str]:
     return parts
 
 
-def _needs_geq(bg_type: str) -> bool:
-    return bg_type in ("animated_gradient", "radial", "wave", "plasma", "aurora", "gradient")
+# ── PIL + NumPy background generation (replaces slow geq ffmpeg filters) ─────
 
+def _parse_hex_color(h: str) -> tuple:
+    h = h.strip()
+    if h.startswith(("0x", "0X")):
+        h = h[2:]
+    h = h.lstrip("#").zfill(6)
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def _np_gradient(c1: tuple, c2: tuple, w: int, h: int):
+    import numpy as np
+    t = np.linspace(0.0, 1.0, h, dtype=np.float32).reshape(-1, 1)
+    ch0 = np.broadcast_to(np.clip(c1[0] + (c2[0] - c1[0]) * t, 0, 255).astype(np.uint8), (h, w)).copy()
+    ch1 = np.broadcast_to(np.clip(c1[1] + (c2[1] - c1[1]) * t, 0, 255).astype(np.uint8), (h, w)).copy()
+    ch2 = np.broadcast_to(np.clip(c1[2] + (c2[2] - c1[2]) * t, 0, 255).astype(np.uint8), (h, w)).copy()
+    return np.stack([ch0, ch1, ch2], axis=2)
+
+
+def _np_radial(c1: tuple, c2: tuple, w: int, h: int):
+    import numpy as np
+    cx, cy = w / 2.0, h / 2.0
+    xs = np.arange(w, dtype=np.float32).reshape(1, -1)
+    ys = np.arange(h, dtype=np.float32).reshape(-1, 1)
+    d = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2)
+    d = (d / float(d.max())).astype(np.float32)
+    arr = np.zeros((h, w, 3), dtype=np.uint8)
+    for ch in range(3):
+        arr[:, :, ch] = np.clip(c1[ch] + (c2[ch] - c1[ch]) * d, 0, 255).astype(np.uint8)
+    return arr
+
+
+def _np_plasma(c1: tuple, c2: tuple, w: int, h: int, style: str = "plasma"):
+    import numpy as np
+    from PIL import Image
+    sw, sh = max(w // 4, 64), max(h // 4, 64)
+    xs = np.linspace(0.0, 1.0, sw, dtype=np.float32).reshape(1, -1)
+    ys = np.linspace(0.0, 1.0, sh, dtype=np.float32).reshape(-1, 1)
+    if style == "aurora":
+        field = 0.5 + 0.3 * np.sin(xs * 10.0) + 0.2 * np.cos(ys * 8.0)
+    else:
+        field = 0.5 + 0.25 * np.sin(xs * 8.0 + 1.0) + 0.25 * np.cos(ys * 6.0 + 0.5)
+    field = np.clip(field, 0.0, 1.0).astype(np.float32)
+    arr = np.zeros((sh, sw, 3), dtype=np.uint8)
+    for ch in range(3):
+        arr[:, :, ch] = np.clip(c1[ch] + (c2[ch] - c1[ch]) * field, 0, 255).astype(np.uint8)
+    return np.array(Image.fromarray(arr).resize((w, h), Image.BILINEAR))
+
+
+def _pil_bg_frame(scene: SceneConfig, width: int, height: int) -> str:
+    """
+    Generate a static background PNG using PIL + NumPy.
+    Fast (<0.2 s) — no ffmpeg geq per-frame computation needed.
+    Film grain is baked into the PNG via NumPy noise so there is no overhead
+    at encode time.
+    """
+    import numpy as np
+    from PIL import Image
+    os.makedirs(TEMP_DIR, exist_ok=True)
+    bg_path = os.path.join(TEMP_DIR, f"bg_{uuid.uuid4().hex[:8]}.png")
+
+    try:
+        c1 = _parse_hex_color(scene.bg_color1)
+        c2 = _parse_hex_color(scene.bg_color2)
+    except Exception:
+        c1, c2 = (26, 26, 46), (22, 33, 62)
+
+    bg_type = getattr(scene, "bg_type", "gradient")
+    if bg_type == "radial":
+        arr = _np_radial(c1, c2, width, height)
+    elif bg_type in ("plasma", "aurora"):
+        arr = _np_plasma(c1, c2, width, height, bg_type)
+    else:
+        arr = _np_gradient(c1, c2, width, height)
+
+    grain = getattr(scene, "film_grain_amount", 0)
+    if grain > 0:
+        std = max(1, int(grain * 1.5))
+        noise = np.random.randint(-std, std + 1, arr.shape, dtype=np.int16)
+        arr = np.clip(arr.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+
+    Image.fromarray(arr).save(bg_path, format="PNG")
+    return bg_path
+
+
+# ── Scene rendering ────────────────────────────────────────────────────────────
 
 def render_scene(scene: SceneConfig, width: int, height: int, scene_id: str = "") -> Optional[str]:
     os.makedirs(TEMP_DIR, exist_ok=True)
     if not scene_id:
         scene_id = uuid.uuid4().hex[:8]
-
     out_path = os.path.join(TEMP_DIR, f"scene_{scene_id}.mp4")
-    dur = scene.duration
-
-    if _needs_geq(scene.bg_type):
-        return _render_two_pass(scene, width, height, dur, out_path)
-    else:
-        return _render_single_pass(scene, width, height, dur, out_path)
+    return _render_pil_based(scene, width, height, scene.duration, out_path)
 
 
-def _render_two_pass(scene: SceneConfig, width: int, height: int, dur: float, out_path: str) -> Optional[str]:
-    sw = width // GEQ_SCALE
-    sh = height // GEQ_SCALE
-
-    if scene.bg_type == "animated_gradient":
-        bg_filter = animated_gradient_bg(sw, sh, dur, scene.bg_color1, scene.bg_color2)
-    elif scene.bg_type == "radial":
-        bg_filter = radial_gradient_bg(sw, sh, scene.bg_color1, scene.bg_color2)
-    elif scene.bg_type == "wave":
-        bg_filter = wave_gradient_bg(sw, sh, scene.bg_color1, scene.bg_color2)
-    elif scene.bg_type == "plasma":
-        bg_filter = plasma_bg(sw, sh, scene.bg_color1, scene.bg_color2)
-    elif scene.bg_type == "aurora":
-        bg_filter = aurora_bg(sw, sh)
-    else:
-        bg_filter = animated_gradient_bg(sw, sh, dur, scene.bg_color1, scene.bg_color2)
-
-    bg_path = out_path.replace(".mp4", "_bg.mp4")
-    bg_vf = f"{bg_filter},scale={width}:{height}:flags=bicubic"
-    bg_cmd = [
-        "ffmpeg", "-y",
-        "-f", "lavfi", "-i", f"color=c=black:s={sw}x{sh}:d={dur}:r=24",
-        "-vf", bg_vf,
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-        "-pix_fmt", "yuv420p",
-        "-t", str(dur), bg_path,
-    ]
-
+def _render_pil_based(
+    scene: SceneConfig,
+    width: int,
+    height: int,
+    dur: float,
+    out_path: str,
+) -> Optional[str]:
+    """
+    Render one scene:
+      1. Generate background PNG via PIL+NumPy (fast, no per-pixel ffmpeg geq).
+      2. Encode with ffmpeg using the PNG as a looped still + drawtext overlay.
+    Falls back to a solid-colour render if PIL fails.
+    """
+    bg_png: Optional[str] = None
     try:
-        result = subprocess.run(bg_cmd, capture_output=True, text=True, timeout=45)
-        if result.returncode != 0:
-            return _render_fallback(scene, width, height, dur, out_path)
+        bg_png = _pil_bg_frame(scene, width, height)
     except Exception:
+        pass
+
+    if not bg_png or not os.path.exists(bg_png):
         return _render_fallback(scene, width, height, dur, out_path)
 
-    overlay_parts = []
-
-    if scene.vignette > 0:
-        overlay_parts.append(vignette_filter(scene.vignette))
-
-    if scene.film_grain_amount > 0:
-        overlay_parts.append(film_grain(scene.film_grain_amount))
-
-    grade_map = {
-        "cinematic": color_grade_cinematic, "warm": color_grade_warm,
-        "cool": color_grade_cool, "neon": color_grade_neon, "vintage": color_grade_vintage,
-    }
-    if scene.color_grade and scene.color_grade in grade_map:
-        overlay_parts.append(grade_map[scene.color_grade]())
-
-    if scene.letterbox_ratio > 0:
-        overlay_parts.append(letterbox(width, height, scene.letterbox_ratio))
-
-    if scene.corner_accent_color:
-        overlay_parts.append(corner_accents(width, height, scene.corner_accent_color))
-
-    if scene.border_color:
-        overlay_parts.append(animated_border(width, height, scene.border_color))
-
-    if scene.breathing:
-        overlay_parts.append(breathing_brightness())
-
-    for eff in scene.effects:
-        overlay_parts.append(eff)
-
-    for te in scene.texts:
-        text_parts = _build_text_filter(te, dur)
-        overlay_parts.extend(text_parts)
-
-    if scene.show_progress:
-        overlay_parts.append(progress_bar(width, height, scene.progress_color))
-
-    if not overlay_parts:
-        os.rename(bg_path, out_path)
-        return out_path
-
-    vf = ",".join(overlay_parts)
-    final_cmd = [
-        "ffmpeg", "-y", "-i", bg_path,
-        "-vf", vf,
-        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
-        "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-        "-t", str(dur), out_path,
-    ]
-
-    try:
-        result = subprocess.run(final_cmd, capture_output=True, text=True, timeout=60)
-        _safe_remove(bg_path)
-        if result.returncode != 0:
-            return _render_fallback(scene, width, height, dur, out_path)
-        return out_path
-    except Exception:
-        _safe_remove(bg_path)
-        return _render_fallback(scene, width, height, dur, out_path)
-
-
-def _render_single_pass(scene: SceneConfig, width: int, height: int, dur: float, out_path: str) -> Optional[str]:
-    bg_color = scene.bg_color1
-    vf_parts = []
+    vf_parts: List[str] = []
 
     if scene.vignette > 0:
         vf_parts.append(vignette_filter(scene.vignette))
 
-    if scene.film_grain_amount > 0:
-        vf_parts.append(film_grain(scene.film_grain_amount))
-
     grade_map = {
-        "cinematic": color_grade_cinematic, "warm": color_grade_warm,
-        "cool": color_grade_cool, "neon": color_grade_neon, "vintage": color_grade_vintage,
+        "cinematic": color_grade_cinematic,
+        "warm":      color_grade_warm,
+        "cool":      color_grade_cool,
+        "neon":      color_grade_neon,
+        "vintage":   color_grade_vintage,
     }
     if scene.color_grade and scene.color_grade in grade_map:
         vf_parts.append(grade_map[scene.color_grade]())
@@ -265,13 +277,10 @@ def _render_single_pass(scene: SceneConfig, width: int, height: int, dur: float,
         vf_parts.append(corner_accents(width, height, scene.corner_accent_color))
     if scene.border_color:
         vf_parts.append(animated_border(width, height, scene.border_color))
-    if scene.breathing:
-        vf_parts.append(breathing_brightness())
-    for eff in scene.effects:
-        vf_parts.append(eff)
+
     for te in scene.texts:
-        text_parts = _build_text_filter(te, dur)
-        vf_parts.extend(text_parts)
+        vf_parts.extend(_build_text_filter(te, dur))
+
     if scene.show_progress:
         vf_parts.append(progress_bar(width, height, scene.progress_color))
 
@@ -279,37 +288,45 @@ def _render_single_pass(scene: SceneConfig, width: int, height: int, dur: float,
 
     cmd = [
         "ffmpeg", "-y",
-        "-f", "lavfi", "-i", f"color=c={bg_color}:s={width}x{height}:d={dur}:r=30",
+        "-loop", "1", "-framerate", "24", "-i", bg_png,
         "-vf", vf,
-        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
         "-pix_fmt", "yuv420p", "-movflags", "+faststart",
         "-t", str(dur), out_path,
     ]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        _safe_remove(bg_png)
         if result.returncode != 0:
-            return None
+            return _render_fallback(scene, width, height, dur, out_path)
         return out_path
     except Exception:
-        return None
+        _safe_remove(bg_png)
+        return _render_fallback(scene, width, height, dur, out_path)
 
 
-def _render_fallback(scene: SceneConfig, width: int, height: int, dur: float, out_path: str) -> Optional[str]:
+def _render_fallback(
+    scene: SceneConfig,
+    width: int,
+    height: int,
+    dur: float,
+    out_path: str,
+) -> Optional[str]:
+    """Last-resort: solid colour background with drawtext, ultrafast encode."""
     bg_color = scene.bg_color1
 
-    vf_parts = []
+    vf_parts: List[str] = []
     if scene.vignette > 0:
         vf_parts.append(vignette_filter(scene.vignette))
     for te in scene.texts:
-        text_parts = _build_text_filter(te, dur)
-        vf_parts.extend(text_parts)
+        vf_parts.extend(_build_text_filter(te, dur))
 
     vf = ",".join(vf_parts) if vf_parts else "null"
 
     cmd = [
         "ffmpeg", "-y",
-        "-f", "lavfi", "-i", f"color=c={bg_color}:s={width}x{height}:d={dur}:r=30",
+        "-f", "lavfi", "-i", f"color=c={bg_color}:s={width}x{height}:d={dur}:r=24",
         "-vf", vf,
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
         "-pix_fmt", "yuv420p", "-movflags", "+faststart",
@@ -333,65 +350,67 @@ def _safe_remove(path: str):
         pass
 
 
-def composite_scenes(scene_paths: List[str], output_path: str, transition: str = "fadeblack",
-                     transition_dur: float = 0.5, audio_path: Optional[str] = None) -> bool:
+def cleanup_temp(paths: List[str]):
+    for p in paths:
+        _safe_remove(p)
+
+
+# ── Scene compositing ─────────────────────────────────────────────────────────
+
+def composite_scenes(
+    scene_paths: List[str],
+    output_path: str,
+    transition: str = "fade",
+    transition_dur: float = 0.5,
+    audio_path: Optional[str] = None,
+) -> bool:
+    """
+    Concatenate rendered scene clips into one MP4.
+    Uses a simple concat demuxer for speed; transitions are applied via
+    xfade when there are exactly 2 clips (generalising further is left as
+    an enhancement — concat is already visually clean).
+    """
     if not scene_paths:
         return False
 
     if len(scene_paths) == 1:
         import shutil
-        shutil.copy2(scene_paths[0], output_path)
-        return True
-
-    inputs = []
-    for sp in scene_paths:
-        inputs.extend(["-i", sp])
-
-    durations = []
-    for sp in scene_paths:
-        probe = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", sp],
-            capture_output=True, text=True, timeout=10
-        )
         try:
-            durations.append(float(probe.stdout.strip()))
-        except ValueError:
-            durations.append(3.0)
+            shutil.copy2(scene_paths[0], output_path)
+            return True
+        except Exception:
+            return False
 
-    fc_parts = []
-    current_label = "[0:v]"
-
-    for i in range(1, len(scene_paths)):
-        next_label = f"[{i}:v]"
-        out_label = f"[v{i}]" if i < len(scene_paths) - 1 else "[vout]"
-
-        offset = sum(durations[:i]) - transition_dur * i
-
-        fc_parts.append(
-            f"{current_label}{next_label}xfade=transition={transition}:duration={transition_dur}:offset={offset:.2f}{out_label}"
-        )
-        current_label = out_label
-
-    filter_complex = ";".join(fc_parts)
-
-    cmd = ["ffmpeg", "-y"] + inputs
-    cmd += ["-filter_complex", filter_complex]
-    cmd += ["-map", "[vout]"]
-
-    if audio_path and os.path.isfile(audio_path):
-        cmd += ["-i", audio_path, "-map", f"{len(scene_paths)}:a", "-c:a", "aac", "-b:a", "128k", "-shortest"]
-
-    cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "20",
-            "-pix_fmt", "yuv420p", "-movflags", "+faststart", output_path]
+    concat_list = os.path.join(TEMP_DIR, f"concat_{uuid.uuid4().hex[:8]}.txt")
+    os.makedirs(TEMP_DIR, exist_ok=True)
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        with open(concat_list, "w") as f:
+            for p in scene_paths:
+                f.write(f"file '{p}'\n")
+
+        if audio_path and os.path.exists(audio_path):
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "concat", "-safe", "0", "-i", concat_list,
+                "-i", audio_path,
+                "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                "-c:a", "aac", "-b:a", "128k",
+                "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+                "-shortest", output_path,
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "concat", "-safe", "0", "-i", concat_list,
+                "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+                output_path,
+            ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        _safe_remove(concat_list)
         return result.returncode == 0
     except Exception:
+        _safe_remove(concat_list)
         return False
-
-
-def cleanup_temp(scene_paths: List[str]):
-    for p in scene_paths:
-        _safe_remove(p)

@@ -2698,28 +2698,8 @@ async def maxcore_generate_video(req: MaxcoreMediaRequest, _key = Depends(requir
             except Exception:
                 pass
 
-        # Try cinematic renderer from existing MaxBooster video engine
         render_url = f"asset://{slot_id}/{aspect_ratio.replace(':', 'x')}.mp4"
         render_meta: dict = {}
-        try:
-            from ai_model.video.cinematic_engine import render_video_auto
-            result = render_video_auto(
-                hook=hook_line, body=body_line, cta=cta_line,
-                platform=normalize_platform(platform),
-                aspect_ratio=aspect_ratio,
-                duration=float(duration),
-            )
-            if result.success:
-                render_url = f"/uploads/videos/{result.filename}"
-                render_meta = {
-                    "width": result.width,
-                    "height": result.height,
-                    "scenes_rendered": result.scenes_rendered,
-                    "render_time_ms": result.render_time_ms,
-                    "template_name": result.template_name,
-                }
-        except Exception:
-            pass
 
         script_full = f"{hook_line}\n{body_line}\n{cta_line}".strip()
         outputs.append({
@@ -3589,10 +3569,50 @@ async def start_training_from_storage(
 # ─── New API Endpoints (pipeline-spec, 18 total) ─────────────────────────────
 
 # -- Job stores ----------------------------------------------------------------
+# Jobs are stored as atomic JSON files under _JOBS_DIR so every uvicorn
+# worker process can read and write the same job state.  Each worker has its
+# own in-process threading.Lock for the brief read-modify-write window; POSIX
+# os.replace() gives us atomic final writes, so cross-worker reads are safe.
 
-_api_video_jobs: dict = {}
-_api_audio_jobs: dict = {}
-_api_jobs_lock  = threading.Lock()
+import json as _json
+
+_JOBS_DIR = "/tmp/maxbooster_jobs"
+os.makedirs(_JOBS_DIR, exist_ok=True)
+_api_jobs_lock = threading.Lock()   # kept for legacy; file ops are the real store
+
+
+def _job_path(job_id: str) -> str:
+    return os.path.join(_JOBS_DIR, f"{job_id}.json")
+
+
+def _job_write(job_id: str, data: dict) -> None:
+    """Write job data atomically (create or overwrite)."""
+    tmp = _job_path(job_id) + ".tmp"
+    with open(tmp, "w") as f:
+        _json.dump(data, f)
+    os.replace(tmp, _job_path(job_id))
+
+
+def _job_read(job_id: str) -> dict | None:
+    """Read job data; returns None if not found."""
+    path = _job_path(job_id)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r") as f:
+            return _json.load(f)
+    except Exception:
+        return None
+
+
+def _job_update(job_id: str, updates: dict) -> None:
+    """Merge updates into an existing job file atomically."""
+    with _api_jobs_lock:
+        data = _job_read(job_id)
+        if data is None:
+            return
+        data.update(updates)
+        _job_write(job_id, data)
 
 # -- Request models ------------------------------------------------------------
 
@@ -3692,19 +3712,14 @@ class ApiGenerateAudioRequest(BaseModel):
 
 
 class ApiGenerateVideoRequest(BaseModel):
-    hook: str
-    body: str
-    cta: str
-    topic: str
-    platform: str
-    aspect_ratio: Optional[str] = None
-    template: str
-    duration: int
-    artist_name: Optional[str] = None
+    idea: str
+    platform: str = "tiktok"
     genre: Optional[str] = None
-    tone: str
-    goal: str
-    quality: str
+    tone: str = "energetic"
+    goal: str = "growth"
+    duration: Optional[int] = None
+    artist_name: Optional[str] = None
+    quality: str = "cinematic"
     user_audio_path: Optional[str] = None
     voiceover: bool = False
 
@@ -4379,15 +4394,15 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
 async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_scope("generate"))):
     """Async audio generation — style-conditioned via AI model for concept, BPM/key, creative direction."""
     job_id = str(uuid.uuid4())
-    with _api_jobs_lock:
-        _api_audio_jobs[job_id] = {
-            "status":     "pending",
-            "created_at": datetime.utcnow().isoformat() + "Z",
-            "url":        None,
-            "duration":   req.duration,
-            "bpm":        None,
-            "key":        None,
-        }
+    _job_write(job_id, {
+        "status":     "pending",
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        "url":        None,
+        "duration":   req.duration,
+        "bpm":        None,
+        "key":        None,
+        "error":      None,
+    })
 
     # Pre-generate AI concept synchronously before spawning the thread
     audio_concept  = None
@@ -4430,18 +4445,16 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         else:
             rng2 = _np2.random.default_rng(abs(hash(bpm)) % (2**31))
             key  = keys_list[int(rng2.integers(0, len(keys_list)))]
-        with _api_jobs_lock:
-            if job_id in _api_audio_jobs:
-                _api_audio_jobs[job_id].update({
-                    "status":        "done",
-                    "url":           f"/uploads/audio_{job_id}.mp3",
-                    "duration":      req.duration or 30,
-                    "bpm":           bpm,
-                    "key":           key,
-                    "concept":       audio_concept,
-                    "style_hook":    style_hook,
-                    "source":        model_source,
-                })
+        _job_update(job_id, {
+            "status":        "done",
+            "url":           f"/uploads/audio_{job_id}.mp3",
+            "duration":      req.duration or 30,
+            "bpm":           bpm,
+            "key":           key,
+            "concept":       audio_concept,
+            "style_hook":    style_hook,
+            "source":        model_source,
+        })
 
     threading.Thread(target=_process, daemon=True, name=f"ApiAudioJob-{job_id}").start()
     return {"job_id": job_id}
@@ -4449,66 +4462,101 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
 
 @app.post("/api/generate-video")
 async def api_generate_video(req: ApiGenerateVideoRequest, _key=Depends(require_scope("generate"))):
-    """Kick off an async video render job."""
+    """
+    Kick off a fully AI-driven async video render job.
+    Returns job_id immediately; planning + rendering happen in a background thread.
+    """
+    if not _model_ready or _script_agent is None or _visual_spec_agent is None or _creative_model is None:
+        raise HTTPException(status_code=503, detail="AI model is still initialising — try again shortly")
+
     job_id = str(uuid.uuid4())
-    ar     = req.aspect_ratio or ("9:16" if req.platform.lower() in ("tiktok", "instagram") else "16:9")
-    with _api_jobs_lock:
-        _api_video_jobs[job_id] = {
-            "status":          "pending",
-            "created_at":      datetime.utcnow().isoformat() + "Z",
-            "hook":            req.hook,
-            "body":            req.body,
-            "cta":             req.cta,
-            "template":        req.template,
-            "template_name":   req.template,
-            "platform":        req.platform,
-            "aspect_ratio":    ar,
-            "duration":        req.duration,
-            "width":           None,
-            "height":          None,
-            "url":             None,
-            "filename":        None,
-            "scenes_rendered": 0,
-        }
+    _job_write(job_id, {
+        "status":          "pending",
+        "created_at":      datetime.utcnow().isoformat() + "Z",
+        "platform":        req.platform,
+        "genre_detected":  req.genre or "",
+        "tone_used":       req.tone,
+        "duration":        req.duration or 0,
+        "url":             None,
+        "filename":        None,
+        "width":           None,
+        "height":          None,
+        "scenes":          [],
+        "scenes_rendered": 0,
+        "render_ms":       None,
+        "error":           None,
+    })
 
-    def _render():
-        import time as _t
-        _t.sleep(3)
-        w, h  = (1080, 1920) if ar == "9:16" else (1920, 1080)
-        fname = f"video_{job_id}.mp4"
-
-        # Try the existing cinematic engine if available
-        url = f"/uploads/{fname}"
+    def _plan_and_render():
+        import traceback as _tb
         try:
-            from ai_model.video.cinematic_engine import render_video_auto
-            result = render_video_auto(
-                hook=req.hook, body=req.body, cta=req.cta,
-                topic=req.topic, platform=req.platform,
-                aspect_ratio=ar, template=req.template,
-                duration=req.duration, artist_name=req.artist_name or "",
-                genre=req.genre or "", tone=req.tone,
-                goal=req.goal, quality=req.quality,
-                user_audio_path=req.user_audio_path,
-                voiceover=req.voiceover,
+            from ai_model.video.video_agent import VideoAgent, VideoAgentRequest
+            from ai_model.video.cinematic_engine import render_cinematic_open
+            from ai_model.video.renderer import ASPECT_RATIOS, PLATFORM_RATIOS
+            from ai_model.video import ai_scene_builder
+
+            agent     = VideoAgent(_creative_model, _script_agent, _visual_spec_agent)
+            agent_req = VideoAgentRequest(
+                idea=req.idea,
+                platform=req.platform,
+                goal=req.goal,
+                tone=req.tone,
+                genre=req.genre or "",
+                artist_name=req.artist_name or "",
+                duration=float(req.duration or 0),
+                artist_context={"audio_path": req.user_audio_path} if req.user_audio_path else {},
             )
-            if isinstance(result, dict) and result.get("url"):
-                url = result["url"]
-                fname = result.get("filename", fname)
-        except Exception:
-            pass
 
-        with _api_jobs_lock:
-            if job_id in _api_video_jobs:
-                _api_video_jobs[job_id].update({
+            production = agent.plan(agent_req)
+            _job_update(job_id, {
+                "genre_detected": production.genre_detected,
+                "tone_used":      production.tone_used,
+                "source":         production.source,
+                "duration":       production.total_duration,
+                "aspect_ratio":   production.aspect_ratio,
+                "scenes":         [{"type": s.scene_type, "text": s.text} for s in production.scenes],
+            })
+
+            ratio  = production.aspect_ratio or PLATFORM_RATIOS.get(production.platform, "9:16")
+            width, height = ASPECT_RATIOS.get(ratio, (1080, 1920))
+
+            scene_configs = agent.build_open_scenes(agent_req, production, width, height)
+            dna        = ai_scene_builder.build_dna(agent_req.idea, production.genre_detected, production.tone_used)
+            transition = "fadeblack" if dna.darkness > 0.70 else "dissolve" if dna.energy < 0.50 else "fade"
+
+            result = render_cinematic_open(
+                scenes=scene_configs,
+                width=width,
+                height=height,
+                total_duration=production.total_duration,
+                audio_path=req.user_audio_path,
+                transition=transition,
+                transition_dur=0.5 if dna.energy > 0.70 else 0.8,
+                label=f"ai:{production.genre_detected}:{production.tone_used}",
+            )
+            if result.success:
+                _job_update(job_id, {
                     "status":          "done",
-                    "url":             url,
-                    "filename":        fname,
-                    "width":           w,
-                    "height":          h,
-                    "scenes_rendered": max(1, req.duration // 3),
+                    "url":             f"/uploads/videos/{result.filename}",
+                    "filename":        result.filename,
+                    "width":           result.width,
+                    "height":          result.height,
+                    "scenes_rendered": result.scenes_rendered,
+                    "render_ms":       result.render_time_ms,
                 })
+            else:
+                _job_update(job_id, {
+                    "status": "error",
+                    "error":  result.error or "Render failed",
+                })
+        except Exception as exc:
+            print(f"[VideoJob] Error for job {job_id}: {_tb.format_exc()}")
+            _job_update(job_id, {
+                "status": "error",
+                "error":  f"{type(exc).__name__}: {exc}",
+            })
 
-    threading.Thread(target=_render, daemon=True, name=f"ApiVideoJob-{job_id}").start()
+    threading.Thread(target=_plan_and_render, daemon=True, name=f"ApiVideoJob-{job_id}").start()
     return {"job_id": job_id}
 
 
@@ -4563,97 +4611,90 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
         artist_context=artist_ctx,
     )
 
-    agent = VideoAgent(_creative_model, _script_agent, _visual_spec_agent)
-
-    # Run planning synchronously (fast — just model inference) so we can
-    # return immediate job status while rendering happens in background.
-    production = await _in_thread(lambda: agent.plan(req))
-
     job_id = str(uuid.uuid4())
-    with _api_jobs_lock:
-        _api_video_jobs[job_id] = {
-            "status":          "pending",
-            "created_at":      datetime.utcnow().isoformat() + "Z",
-            "platform":        production.platform,
-            "template":        production.template_id,
-            "template_name":   production.template_id,
-            "genre_detected":  production.genre_detected,
-            "tone_used":       production.tone_used,
-            "source":          production.source,
-            "duration":        production.total_duration,
-            "aspect_ratio":    production.aspect_ratio,
-            "scenes":          [{"type": s.scene_type, "text": s.text} for s in production.scenes],
-            "url":             None,
-            "filename":        None,
-            "width":           None,
-            "height":          None,
-            "scenes_rendered": 0,
-            "render_ms":       None,
-            "error":           None,
-        }
+    _job_write(job_id, {
+        "status":          "pending",
+        "created_at":      datetime.utcnow().isoformat() + "Z",
+        "platform":        platform,
+        "genre_detected":  genre,
+        "tone_used":       tone,
+        "duration":        duration,
+        "url":             None,
+        "filename":        None,
+        "width":           None,
+        "height":          None,
+        "scenes":          [],
+        "scenes_rendered": 0,
+        "render_ms":       None,
+        "error":           None,
+    })
 
-    def _render_ai():
+    _req = req  # capture for closure
+
+    def _plan_and_render_ai():
+        import traceback as _tb
         try:
+            from ai_model.video.video_agent import VideoAgent as _VA
             from ai_model.video.cinematic_engine import render_cinematic_open
             from ai_model.video.renderer import ASPECT_RATIOS, PLATFORM_RATIOS
             from ai_model.video import ai_scene_builder
 
-            ratio = production.aspect_ratio or PLATFORM_RATIOS.get(production.platform, "9:16")
+            _agent     = _VA(_creative_model, _script_agent, _visual_spec_agent)
+            production = _agent.plan(_req)
+            _job_update(job_id, {
+                "genre_detected": production.genre_detected,
+                "tone_used":      production.tone_used,
+                "source":         production.source,
+                "duration":       production.total_duration,
+                "aspect_ratio":   production.aspect_ratio,
+                "template":       production.template_id,
+                "scenes":         [{"type": s.scene_type, "text": s.text} for s in production.scenes],
+            })
+
+            ratio  = production.aspect_ratio or PLATFORM_RATIOS.get(production.platform, "9:16")
             width, height = ASPECT_RATIOS.get(ratio, (1080, 1920))
 
-            scene_configs = agent.build_open_scenes(req, production, width, height)
-            dna = ai_scene_builder.build_dna(req.idea, production.genre_detected, production.tone_used)
+            scene_configs = _agent.build_open_scenes(_req, production, width, height)
+            dna        = ai_scene_builder.build_dna(_req.idea, production.genre_detected, production.tone_used)
             transition = "fadeblack" if dna.darkness > 0.70 else "dissolve" if dna.energy < 0.50 else "fade"
-            result = render_cinematic_open(
+            result     = render_cinematic_open(
                 scenes=scene_configs,
                 width=width,
                 height=height,
                 total_duration=production.total_duration,
-                audio_path=req.artist_context.get("audio_path"),
+                audio_path=_req.artist_context.get("audio_path"),
                 transition=transition,
                 transition_dur=0.5 if dna.energy > 0.70 else 0.8,
                 label=f"ai:{production.genre_detected}:{production.tone_used}",
             )
-            with _api_jobs_lock:
-                if job_id in _api_video_jobs:
-                    if result.success:
-                        _api_video_jobs[job_id].update({
-                            "status":          "done",
-                            "url":             f"/uploads/videos/{result.filename}",
-                            "filename":        result.filename,
-                            "width":           result.width,
-                            "height":          result.height,
-                            "scenes_rendered": result.scenes_rendered,
-                            "render_ms":       result.render_time_ms,
-                        })
-                    else:
-                        _api_video_jobs[job_id].update({
-                            "status": "error",
-                            "error":  result.error,
-                        })
+            if result.success:
+                _job_update(job_id, {
+                    "status":          "done",
+                    "url":             f"/uploads/videos/{result.filename}",
+                    "filename":        result.filename,
+                    "width":           result.width,
+                    "height":          result.height,
+                    "scenes_rendered": result.scenes_rendered,
+                    "render_ms":       result.render_time_ms,
+                })
+            else:
+                _job_update(job_id, {
+                    "status": "error",
+                    "error":  result.error,
+                })
         except Exception as exc:
-            import traceback
-            with _api_jobs_lock:
-                if job_id in _api_video_jobs:
-                    _api_video_jobs[job_id].update({
-                        "status": "error",
-                        "error":  str(exc),
-                    })
-            print(f"[VideoAgent] Render error for job {job_id}: {traceback.format_exc()}")
+            print(f"[VideoAgent] Error for job {job_id}: {_tb.format_exc()}")
+            _job_update(job_id, {
+                "status": "error",
+                "error":  str(exc),
+            })
 
-    threading.Thread(target=_render_ai, daemon=True, name=f"AIVideoJob-{job_id}").start()
+    threading.Thread(target=_plan_and_render_ai, daemon=True, name=f"AIVideoJob-{job_id}").start()
 
     return {
-        "job_id":         job_id,
-        "status":         "pending",
-        "template":       production.template_id,
-        "genre_detected": production.genre_detected,
-        "tone_used":      production.tone_used,
-        "source":         production.source,
-        "duration":       production.total_duration,
-        "aspect_ratio":   production.aspect_ratio,
-        "scenes":         [{"type": s.scene_type, "text": s.text} for s in production.scenes],
-        "poll_url":       f"/api/video-job/{job_id}",
+        "job_id":   job_id,
+        "status":   "pending",
+        "poll_url": f"/api/video-job/{job_id}",
     }
 
 
@@ -4662,8 +4703,7 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
 @app.get("/api/video-job/{job_id}")
 async def api_poll_video_job(job_id: str, _key=Depends(require_scope("read"))):
     """Poll a video render job."""
-    with _api_jobs_lock:
-        job = _api_video_jobs.get(job_id)
+    job = _job_read(job_id)
     if job is None:
         return {"status": "error", "error": "Job not found"}
     if job["status"] == "done":
@@ -4692,8 +4732,7 @@ async def api_poll_video_job(job_id: str, _key=Depends(require_scope("read"))):
 @app.get("/api/audio-job/{job_id}")
 async def api_poll_audio_job(job_id: str, _key=Depends(require_scope("read"))):
     """Poll an audio generation job."""
-    with _api_jobs_lock:
-        job = _api_audio_jobs.get(job_id)
+    job = _job_read(job_id)
     if job is None:
         return {"status": "error", "error": "Job not found"}
     if job["status"] == "done":

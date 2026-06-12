@@ -603,50 +603,49 @@ async def gpu_status():
 
 @app.post("/generate/video", response_model=VideoGenerateResponse)
 async def generate_video(req: VideoGenerateRequest):
-    from ..video.cinematic_engine import render_video_auto
-    from ..video.renderer import PLATFORM_RATIOS
+    from ..video.video_agent import VideoAgent, VideoAgentRequest
+    from ..video.cinematic_engine import render_cinematic_open
+    from ..video.renderer import ASPECT_RATIOS, PLATFORM_RATIOS
+    from ..video import ai_scene_builder
 
-    start = time.time()
+    start    = time.time()
     platform = normalize_platform(req.platform)
+    idea     = req.topic or req.hook or req.body or "new music"
+    tone     = req.tone or "energetic"
+    goal     = req.goal or "growth"
 
-    hook = req.hook
-    body = req.body
-    cta = req.cta
-    source = "custom"
+    agent     = VideoAgent(creative_model, script_agent, visual_spec_agent)
+    agent_req = VideoAgentRequest(
+        idea=idea, platform=platform, goal=goal, tone=tone,
+        genre=getattr(req, "genre", "") or "",
+        artist_name=req.artist_name or "",
+        duration=float(req.duration or 0),
+    )
+    production = agent.plan(agent_req)
 
-    if req.topic and (not hook or not body):
-        script_result = script_agent.run(ScriptRequest(
-            idea=req.topic,
-            platform=platform,
-            goal=req.goal,
-            tone=req.tone,
-        ))
-        hook = hook or script_result.hook
-        body = body or script_result.body
-        cta = cta or script_result.cta
-        source = getattr(script_result, "source", "template")
+    ratio  = production.aspect_ratio or PLATFORM_RATIOS.get(platform, "9:16")
+    width, height = ASPECT_RATIOS.get(ratio, (1080, 1920))
 
-    ratio = req.aspect_ratio or PLATFORM_RATIOS.get(platform, "9:16")
-    quality = req.quality if req.quality in ["quick", "cinematic"] else "cinematic"
+    scene_configs = agent.build_open_scenes(agent_req, production, width, height)
+    dna        = ai_scene_builder.build_dna(idea, production.genre_detected, production.tone_used)
+    transition = "fadeblack" if dna.darkness > 0.70 else "dissolve" if dna.energy < 0.50 else "fade"
 
-    result = render_video_auto(
-        hook=hook, body=body, cta=cta,
-        platform=platform, aspect_ratio=ratio,
-        template=req.template, duration=req.duration,
-        artist_name=req.artist_name or "", quality=quality,
-        bg_color=req.bg_color, text_color=req.text_color,
-        accent_color=req.accent_color,
+    result = render_cinematic_open(
+        scenes=scene_configs, width=width, height=height,
+        total_duration=production.total_duration,
+        transition=transition,
+        transition_dur=0.5 if dna.energy > 0.70 else 0.8,
+        label=f"ai:{production.genre_detected}:{production.tone_used}",
     )
 
     if not result.success:
         return VideoGenerateResponse(
-            success=False,
-            error=result.error,
-            platform=platform,
-            quality=quality,
+            success=False, error=result.error,
+            platform=platform, quality="cinematic",
             processing_time_ms=(time.time() - start) * 1000,
         )
 
+    scenes_text = {s.scene_type: s.text for s in production.scenes}
     return VideoGenerateResponse(
         success=True,
         filename=result.filename,
@@ -655,14 +654,14 @@ async def generate_video(req: VideoGenerateRequest):
         width=result.width,
         height=result.height,
         aspect_ratio=ratio,
-        template=req.template,
-        template_name=result.template_name,
+        template="ai_derived",
+        template_name="ai_derived",
         platform=platform,
-        hook=hook,
-        body=body,
-        cta=cta,
-        source=source,
-        quality=quality,
+        hook=scenes_text.get("hook", ""),
+        body=scenes_text.get("body", ""),
+        cta=scenes_text.get("cta", ""),
+        source=production.source,
+        quality="cinematic",
         scenes_rendered=result.scenes_rendered,
         render_time_ms=result.render_time_ms,
         processing_time_ms=(time.time() - start) * 1000,
@@ -671,12 +670,7 @@ async def generate_video(req: VideoGenerateRequest):
 
 @app.get("/generate/video/templates", response_model=CinematicTemplatesResponse)
 async def get_cinematic_templates():
-    from ..video.templates_v2 import get_template_list
-    templates = get_template_list()
-    return CinematicTemplatesResponse(
-        success=True,
-        templates=[CinematicTemplateInfo(**t) for t in templates],
-    )
+    return CinematicTemplatesResponse(success=True, templates=[])
 
 
 @app.post("/render/thumbnail")
