@@ -4810,10 +4810,12 @@ if __name__ == "__main__":
     import multiprocessing
     import uvicorn
     port = int(os.environ.get("MODEL_API_PORT", 9878))
-    # Use 1 worker per CPU core, capped at 4 — beyond that the GIL and shared
-    # model state become the bottleneck rather than I/O concurrency.
+    # Cap at 2 uvicorn workers.  Each worker loads the full model (~1.7 GB) into
+    # its own process address space.  4 workers = 6.8 GB at idle on an 8 GB host,
+    # leaving no room for inference activations.  2 workers = ~3.4 GB idle,
+    # giving ~4.5 GB headroom for parallel generate() calls.
     cpu_count = multiprocessing.cpu_count()
-    worker_count = min(max(cpu_count, 1), 4)
+    worker_count = min(max(cpu_count, 1), 2)
     print(f"[Server] Starting MaxBooster AI Training Server on port {port} "
           f"({worker_count} uvicorn workers, {cpu_count} CPUs detected)")
     uvicorn.run(

@@ -62,7 +62,7 @@ def render_cinematic_open(
     if not scenes:
         return CinematicResult(success=False, error="No scenes provided")
 
-    dur = max(6.0, min(total_duration, 120.0))
+    dur = max(6.0, min(total_duration, 300.0))
 
     scene_paths: List[str] = []
     render_errors: List[str] = []
@@ -73,7 +73,7 @@ def render_cinematic_open(
         path = render_scene(scene, width, height, sid)
         return idx, path
 
-    with ThreadPoolExecutor(max_workers=min(3, len(scenes))) as executor:
+    with ThreadPoolExecutor(max_workers=min(8, len(scenes))) as executor:
         futures = {executor.submit(_render_one, (i, s)): i for i, s in enumerate(scenes)}
         results_map: Dict[int, str] = {}
         for future in as_completed(futures):

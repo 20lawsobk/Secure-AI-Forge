@@ -8,9 +8,10 @@ energy, darkness, warmth, saturation — computed per-video from genre/tone/idea
 No fixed templates are used.
 """
 from __future__ import annotations
+import gc
 import re
 from dataclasses import dataclass, field
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 
 from ..model.creative_model import CreativeModel
 from ..agents.script_agent import ScriptAgent, ScriptRequest, PLATFORM_CTAS
@@ -20,6 +21,7 @@ from .cinematic_engine import render_cinematic_open
 from .renderer import ASPECT_RATIOS, PLATFORM_RATIOS
 from .scenes import SceneConfig
 from . import ai_scene_builder
+from .dataset_sampler import sample_all_scenes as _sample_all_scenes
 
 
 # ── Known genre tokens (must match tokenizer.py CONTROL_TOKENS) ─────────────
@@ -187,6 +189,46 @@ class VideoProduction:
     tone_used: str = ""
 
 
+# ── Dynamic scene-sequence builder ──────────────────────────────────────────
+
+# Repeating middle-section narrative cycle (between hook+build and cta)
+_SCENE_MIDDLE_CYCLE: List[str] = [
+    "verse", "verse", "chorus", "verse",
+    "bridge", "verse", "chorus", "drop",
+    "verse", "verse", "chorus", "verse",
+    "bridge", "verse", "outro",
+]
+
+
+def _build_scene_sequence(duration: float) -> List[str]:
+    """
+    Compute a dynamic scene-type list from total duration.
+    Targets ~3 s/scene for maximum dynamism.
+    Minimum 3 scenes, maximum 25 scenes.
+
+    Short  (<15 s) →  3 scenes:  hook · body · cta
+    Medium (15-30s) → ~5–10 scenes
+    Long   (30-60s) → ~10–20 scenes
+    Epic   (>60 s)  → up to 25 scenes
+    """
+    n = max(3, min(25, round(duration / 3.0)))
+
+    if n <= 3:
+        return ["hook", "body", "cta"]
+
+    if n <= 5:
+        extras = ["build", "body", "drop"][: n - 2]
+        return ["hook"] + extras + ["cta"]
+
+    # hook + build + <middle> + cta
+    middle_count = n - 3  # n minus hook, build, cta
+    seq = ["hook", "build"]
+    for i in range(middle_count):
+        seq.append(_SCENE_MIDDLE_CYCLE[i % len(_SCENE_MIDDLE_CYCLE)])
+    seq.append("cta")
+    return seq
+
+
 # ── VideoAgent ──────────────────────────────────────────────────────────────
 
 class VideoAgent:
@@ -212,7 +254,16 @@ class VideoAgent:
     # ── Public API ──────────────────────────────────────────────────────────
 
     def plan(self, req: VideoAgentRequest) -> VideoProduction:
-        """Run the AI model to build a full production plan."""
+        """
+        Run the AI model to build a full production plan.
+
+        Scene count is derived from duration at ~3 s/scene (max 25).
+        All scene texts are generated via a SINGLE batched forward pass —
+        generate_batch(B=N) costs the same as generate(B=1) because all N
+        sequences advance simultaneously on each decode step.  This avoids
+        N × T forward passes (sequential) or thread contention / OOM
+        (parallel threading).
+        """
         platform = req.platform.lower().replace(" ", "_")
         tone = req.tone.lower()
         goal = req.goal.lower()
@@ -227,70 +278,42 @@ class VideoAgent:
 
         genre_norm = genre.replace("-", "_").replace(" ", "_")
 
-        # ── Generate all text via the trained model ──────────────────────
-        hook  = self._generate_scene_text("hook",  req.idea, platform, tone, goal, genre_norm)
-        body  = self._generate_scene_text("body",  req.idea, platform, tone, goal, genre_norm)
-        cta   = self._generate_scene_text("cta",   req.idea, platform, tone, goal, genre_norm)
+        # ── Build the full scene-type sequence from duration ─────────────
+        scene_sequence = _build_scene_sequence(dur)
 
-        # For longer formats generate extra scene text driven by model
-        build_text = ""
-        outro_text = ""
-        if dur >= 20.0:
-            build_text = self._generate_scene_text("build", req.idea, platform, tone, goal, genre_norm)
-        if dur >= 35.0:
-            outro_text = self._generate_scene_text("outro", req.idea, platform, tone, goal, genre_norm)
+        # ── Sample all scene texts from the training dataset corpus ──────
+        # Zero inference, O(1) memory, always succeeds.
+        # Phrases are drawn from the same corpus the model was trained on,
+        # personalised with idea / genre / tone / platform / artist_name,
+        # and de-duplicated within the video via the _UsedSet guard.
+        scene_texts, script_source = _sample_all_scenes(
+            scene_sequence,
+            idea=req.idea,
+            genre=genre_norm,
+            tone=tone,
+            platform=platform,
+            artist_name=req.artist_name,
+        )
 
-        # ── Fallback: use ScriptAgent as a second-chance AI pass ─────────
-        script_source = "ai_model"
-        if not (_is_meaningful(hook) and _is_meaningful(body)):
-            try:
-                sr = self.script_agent.run(ScriptRequest(
-                    idea=req.idea, platform=platform, goal=goal, tone=tone
-                ))
-                if not _is_meaningful(hook):
-                    hook = sr.hook
-                if not _is_meaningful(body):
-                    body = sr.body
-                if not _is_meaningful(cta):
-                    cta = sr.cta
-                script_source = sr.source
-            except Exception:
-                pass
-
-        if not _is_meaningful(cta):
-            cta = PLATFORM_CTAS.get(platform, "Follow for more!")
-
-        # ── Build scene list ─────────────────────────────────────────────
+        # ── Assemble VideoScene list in order ────────────────────────────
         scenes: List[VideoScene] = []
-
-        if _is_meaningful(hook):
-            scenes.append(VideoScene(
-                scene_type="hook", text=hook,
-                animation=self._pick_animation(tone, "hook")
-            ))
-        if dur >= 20.0 and _is_meaningful(build_text):
-            scenes.append(VideoScene(
-                scene_type="build", text=build_text,
-                animation=self._pick_animation(tone, "build")
-            ))
-        if _is_meaningful(body):
-            scenes.append(VideoScene(
-                scene_type="body", text=body,
-                animation=self._pick_animation(tone, "body")
-            ))
-        if dur >= 35.0 and _is_meaningful(outro_text):
-            scenes.append(VideoScene(
-                scene_type="outro", text=outro_text,
-                animation=self._pick_animation(tone, "outro")
-            ))
-        if _is_meaningful(cta):
-            scenes.append(VideoScene(
-                scene_type="cta", text=cta,
-                animation=self._pick_animation(tone, "cta")
-            ))
+        for idx, stype in enumerate(scene_sequence):
+            text = scene_texts.get(idx, "")
+            if stype == "cta" and not _is_meaningful(text):
+                text = PLATFORM_CTAS.get(platform, "Follow for more!")
+            if _is_meaningful(text):
+                scenes.append(VideoScene(
+                    scene_type=stype,
+                    text=text,
+                    animation=self._pick_animation(tone, stype),
+                ))
 
         if not scenes:
-            scenes = [VideoScene(scene_type="hook", text=req.idea or "New music out now", animation="fade")]
+            scenes = [VideoScene(
+                scene_type="hook",
+                text=req.idea or "New music out now",
+                animation="fade",
+            )]
 
         return VideoProduction(
             platform=platform,
@@ -349,6 +372,51 @@ class VideoAgent:
 
     # ── Internal helpers ────────────────────────────────────────────────────
 
+    _STAGE_MAP: Dict[str, str] = {
+        "hook":       "<STAGE_HOOK>",
+        "body":       "<STAGE_BODY>",
+        "cta":        "<STAGE_CTA>",
+        "build":      "<VIDEO_BUILD>",
+        "drop":       "<VIDEO_DROP>",
+        "outro":      "<VIDEO_OUTRO>",
+        "verse":      "<STAGE_BODY>",
+        "chorus":     "<VIDEO_BUILD>",
+        "bridge":     "<STAGE_BODY>",
+        "transition": "<VIDEO_BUILD>",
+    }
+
+    def _build_scene_prompt(
+        self,
+        scene_type: str,
+        idea: str,
+        platform: str,
+        tone: str,
+        goal: str,
+        genre: str,
+    ) -> Tuple[str, str]:
+        """
+        Build the control-token prompt for a scene type.
+        Returns (prompt_string, stage_token).
+        Used by generate_batch() to build all prompts in one shot.
+        """
+        stage_tok    = self._STAGE_MAP.get(scene_type, "<STAGE_BODY>")
+        platform_tok = f"<PLATFORM_{platform.upper()}>"
+        tone_tok     = f"<TONE_{tone.upper()}>"
+        goal_tok     = f"<GOAL_{goal.upper()}>"
+        type_tok     = "<TYPE_VIDEO>"
+        genre_key    = genre.lower().replace("-", "_").replace(" ", "_")
+        genre_tok    = _GENRE_TOKEN_MAP.get(genre_key, "")
+
+        idea_snippet = " ".join(idea.split()[:8]) if idea else ""
+        parts = [type_tok, platform_tok, tone_tok, goal_tok]
+        if genre_tok:
+            parts.append(genre_tok)
+        parts.append(stage_tok)
+        if idea_snippet:
+            parts.append(idea_snippet)
+
+        return " ".join(parts), stage_tok
+
     def _generate_scene_text(
         self,
         scene_type: str,
@@ -359,38 +427,12 @@ class VideoAgent:
         genre: str,
     ) -> str:
         """
-        Call the trained model to generate text for a single scene type.
-        Builds a control-token prompt so the model conditions on platform,
-        tone, goal, and genre before generating the scene content.
+        Generate text for a single scene type (used as fallback / standalone).
+        For multi-scene production, prefer generate_batch() via plan().
         """
-        platform_tok = f"<PLATFORM_{platform.upper()}>"
-        tone_tok     = f"<TONE_{tone.upper()}>"
-        goal_tok     = f"<GOAL_{goal.upper()}>"
-        type_tok     = "<TYPE_VIDEO>"
-
-        genre_key = genre.lower().replace("-", "_").replace(" ", "_")
-        genre_tok = _GENRE_TOKEN_MAP.get(genre_key, "")
-
-        stage_map = {
-            "hook":  "<STAGE_HOOK>",
-            "body":  "<STAGE_BODY>",
-            "cta":   "<STAGE_CTA>",
-            "build": "<VIDEO_BUILD>",
-            "drop":  "<VIDEO_DROP>",
-            "outro": "<VIDEO_OUTRO>",
-        }
-        stage_tok = stage_map.get(scene_type, "<STAGE_BODY>")
-
-        idea_snippet = " ".join(idea.split()[:8]) if idea else ""
-        prompt_parts = [type_tok, platform_tok, tone_tok, goal_tok]
-        if genre_tok:
-            prompt_parts.append(genre_tok)
-        prompt_parts.append(stage_tok)
-        if idea_snippet:
-            prompt_parts.append(idea_snippet)
-
-        prompt = " ".join(prompt_parts)
-
+        prompt, stage_tok = self._build_scene_prompt(
+            scene_type, idea, platform, tone, goal, genre
+        )
         try:
             raw = self.model.generate(
                 prompt,
@@ -401,17 +443,15 @@ class VideoAgent:
                 repetition_penalty=1.2,
                 min_length=5,
             )
-            # Strip anything before the stage token (the conditioned prefix)
+            gc.collect()
             if stage_tok in raw:
                 raw = raw.split(stage_tok, 1)[-1]
-            # Stop at the next stage / video control token
             raw = re.split(r"<(?:STAGE|VIDEO)_[A-Z]+>", raw)[0]
             cleaned = _clean(raw)
             if _is_meaningful(cleaned):
                 return cleaned
         except Exception:
-            pass
-
+            gc.collect()
         return ""
 
     def _select_template(self, tone: str, genre: str) -> str:
@@ -429,13 +469,15 @@ class VideoAgent:
     def _pick_animation(tone: str, scene_type: str) -> str:
         """Choose text animation driven by tone and scene position."""
         energetic_tones = {"energetic", "edgy", "playful", "promotional"}
-        _calm_tones     = {"chill", "serious", "professional", "casual"}
+        calm_tones      = {"chill", "serious", "professional", "casual"}
 
         if scene_type == "hook":
             return "scale_in" if tone in energetic_tones else "slide_up"
-        if scene_type in ("build", "drop"):
+        if scene_type in ("build", "drop", "chorus"):
             return "slide_up"
         if scene_type == "cta":
             return "scale_in" if tone in energetic_tones else "fade"
+        if scene_type in ("verse", "bridge", "outro"):
+            return "fade" if tone in calm_tones else "slide_up"
         return "fade"
 

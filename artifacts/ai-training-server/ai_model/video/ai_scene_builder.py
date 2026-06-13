@@ -201,24 +201,50 @@ def build_dna(idea: str, genre: str, tone: str) -> VisualDNA:
 # ── Scene timing ──────────────────────────────────────────────────────────────
 
 _SCENE_WEIGHT: Dict[str, float] = {
-    "hook":  1.4,
-    "build": 0.9,
-    "body":  1.0,
-    "drop":  1.3,
-    "cta":   1.0,
-    "outro": 0.8,
+    "hook":       1.4,
+    "build":      0.9,
+    "body":       1.0,
+    "drop":       1.3,
+    "cta":        1.0,
+    "outro":      0.8,
+    # Extended types
+    "verse":      1.0,
+    "chorus":     1.2,
+    "bridge":     0.85,
+    "transition": 0.7,
 }
 
+# Minimum seconds per scene — ensures 20 scenes in a 60s video stay ~3 s each
+_MIN_SCENE_DUR = 2.5
+
 def allocate_durations(scene_types: List[str], total: float) -> List[float]:
+    """Distribute total duration across scenes by weight, enforcing a minimum per scene."""
+    n = len(scene_types)
+    if n == 0:
+        return []
+    # Reserve enough headroom for minimums so we never go below _MIN_SCENE_DUR
+    min_total = _MIN_SCENE_DUR * n
+    effective_total = max(total, min_total)
     weights = [_SCENE_WEIGHT.get(st, 1.0) for st in scene_types]
     total_w = sum(weights)
-    return [max(3.0, total * w / total_w) for w in weights]
+    return [max(_MIN_SCENE_DUR, effective_total * w / total_w) for w in weights]
 
 
 # ── Per-scene font / layout decisions ────────────────────────────────────────
 
 def _font_size_for_scene(scene_type: str, energy: float, text_len: int) -> int:
-    base = {"hook": 68, "drop": 66, "build": 54, "body": 50, "cta": 58, "outro": 46}.get(scene_type, 52)
+    base = {
+        "hook":       68,
+        "drop":       66,
+        "chorus":     64,
+        "build":      54,
+        "body":       50,
+        "verse":      50,
+        "cta":        58,
+        "bridge":     46,
+        "outro":      46,
+        "transition": 42,
+    }.get(scene_type, 52)
     # Scale down for long text
     if text_len > 60:
         base = int(base * 0.72)
@@ -232,22 +258,28 @@ def _font_size_for_scene(scene_type: str, energy: float, text_len: int) -> int:
 def _y_position(scene_type: str, energy: float) -> str:
     if scene_type == "hook":
         return "(h*0.38)"
-    if scene_type in ("build", "body"):
+    if scene_type in ("build", "body", "verse"):
         return "(h*0.50)"
-    if scene_type == "drop":
+    if scene_type in ("drop", "chorus"):
         return "(h*0.40)"
+    if scene_type == "bridge":
+        return "(h*0.55)"
     if scene_type == "cta":
         return "(h*0.70)"
-    if scene_type == "outro":
+    if scene_type in ("outro", "transition"):
         return "(h*0.80)"
     return "(h-text_h)/2"
 
 
 def _animation_for_scene(scene_type: str, energy: float, seed: int) -> str:
     if energy > 0.80:
-        return {"hook": "scale_in", "drop": "scale_in"}.get(scene_type, "slide_up")
+        return {"hook": "scale_in", "drop": "scale_in", "chorus": "scale_in"}.get(
+            scene_type, "slide_up"
+        )
     if energy > 0.55:
-        return {"hook": "slide_up", "cta": "scale_in"}.get(scene_type, "slide_up")
+        return {"hook": "slide_up", "cta": "scale_in", "chorus": "slide_up"}.get(
+            scene_type, "slide_up"
+        )
     return "fade"
 
 
@@ -273,7 +305,15 @@ def build_scenes(
 
     dna = build_dna(idea, genre, tone)
     palette = derive_palette(dna)
-    bg_type = _choose_bg_type(dna.energy, dna.darkness, dna.seed)
+    base_bg_type = _choose_bg_type(dna.energy, dna.darkness, dna.seed)
+
+    # For large scene counts we cycle through bg types for visual dynamism
+    _BG_ROTATION = [
+        "animated_gradient", "wave", "plasma",
+        "radial", "aurora", "animated_gradient",
+    ]
+    # Emphasis types always get the high-energy bg
+    _EMPHASIS_TYPES = {"chorus", "drop", "hook"}
 
     scene_types = [s.get("type", "body") for s in scenes_data]
     durations = allocate_durations(scene_types, total_duration)
@@ -282,13 +322,25 @@ def build_scenes(
 
     # Grain is film-grain intensity (0–20 FFmpeg scale)
     grain_val = int(dna.grain * 18)
+    base_vignette = 0.35 + dna.darkness * 0.30
 
-    # Overall vignette
-    vignette = 0.35 + dna.darkness * 0.30
-
-    # Effects based on complexity
-    show_progress = dna.energy > 0.70 and len(scenes_data) > 2
+    # Show progress bar on the scene before the last
+    show_progress = dna.energy > 0.70 and len(scenes_data) > 4
     show_border = dna.complexity > 0.72 and dna.saturation > 0.65
+
+    import colorsys as _cs
+
+    def _shift_hex(hex_color: str, shift: float) -> str:
+        c = hex_color.lstrip("0x")
+        try:
+            r, g, b = int(c[0:2], 16) / 255, int(c[2:4], 16) / 255, int(c[4:6], 16) / 255
+            h, s, v = _cs.rgb_to_hsv(r, g, b)
+            r2, g2, b2 = _cs.hsv_to_rgb((h + shift) % 1.0, s, v)
+            return f"0x{int(r2*255):02x}{int(g2*255):02x}{int(b2*255):02x}"
+        except Exception:
+            return hex_color
+
+    many_scenes = len(scenes_data) > 6
 
     for idx, (scene_info, dur) in enumerate(zip(scenes_data, durations)):
         scene_type = scene_info.get("type", "body")
@@ -297,38 +349,71 @@ def build_scenes(
         if not text:
             continue
 
-        # Per-scene palette micro-shift (slight hue rotation between scenes)
+        # ── Per-scene bg type ───────────────────────────────────────────
+        if many_scenes:
+            if scene_type in _EMPHASIS_TYPES:
+                sc_bg_type = "plasma" if dna.energy > 0.65 else "animated_gradient"
+            else:
+                sc_bg_type = _BG_ROTATION[(idx // 4) % len(_BG_ROTATION)]
+        else:
+            sc_bg_type = base_bg_type
+
+        # ── Per-scene hue micro-shift ────────────────────────────────────
         scene_seed = (dna.seed + idx * 17) % 360
         scene_hue_shift = (scene_seed % 9 - 4) / 360.0
 
-        import colorsys as _cs
-        def _shift_hex(hex_color: str, shift: float) -> str:
-            c = hex_color.lstrip("0x")
-            try:
-                r, g, b = int(c[0:2], 16)/255, int(c[2:4], 16)/255, int(c[4:6], 16)/255
-                h, s, v = _cs.rgb_to_hsv(r, g, b)
-                r2, g2, b2 = _cs.hsv_to_rgb((h + shift) % 1.0, s, v)
-                return f"0x{int(r2*255):02x}{int(g2*255):02x}{int(b2*255):02x}"
-            except Exception:
-                return hex_color
+        # Emphasis scenes (chorus/drop) get an amplified hue shift for impact
+        if scene_type in _EMPHASIS_TYPES and many_scenes:
+            scene_hue_shift *= 3.0
 
         sc_bg1 = _shift_hex(palette.bg1, scene_hue_shift)
         sc_bg2 = _shift_hex(palette.bg2, scene_hue_shift * 1.5)
 
+        # ── Per-scene vignette variation (±0.08) ────────────────────────
+        vignette_shift = (((idx * 7) % 5) - 2) * 0.04
+        sc_vignette = _clamp(base_vignette + vignette_shift, 0.15, 0.75)
+
+        # ── Per-scene colour grade ───────────────────────────────────────
+        if scene_type in ("chorus", "drop") and dna.energy > 0.70:
+            sc_color_grade = "neon"
+        elif scene_type == "bridge" and dna.grain > 0.25:
+            sc_color_grade = "vintage"
+        elif scene_type in ("outro",) and dna.warmth > 0.60:
+            sc_color_grade = "warm"
+        else:
+            sc_color_grade = palette.color_grade
+
+        # ── Per-scene text colour: accent for high-energy emphasis ───────
+        if scene_type in ("chorus", "drop") and many_scenes:
+            sc_text_color = palette.accent
+        else:
+            sc_text_color = palette.text_primary
+
         font_size = _font_size_for_scene(scene_type, dna.energy, len(text))
+        # Slightly larger text on emphasis scenes in long videos
+        if scene_type in ("chorus", "drop") and many_scenes:
+            font_size = min(80, int(font_size * 1.08))
+
         y_pos = _y_position(scene_type, dna.energy)
         animation = _animation_for_scene(scene_type, dna.energy, dna.seed + idx)
 
-        # Fade timing
-        fade_in = 0.4 if dna.energy > 0.70 else 0.7
-        fade_out = 0.35 if dna.energy > 0.70 else 0.55
+        # Fade timing: snappier on high-energy scenes
+        if scene_type in ("chorus", "drop", "hook"):
+            fade_in, fade_out = 0.25, 0.25
+        elif dna.energy > 0.70:
+            fade_in, fade_out = 0.4, 0.35
+        else:
+            fade_in, fade_out = 0.7, 0.55
+
+        # Reduce max_chars for many-scene videos (shorter text = more dynamic)
+        max_chars = 22 if (many_scenes and font_size > 56) else (28 if font_size > 56 else 34)
 
         texts = [
             TextElement(
                 text=text,
                 font=FONT_PATH,
                 size=font_size,
-                color=palette.text_primary,
+                color=sc_text_color,
                 x="(w-text_w)/2",
                 y=y_pos,
                 start=0.0,
@@ -338,12 +423,12 @@ def build_scenes(
                 shadow=True,
                 shadow_color="0x000000",
                 shadow_offset=max(2, int(font_size * 0.05)),
-                max_chars=28 if font_size > 56 else 34,
+                max_chars=max_chars,
                 animation=animation,
             )
         ]
 
-        # Artist label on last scene (outro / cta)
+        # Artist label on outro / cta scenes
         if artist_name and scene_type in ("outro", "cta"):
             label_size = max(22, int(font_size * 0.45))
             texts.append(
@@ -366,21 +451,20 @@ def build_scenes(
                 )
             )
 
-        # Build effects list
         effects: List[str] = []
         if dna.energy > 0.75:
             effects.append("breathing")
 
         cfg = SceneConfig(
             duration=dur,
-            bg_type=bg_type,
+            bg_type=sc_bg_type,
             bg_color1=sc_bg1,
             bg_color2=sc_bg2,
             texts=texts,
             effects=effects,
-            vignette=vignette,
+            vignette=sc_vignette,
             film_grain_amount=grain_val,
-            color_grade=palette.color_grade,
+            color_grade=sc_color_grade,
             letterbox_ratio=0.035 if dna.energy > 0.70 and dna.darkness > 0.65 else 0.0,
             corner_accent_color=palette.accent if dna.complexity > 0.75 and idx == 0 else "",
             border_color=palette.accent if show_border and idx % 2 == 0 else "",
