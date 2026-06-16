@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+import sys
 import uuid
 import time
 from dataclasses import dataclass
@@ -77,11 +78,17 @@ def render_cinematic_open(
         futures = {executor.submit(_render_one, (i, s)): i for i, s in enumerate(scenes)}
         results_map: Dict[int, str] = {}
         for future in as_completed(futures):
-            idx, path = future.result()
-            if path:
-                results_map[idx] = path
-            else:
-                render_errors.append(f"Scene {idx} failed")
+            scene_idx = futures[future]
+            try:
+                idx, path = future.result()
+                if path:
+                    results_map[idx] = path
+                else:
+                    print(f"[VideoRender][ERROR] Scene {idx} returned no path", file=sys.stderr)
+                    render_errors.append(f"Scene {idx} failed")
+            except Exception as exc:
+                print(f"[VideoRender][ERROR] Scene {scene_idx} raised exception: {exc}", file=sys.stderr)
+                render_errors.append(f"Scene {scene_idx} failed")
 
     for i in range(len(scenes)):
         if i in results_map:

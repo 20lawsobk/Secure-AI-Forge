@@ -1,6 +1,7 @@
 from __future__ import annotations
 import subprocess
 import os
+import sys
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional, List
@@ -10,8 +11,34 @@ from .effects import (
     corner_accents, letterbox, animated_border, progress_bar,
 )
 
-FONT_PATH         = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-FONT_PATH_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+_MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _resolve_font(name: str) -> str:
+    """Return an absolute path to the named font file, or '' if not found.
+
+    Priority:
+      1. Bundled fonts shipped inside this package (works in all environments).
+      2. Standard Debian/Ubuntu system path (dev container fallback).
+    Callers must treat an empty return value as "font unavailable" and omit
+    the ``fontfile=`` argument from FFmpeg drawtext filters.
+    """
+    bundled = os.path.join(_MODULE_DIR, "fonts", name)
+    if os.path.exists(bundled):
+        return bundled
+    for system_path in [
+        f"/usr/share/fonts/truetype/dejavu/{name}",
+        f"/usr/share/fonts/dejavu/{name}",
+        f"/nix/var/nix/profiles/default/share/fonts/truetype/{name}",
+    ]:
+        if os.path.exists(system_path):
+            return system_path
+    print(f"[VideoRender][WARN] Font not found: {name} — drawtext will use ffmpeg built-in", file=sys.stderr)
+    return ""
+
+
+FONT_PATH         = _resolve_font("DejaVuSans-Bold.ttf")
+FONT_PATH_REGULAR = _resolve_font("DejaVuSans.ttf")
 
 TEMP_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
@@ -101,12 +128,14 @@ def _build_text_filter(te: TextElement, scene_dur: float) -> List[str]:
         f"max(0\\,({fade_end:.2f}-t)/{fe:.2f})\\,1))"
     )
 
+    font_arg = f"fontfile={te.font}:" if te.font and os.path.exists(te.font) else ""
+
     parts = []
     if te.shadow:
         sx = f"({te.x})+{te.shadow_offset}" if not te.x.replace("-", "").isdigit() else str(int(te.x) + te.shadow_offset)
         sy = f"({te.y})+{te.shadow_offset}" if not te.y.replace("-", "").isdigit() else str(int(te.y) + te.shadow_offset)
         parts.append(
-            f"drawtext=fontfile={te.font}:text='{wrapped}':fontcolor={te.shadow_color}@0.5"
+            f"drawtext={font_arg}text='{wrapped}':fontcolor={te.shadow_color}@0.5"
             f":fontsize={te.size}:x={sx}:y={sy}"
             f":enable='{enable}':alpha='{alpha_expr}'"
         )
@@ -114,7 +143,7 @@ def _build_text_filter(te: TextElement, scene_dur: float) -> List[str]:
     if te.animation == "slide_up":
         y_anim = f"if(lt(t\\,{fade_start + fs:.2f})\\,({te.y})+50*(1-(t-{fade_start:.2f})/{fs:.2f})\\,{te.y})"
         parts.append(
-            f"drawtext=fontfile={te.font}:text='{wrapped}':fontcolor={te.color}"
+            f"drawtext={font_arg}text='{wrapped}':fontcolor={te.color}"
             f":fontsize={te.size}:x={te.x}:y={y_anim}"
             f":enable='{enable}':alpha='{alpha_expr}'"
         )
@@ -125,13 +154,13 @@ def _build_text_filter(te: TextElement, scene_dur: float) -> List[str]:
             f"{te.size})"
         )
         parts.append(
-            f"drawtext=fontfile={te.font}:text='{wrapped}':fontcolor={te.color}"
+            f"drawtext={font_arg}text='{wrapped}':fontcolor={te.color}"
             f":fontsize={size_anim}:x={te.x}:y={te.y}"
             f":enable='{enable}':alpha='{alpha_expr}'"
         )
     else:
         parts.append(
-            f"drawtext=fontfile={te.font}:text='{wrapped}':fontcolor={te.color}"
+            f"drawtext={font_arg}text='{wrapped}':fontcolor={te.color}"
             f":fontsize={te.size}:x={te.x}:y={te.y}"
             f":enable='{enable}':alpha='{alpha_expr}'"
         )
@@ -299,9 +328,14 @@ def _render_pil_based(
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         _safe_remove(bg_png)
         if result.returncode != 0:
+            print(
+                f"[VideoRender][ERROR] ffmpeg PIL render failed (rc={result.returncode}):\n{result.stderr[-800:]}",
+                file=sys.stderr,
+            )
             return _render_fallback(scene, width, height, dur, out_path)
         return out_path
-    except Exception:
+    except Exception as exc:
+        print(f"[VideoRender][ERROR] _render_pil_based exception: {exc}", file=sys.stderr)
         _safe_remove(bg_png)
         return _render_fallback(scene, width, height, dur, out_path)
 
@@ -336,9 +370,14 @@ def _render_fallback(
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
+            print(
+                f"[VideoRender][ERROR] ffmpeg fallback render failed (rc={result.returncode}):\n{result.stderr[-800:]}",
+                file=sys.stderr,
+            )
             return None
         return out_path
-    except Exception:
+    except Exception as exc:
+        print(f"[VideoRender][ERROR] _render_fallback exception: {exc}", file=sys.stderr)
         return None
 
 
