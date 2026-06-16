@@ -28,7 +28,7 @@ from typing import Any, Optional, List
 import psycopg2
 import psycopg2.pool
 from psycopg2.extras import RealDictCursor
-from fastapi import FastAPI, HTTPException, Depends, Header, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, Header, Request, BackgroundTasks, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -3711,6 +3711,11 @@ class ApiGenerateAudioRequest(BaseModel):
     platformRules: Optional[Any] = None
 
 
+class SceneOverride(BaseModel):
+    index: int
+    text: str
+
+
 class ApiGenerateVideoRequest(BaseModel):
     idea: str
     platform: str = "tiktok"
@@ -3722,6 +3727,7 @@ class ApiGenerateVideoRequest(BaseModel):
     quality: str = "cinematic"
     user_audio_path: Optional[str] = None
     voiceover: bool = False
+    scenes_override: Optional[List[SceneOverride]] = None
 
 
 class ApiTrainFeedbackRequest(BaseModel):
@@ -4508,6 +4514,14 @@ async def api_generate_video(req: ApiGenerateVideoRequest, _key=Depends(require_
             )
 
             production = agent.plan(agent_req)
+
+            # Apply caller-supplied text overrides before rendering
+            if req.scenes_override:
+                _override_map = {o.index: o.text for o in req.scenes_override}
+                for i, scene in enumerate(production.scenes):
+                    if i in _override_map:
+                        scene.text = _override_map[i]
+
             _job_update(job_id, {
                 "genre_detected": production.genre_detected,
                 "tone_used":      production.tone_used,
@@ -4516,6 +4530,11 @@ async def api_generate_video(req: ApiGenerateVideoRequest, _key=Depends(require_
                 "aspect_ratio":   production.aspect_ratio,
                 "scenes":         [{"type": s.scene_type, "text": s.text} for s in production.scenes],
             })
+
+            # Bail if the client cancelled the job while planning was running
+            _current = _job_read(job_id)
+            if _current and _current.get("status") == "cancelled":
+                return
 
             ratio  = production.aspect_ratio or PLATFORM_RATIOS.get(production.platform, "9:16")
             width, height = ASPECT_RATIOS.get(ratio, (1080, 1920))
@@ -4729,6 +4748,132 @@ async def api_poll_video_job(job_id: str, _key=Depends(require_scope("read"))):
     return {"status": job["status"]}
 
 
+@app.delete("/api/video-job/{job_id}")
+async def api_cancel_video_job(job_id: str, _key=Depends(require_scope("generate"))):
+    """
+    Cancel a pending job (marks it so the render thread exits before encoding)
+    or purge a finished/errored job and delete its output file.
+    """
+    job = _job_read(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    status = job.get("status")
+
+    if status == "pending":
+        _job_update(job_id, {"status": "cancelled"})
+        return {"ok": True, "action": "cancelled", "job_id": job_id}
+
+    if status in ("done", "error", "cancelled"):
+        filename = job.get("filename")
+        if filename:
+            try:
+                (_UPLOADS_PATH / "videos" / filename).unlink(missing_ok=True)
+            except Exception:
+                pass
+        try:
+            os.unlink(_job_path(job_id))
+        except Exception:
+            pass
+        return {"ok": True, "action": "purged", "job_id": job_id}
+
+    return {"ok": True, "action": "no_op", "job_id": job_id}
+
+
+@app.get("/api/video-jobs")
+async def api_list_video_jobs(_key=Depends(require_scope("read"))):
+    """
+    Return a summary of all video jobs in this server session, newest first.
+    Each entry includes enough metadata to render a history view — no scene
+    text payload is included; poll the individual job for full scenes[].
+    """
+    rows = []
+    try:
+        entries = [
+            (fname, os.path.getmtime(os.path.join(_JOBS_DIR, fname)))
+            for fname in os.listdir(_JOBS_DIR)
+            if fname.endswith(".json") and not fname.endswith(".tmp")
+        ]
+        entries.sort(key=lambda x: x[1], reverse=True)
+        for fname, _mtime in entries:
+            job_id = fname[:-5]
+            data = _job_read(job_id)
+            if data is None:
+                continue
+            rows.append({
+                "job_id":          job_id,
+                "status":          data.get("status"),
+                "created_at":      data.get("created_at"),
+                "platform":        data.get("platform"),
+                "genre_detected":  data.get("genre_detected"),
+                "tone_used":       data.get("tone_used"),
+                "duration":        data.get("duration"),
+                "source":          data.get("source"),
+                "scenes_rendered": data.get("scenes_rendered", 0),
+                "aspect_ratio":    data.get("aspect_ratio"),
+                "url":             data.get("url"),
+                "error":           data.get("error"),
+            })
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {"jobs": rows, "total": len(rows)}
+
+
+@app.get("/api/video-job/{job_id}/preview/{scene_idx}")
+async def api_video_job_preview(job_id: str, scene_idx: int, _key=Depends(require_scope("read"))):
+    """
+    Extract a single JPEG thumbnail frame from a completed video job at
+    the temporal midpoint of the requested scene.  Returns image/jpeg.
+    """
+    import subprocess
+
+    job = _job_read(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("status") != "done":
+        raise HTTPException(status_code=409, detail=f"Job is {job.get('status')}, not done")
+
+    filename = job.get("filename")
+    if not filename:
+        raise HTTPException(status_code=404, detail="No output file recorded for this job")
+
+    video_path = _UPLOADS_PATH / "videos" / filename
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail="Video file not found on disk")
+
+    scenes = job.get("scenes", [])
+    num_scenes = max(len(scenes), 1)
+    if scene_idx < 0 or scene_idx >= num_scenes:
+        raise HTTPException(
+            status_code=422,
+            detail=f"scene_idx must be 0–{num_scenes - 1} (video has {num_scenes} scenes)",
+        )
+
+    total_duration = float(job.get("duration") or 10.0)
+    scene_dur = total_duration / num_scenes
+    t = scene_idx * scene_dur + scene_dur * 0.4
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", f"{t:.3f}",
+        "-i", str(video_path),
+        "-frames:v", "1",
+        "-q:v", "3",
+        "-f", "image2pipe",
+        "-vcodec", "mjpeg",
+        "pipe:1",
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=15)
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="Frame extraction timed out")
+
+    if proc.returncode != 0 or not proc.stdout:
+        raise HTTPException(status_code=500, detail="ffmpeg frame extraction failed")
+
+    return Response(content=proc.stdout, media_type="image/jpeg")
+
+
 @app.get("/api/audio-job/{job_id}")
 async def api_poll_audio_job(job_id: str, _key=Depends(require_scope("read"))):
     """Poll an audio generation job."""
@@ -4810,12 +4955,15 @@ if __name__ == "__main__":
     import multiprocessing
     import uvicorn
     port = int(os.environ.get("MODEL_API_PORT", 9878))
-    # Cap at 2 uvicorn workers.  Each worker loads the full model (~1.7 GB) into
-    # its own process address space.  4 workers = 6.8 GB at idle on an 8 GB host,
-    # leaving no room for inference activations.  2 workers = ~3.4 GB idle,
-    # giving ~4.5 GB headroom for parallel generate() calls.
+    # Single worker.  Each worker loads the full model (~1.7 GB) into its own
+    # process address space.  2 workers = ~3.4 GB idle; on the 8 GB host that
+    # leaves only ~2 GB headroom for render threads (PIL frame buffers +
+    # ffmpeg compositor), which tips the host into an OOM crash-loop under
+    # any real render load.  1 worker = ~1.7 GB idle, leaving ~4.3 GB for
+    # parallel PIL scene rendering.  Throughput is identical because render
+    # work is done inside daemon threads, not across workers.
     cpu_count = multiprocessing.cpu_count()
-    worker_count = min(max(cpu_count, 1), 2)
+    worker_count = 1
     print(f"[Server] Starting MaxBooster AI Training Server on port {port} "
           f"({worker_count} uvicorn workers, {cpu_count} CPUs detected)")
     uvicorn.run(

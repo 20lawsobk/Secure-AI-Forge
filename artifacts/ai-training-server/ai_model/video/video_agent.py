@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Tuple
 
 from ..model.creative_model import CreativeModel
-from ..agents.script_agent import ScriptAgent, ScriptRequest, PLATFORM_CTAS
+from ..agents.script_agent import ScriptAgent, PLATFORM_CTAS
 from ..agents.visual_spec_agent import VisualSpecAgent
 from .cinematic_engine import CinematicResult
 from .cinematic_engine import render_cinematic_open

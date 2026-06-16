@@ -92,7 +92,9 @@ function setCached(path: string, status: number, data: unknown): void {
 
 // ─── Safe JSON parsing (handles non-JSON upstream error bodies) ─────────────
 
-async function parseBodyText(body: { text(): Promise<string> }): Promise<unknown> {
+async function parseBodyText(body: {
+  text(): Promise<string>;
+}): Promise<unknown> {
   const text = await body.text();
   try {
     return JSON.parse(text);
@@ -516,10 +518,26 @@ router.post("/video/generate-ai", async (req, res) => {
   await proxyRequest(req, res, "/api/video/generate-ai");
 });
 
-// ─── Job Polling ───────────────────────────────────────────────────────────
+// ─── Job Polling & Management ──────────────────────────────────────────────
+
+router.get("/video-jobs", async (req, res) => {
+  await proxyRequest(req, res, "/api/video-jobs");
+});
 
 router.get("/video-job/:jobId", async (req, res) => {
   await proxyRequest(req, res, `/api/video-job/${req.params.jobId}`);
+});
+
+router.delete("/video-job/:jobId", async (req, res) => {
+  await proxyRequest(req, res, `/api/video-job/${req.params.jobId}`);
+});
+
+router.get("/video-job/:jobId/preview/:sceneIdx", async (req, res) => {
+  await proxyRequest(
+    req,
+    res,
+    `/api/video-job/${req.params.jobId}/preview/${req.params.sceneIdx}`,
+  );
 });
 
 router.get("/audio-job/:jobId", async (req, res) => {

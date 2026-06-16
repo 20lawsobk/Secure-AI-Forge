@@ -73,7 +73,7 @@ def render_cinematic_open(
         path = render_scene(scene, width, height, sid)
         return idx, path
 
-    with ThreadPoolExecutor(max_workers=min(8, len(scenes))) as executor:
+    with ThreadPoolExecutor(max_workers=min(2, len(scenes))) as executor:
         futures = {executor.submit(_render_one, (i, s)): i for i, s in enumerate(scenes)}
         results_map: Dict[int, str] = {}
         for future in as_completed(futures):

@@ -18,8 +18,11 @@ if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
 
-// Cap at 4 workers — beyond that the Python AI server becomes the bottleneck
-const NUM_WORKERS = Math.min(os.cpus().length, 4);
+// Cap at 2 workers.  4 Node workers + 1 Python model (~1.7 GB) leaves only
+// ~1 GB headroom for PIL render threads and ffmpeg.  2 Node workers saves
+// ~300 MB, giving the renderer enough room to run without OOM-killing the
+// Python server mid-render.
+const NUM_WORKERS = Math.min(os.cpus().length, 2);
 
 if (cluster.isPrimary) {
   console.log(
