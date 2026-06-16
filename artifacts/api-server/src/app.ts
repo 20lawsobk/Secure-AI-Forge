@@ -4,6 +4,7 @@ import express, { type Express, type Request, type Response } from "express";
 import cors from "cors";
 import compression from "compression";
 import rateLimit from "express-rate-limit";
+import { Agent, request as undiciRequest } from "undici";
 import router from "./routes";
 
 const app: Express = express();
@@ -27,19 +28,34 @@ app.use(express.urlencoded({ extended: true }));
 app.use("/api", router);
 
 // ─── Proxy /uploads/* directly to the Python AI server ──────────────────────
+// Uses the same undici keep-alive pool as the API proxy so video file requests
+// reuse existing TCP connections instead of opening a new socket each time.
+
 const _MODEL_API_BASE = `http://localhost:${process.env.MODEL_API_PORT || "9878"}`;
+
+const _uploadsPool = new Agent({
+  keepAliveTimeout: 30_000,
+  keepAliveMaxTimeout: 60_000,
+  connections: 8,
+  pipelining: 1,
+});
 
 app.get("/uploads/*path", async (req: Request, res: Response) => {
   try {
-    const upstream = await fetch(`${_MODEL_API_BASE}${req.path}`);
-    if (!upstream.ok) {
-      res.status(upstream.status).send(upstream.statusText);
+    const upstreamRes = await undiciRequest(
+      `${_MODEL_API_BASE}${req.path}`,
+      { method: "GET", dispatcher: _uploadsPool },
+    );
+    if (upstreamRes.statusCode >= 400) {
+      res.status(upstreamRes.statusCode).send(upstreamRes.statusCode.toString());
+      await upstreamRes.body.dump();
       return;
     }
     const contentType =
-      upstream.headers.get("content-type") || "application/octet-stream";
+      (upstreamRes.headers["content-type"] as string | undefined) ??
+      "application/octet-stream";
     res.setHeader("Content-Type", contentType);
-    const buf = Buffer.from(await upstream.arrayBuffer());
+    const buf = Buffer.from(await upstreamRes.body.arrayBuffer());
     res.send(buf);
   } catch (err) {
     res.status(502).json({ error: "Could not fetch asset from AI server" });

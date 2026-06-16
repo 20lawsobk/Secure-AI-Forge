@@ -103,6 +103,45 @@ async function parseBodyText(body: {
   }
 }
 
+// ─── Shared error handler for proxy network failures ─────────────────────────
+
+function handleProxyNetworkError(err: unknown, res: Response, path: string): void {
+  const elapsed = Date.now();
+  console.error(`[Proxy] Network error proxying to ${path}:`, err);
+  const e = err as any;
+  if (e.name === "AbortError" || e.code === "ABORT_ERR") {
+    _cbRecordFailure();
+    res.status(504).json({
+      error: "Upstream timeout",
+      detail: "AI training server did not respond within 45 s.",
+    });
+  } else if (
+    (e as NodeJS.ErrnoException).code === "ECONNREFUSED" ||
+    e.cause?.code === "ECONNREFUSED"
+  ) {
+    _cbRecordFailure();
+    res.status(503).json({
+      error: "AI model server unavailable",
+      detail:
+        "The Python AI training server is not running or still initializing.",
+    });
+  } else if (
+    e.cause?.code === "UND_ERR_SOCKET" ||
+    e.cause?.message?.includes("other side closed") ||
+    e.code === "UND_ERR_SOCKET"
+  ) {
+    _cbRecordFailure();
+    res.status(503).json({
+      error: "AI model server closed connection",
+      detail:
+        "The request was dropped — the AI server may be busy. Please retry.",
+    });
+  } else {
+    res.status(500).json({ error: "Proxy error", detail: String(err) });
+  }
+  void elapsed;
+}
+
 // ─── Core proxy function ────────────────────────────────────────────────────
 
 async function proxyRequest(
@@ -179,40 +218,81 @@ async function proxyRequest(
     res.setHeader("X-Cache", "MISS");
     res.status(upstreamRes.statusCode).json(data);
   } catch (err) {
-    const elapsed = Date.now() - startTime;
-    console.error(`[Proxy] Error proxying to ${path} (${elapsed}ms):`, err);
-    const e = err as any;
+    console.error(`[Proxy] Error proxying to ${path} (${Date.now() - startTime}ms):`, err);
+    handleProxyNetworkError(err, res, path);
+  }
+}
 
-    if (e.name === "AbortError" || e.code === "ABORT_ERR") {
-      _cbRecordFailure();
-      res.status(504).json({
-        error: "Upstream timeout",
-        detail: `AI training server did not respond within 45 s.`,
+// ─── Binary proxy ─────────────────────────────────────────────────────────────
+// Used for endpoints that return non-JSON (e.g. image/jpeg frame previews).
+// Streams the raw upstream body through with the correct Content-Type header.
+// Falls back to JSON error forwarding on non-200 responses.
+
+async function proxyBinary(
+  req: Request,
+  res: Response,
+  path: string,
+): Promise<void> {
+  if (_cbIsOpen()) {
+    const retryIn = Math.ceil(
+      (CB_RECOVERY_MS - (Date.now() - (_cbOpenSince ?? Date.now()))) / 1000,
+    );
+    res.status(503).json({
+      error: "AI model server temporarily unavailable",
+      detail: `Circuit breaker open — retry in ~${retryIn}s.`,
+    });
+    return;
+  }
+
+  try {
+    const url = `${MODEL_API_BASE}${path}`;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 45_000);
+
+    const headers: Record<string, string> = {};
+    if (req.headers["x-admin-key"])
+      headers["X-Admin-Key"] = req.headers["x-admin-key"] as string;
+    if (req.headers["x-api-key"])
+      headers["X-Api-Key"] = req.headers["x-api-key"] as string;
+
+    let upstreamRes: Awaited<ReturnType<typeof undiciRequest>>;
+    try {
+      upstreamRes = await undiciRequest(url, {
+        method: req.method as any,
+        signal: controller.signal,
+        dispatcher: _keepAlivePool,
+        headers,
       });
-    } else if (
-      (e as NodeJS.ErrnoException).code === "ECONNREFUSED" ||
-      e.cause?.code === "ECONNREFUSED"
-    ) {
-      _cbRecordFailure();
-      res.status(503).json({
-        error: "AI model server unavailable",
-        detail:
-          "The Python AI training server is not running or still initializing.",
-      });
-    } else if (
-      e.cause?.code === "UND_ERR_SOCKET" ||
-      e.cause?.message?.includes("other side closed") ||
-      e.code === "UND_ERR_SOCKET"
-    ) {
-      _cbRecordFailure();
-      res.status(503).json({
-        error: "AI model server closed connection",
-        detail:
-          "The request was dropped — the AI server may be busy. Please retry.",
-      });
-    } else {
-      res.status(500).json({ error: "Proxy error", detail: String(err) });
+    } finally {
+      clearTimeout(timeoutId);
     }
+
+    if (upstreamRes.statusCode >= 500) {
+      _cbRecordFailure();
+    } else {
+      _cbRecordSuccess();
+    }
+
+    if (upstreamRes.statusCode !== 200) {
+      // Non-200: try to forward as JSON, fall back to plain text
+      const text = await upstreamRes.body.text();
+      try {
+        res.status(upstreamRes.statusCode).json(JSON.parse(text));
+      } catch {
+        res.status(upstreamRes.statusCode).send(text);
+      }
+      return;
+    }
+
+    const contentType =
+      (upstreamRes.headers["content-type"] as string | undefined) ??
+      "application/octet-stream";
+    res.setHeader("Content-Type", contentType);
+    res.status(200);
+    const buf = Buffer.from(await upstreamRes.body.arrayBuffer());
+    res.send(buf);
+  } catch (err) {
+    handleProxyNetworkError(err, res, path);
   }
 }
 
@@ -533,7 +613,7 @@ router.delete("/video-job/:jobId", async (req, res) => {
 });
 
 router.get("/video-job/:jobId/preview/:sceneIdx", async (req, res) => {
-  await proxyRequest(
+  await proxyBinary(
     req,
     res,
     `/api/video-job/${req.params.jobId}/preview/${req.params.sceneIdx}`,
