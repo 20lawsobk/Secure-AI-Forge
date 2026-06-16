@@ -1,5 +1,4 @@
 from __future__ import annotations
-import subprocess
 import os
 import sys
 import uuid
@@ -10,6 +9,7 @@ from .effects import (
     color_grade_neon, color_grade_vintage,
     corner_accents, letterbox, animated_border, progress_bar,
 )
+from .ffmpeg_util import run_ffmpeg
 
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -325,7 +325,7 @@ def _render_pil_based(
     ]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = run_ffmpeg(cmd, timeout=30)
         _safe_remove(bg_png)
         if result.returncode != 0:
             print(
@@ -368,7 +368,7 @@ def _render_fallback(
     ]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = run_ffmpeg(cmd, timeout=30)
         if result.returncode != 0:
             print(
                 f"[VideoRender][ERROR] ffmpeg fallback render failed (rc={result.returncode}):\n{result.stderr[-800:]}",
@@ -447,7 +447,7 @@ def composite_scenes(
                 output_path,
             ]
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        result = run_ffmpeg(cmd, timeout=120)
         _safe_remove(concat_list)
         return result.returncode == 0
     except Exception:

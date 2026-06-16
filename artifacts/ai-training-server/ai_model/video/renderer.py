@@ -4,6 +4,7 @@ import os
 import uuid
 from dataclasses import dataclass
 from typing import Optional
+from .ffmpeg_util import run_ffmpeg
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 FONT_PATH_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
@@ -235,7 +236,7 @@ def render_video(req: VideoRequest) -> VideoResult:
         cmd = cmd_with_audio
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        result = run_ffmpeg(cmd, timeout=120)
         if result.returncode != 0:
             return VideoResult(success=False, error=f"FFmpeg error: {result.stderr[-500:]}")
 

@@ -1,0 +1,87 @@
+from __future__ import annotations
+import os
+import sys
+import time
+import errno
+import shutil
+import tempfile
+import subprocess
+from dataclasses import dataclass
+from typing import List
+
+FFMPEG_BIN = shutil.which("ffmpeg") or "ffmpeg"
+
+if not os.path.isabs(FFMPEG_BIN):
+    print(
+        f"[VideoRender][WARN] ffmpeg resolved to a non-absolute path ({FFMPEG_BIN!r}); "
+        "posix_spawn eligibility (and fork-avoidance under memory pressure) is not guaranteed.",
+        file=sys.stderr,
+    )
+
+# Transient spawn failures worth retrying; permanent errors (ENOENT, EACCES, ...) fail fast.
+_RETRYABLE_ERRNOS = {errno.EIO, errno.ENOMEM, errno.EAGAIN}
+
+
+@dataclass
+class FfmpegResult:
+    returncode: int
+    stderr: str
+
+
+def run_ffmpeg(cmd: List[str], timeout: float = 60.0, retries: int = 2) -> FfmpegResult:
+    """Run an ffmpeg command resiliently under heavy memory pressure.
+
+    The default ``subprocess.run(cmd, capture_output=True)`` with a bare
+    ``"ffmpeg"`` command and ``close_fds=True`` forces CPython to use
+    ``fork()`` + ``exec()``. Forking a process that holds the large in-memory
+    transformer model can fail with ``OSError`` (EIO / ENOMEM) inside a
+    memory-constrained container because the kernel must account for a full
+    copy of the parent address space.
+
+    This helper avoids ``fork()`` by satisfying CPython's ``posix_spawn()``
+    eligibility conditions:
+      * absolute executable path (``os.path.dirname(executable)`` is truthy)
+      * ``close_fds=False``
+      * no PIPE redirections (stdout to DEVNULL, stderr to a temp file)
+    ``posix_spawn()`` uses ``vfork``/``clone`` semantics that share the parent
+    address space, so it does not duplicate the model's memory and is immune to
+    the overcommit failure. Transient spawn failures are retried with backoff.
+    """
+    if cmd and cmd[0] == "ffmpeg":
+        cmd = [FFMPEG_BIN] + list(cmd[1:])
+
+    last_exc: BaseException | None = None
+    for attempt in range(retries + 1):
+        err_path = None
+        try:
+            fd, err_path = tempfile.mkstemp(suffix=".ffmpeg.err")
+            with os.fdopen(fd, "w+") as err_file:
+                proc = subprocess.run(
+                    cmd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=err_file,
+                    close_fds=False,
+                    timeout=timeout,
+                )
+                err_file.seek(0)
+                stderr_text = err_file.read()
+            return FfmpegResult(returncode=proc.returncode, stderr=stderr_text)
+        except OSError as exc:
+            last_exc = exc
+            if exc.errno not in _RETRYABLE_ERRNOS:
+                # Permanent error (ENOENT, EACCES, ...) — no point retrying.
+                raise
+            print(
+                f"[VideoRender][WARN] ffmpeg spawn OSError (attempt {attempt + 1}/{retries + 1}): {exc}",
+                file=sys.stderr,
+            )
+            time.sleep(0.5 * (attempt + 1))
+        finally:
+            if err_path and os.path.exists(err_path):
+                try:
+                    os.remove(err_path)
+                except OSError:
+                    pass
+
+    raise last_exc if last_exc else RuntimeError("ffmpeg failed to spawn")
