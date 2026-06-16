@@ -1,0 +1,321 @@
+2026-06-16T02:00:56Z info: Deployment: 0f3d84ef-3f79-4da2-b031-ae1e76e0c426
+2026-06-16T02:00:56Z info: Build: 16d95772-7a49-4c29-9b50-e5d6d91007f4
+2026-06-16T02:01:57Z info: Running Security Scan
+2026-06-16T02:01:59Z info: Installing packages
+--> pnpm install
+
+Scope: all 9 workspace projects
+
+
+   ╭─────────────────────────────────────────╮
+   │                                         │
+   │   Update available! 10.26.1 → 11.7.0.   │
+   │   Changelog: https://pnpm.io/v/11.7.0   │
+   │    To update, run: pnpm add -g pnpm     │
+   │                                         │
+   ╰─────────────────────────────────────────╯
+
+
+Lockfile is up to date, resolution step is skipped
+
+Already up to date
+
+. preinstall$ sh -c 'rm -f package-lock.json yarn.lock; case "$npm_config_user_agent" in pnpm/*) ;; *) echo "Use pnpm instead" >&2; exit 1 ;; esac'
+
+. preinstall: Done
+
+Done in 4.4s using pnpm v10.26.1
+
+--> uv lock
+
+Resolved 102 packages in 11ms
+
+Resolved 102 packages in 11ms
+
+--> uv sync
+
+--> uv sync
+
+Resolved 102 packages in 12ms
+
+Resolved 102 packages in 12ms
+
+Audited 89 packages in 41ms
+
+Audited 89 packages in 41ms
+
+2026-06-16T02:02:18Z info: Starting Build
+
+> workspace@0.0.0 build:production /home/runner/workspace
+> pnpm --filter @workspace/api-server run build && BASE_PATH=/ pnpm --filter @workspace/ai-dashboard run build
+
+
+
+> @workspace/api-server@0.0.0 build /home/runner/workspace/artifacts/api-server
+> tsx ./build.ts
+
+
+building server...
+
+
+  dist/index.mjs  909.4kb
+
+⚡ Done in 227ms
+
+
+> @workspace/ai-dashboard@0.0.0 build /home/runner/workspace/artifacts/ai-dashboard
+> vite build --config vite.config.ts
+
+
+vite v7.3.1 building client environment for production...
+
+transforming...
+
+src/components/ui/tooltip.tsx (2:0): Error when using sourcemap for reporting an error: Can't resolve original location of error.
+
+src/components/ui/select.tsx (2:0): Error when using sourcemap for reporting an error: Can't resolve original location of error.
+
+src/components/ui/progress.tsx (2:0): Error when using sourcemap for reporting an error: Can't resolve original location of error.
+
+src/components/ui/label.tsx (2:0): Error when using sourcemap for reporting an error: Can't resolve original location of error.
+
+✓ 2566 modules transformed.
+
+Generated an empty chunk: "vendor-react".
+
+rendering chunks...
+
+computing gzip size...
+
+dist/public/index.html                          1.10 kB │ gzip:  0.49 kB
+dist/public/assets/index-DsSB336l.css         123.12 kB │ gzip: 19.30 kB
+dist/public/assets/vendor-react-l0sNRNKZ.js     0.00 kB │ gzip:  0.02 kB
+
+dist/public/assets/check-C9JHpqJR.js            0.12 kB │ gzip:  0.14 kB
+dist/public/assets/chevron-down-C6C_zSVo.js     0.13 kB │ gzip:  0.14 kB
+dist/public/assets/clock-BC0pz3YW.js            0.17 kB │ gzip:  0.17 kB
+dist/public/assets/play-59rdcy0i.js             0.19 kB │ gzip:  0.18 kB
+dist/public/assets/copy-Bqcgw0L6.js             0.23 kB │ gzip:  0.20 kB
+dist/public/assets/database-krdK1BPh.js         0.24 kB │ gzip:  0.20 kB
+dist/public/assets/circle-alert-DxW_z8tc.js     0.25 kB │ gzip:  0.19 kB
+dist/public/assets/zap-ChgZkPZq.js              0.26 kB │ gzip:  0.21 kB
+dist/public/assets/server-Ul32NUZ6.js           0.34 kB │ gzip:  0.21 kB
+dist/public/assets/format-B1MC1Pb-.js           0.39 kB │ gzip:  0.23 kB
+dist/public/assets/hard-drive-C0dGVik3.js       0.39 kB │ gzip:  0.26 kB
+dist/public/assets/layers-De5MElfX.js           0.42 kB │ gzip:  0.24 kB
+dist/public/assets/vendor-charts-oemzPhB7.js    0.45 kB │ gzip:  0.29 kB
+dist/public/assets/index-inCBgeLc.js            0.54 kB │ gzip:  0.38 kB
+dist/public/assets/badge-B_aZl7jj.js            0.77 kB │ gzip:  0.43 kB
+dist/public/assets/not-found-fkWrklDF.js        0.84 kB │ gzip:  0.45 kB
+dist/public/assets/card-B9nFZzFn.js             1.05 kB │ gzip:  0.40 kB
+dist/public/assets/progress-DnJDj6ls.js         2.99 kB │ gzip:  1.39 kB
+dist/public/assets/api-C8sf0gms.js              3.23 kB │ gzip:  0.85 kB
+dist/public/assets/select-gflZ11Rj.js           4.14 kB │ gzip:  1.51 kB
+dist/public/assets/model-CtDntFvf.js            4.79 kB │ gzip:  1.29 kB
+dist/public/assets/gpu-yRBkrTIc.js              7.34 kB │ gzip:  1.73 kB
+dist/public/assets/content-BCBzLkrk.js          9.80 kB │ gzip:  3.17 kB
+dist/public/assets/dashboard-CwyhTL1s.js       11.27 kB │ gzip:  3.25 kB
+dist/public/assets/training-BXBzwyAr.js        11.84 kB │ gzip:  3.36 kB
+dist/public/assets/vendor-router-BbwuPELj.js   13.06 kB │ gzip:  5.29 kB
+dist/public/assets/vendor-date-BBErTw00.js     19.48 kB │ gzip:  5.47 kB
+dist/public/assets/video-studio-CH3AhW3i.js    22.37 kB │ gzip:  6.45 kB
+dist/public/assets/vendor-query-DdBYiJrk.js    35.77 kB │ gzip: 10.67 kB
+dist/public/assets/vendor-radix-DOVOVUN7.js    92.14 kB │ gzip: 31.48 kB
+dist/public/assets/api-keys-BJ6h_wK0.js       101.86 kB │ gzip: 28.84 kB
+dist/public/assets/vendor-motion-tYptFLOn.js  122.79 kB │ gzip: 40.41 kB
+dist/public/assets/index-hzASYOXw.js          246.02 kB │ gzip: 79.28 kB
+✓ built in 9.26s
+
+Scope: all 9 workspace projects
+
+Lockfile is up to date, resolution step is skipped
+
+Already up to date
+
+. preinstall$ sh -c 'rm -f package-lock.json yarn.lock; case "$npm_config_user_agent" in pnpm/*) ;; *) echo "Use pnpm instead" >&2; exit 1 ;; esac'
+
+. preinstall: Done
+
+Done in 3s using pnpm v10.26.1
+
+Resolved 102 packages in 18ms
+
+Audited 89 packages in 6ms
+
+
+> @workspace/api-server@0.0.0 build /home/runner/workspace/artifacts/api-server
+> tsx ./build.ts
+
+
+building server...
+
+
+  dist/index.mjs  909.4kb
+
+⚡ Done in 1370ms
+
+
+> @workspace/ai-dashboard@0.0.0 build /home/runner/workspace/artifacts/ai-dashboard
+> vite build --config vite.config.ts
+
+
+vite v7.3.1 building client environment for production...
+
+transforming...
+
+src/components/ui/tooltip.tsx (2:0): Error when using sourcemap for reporting an error: Can't resolve original location of error.
+
+src/components/ui/progress.tsx (2:0): Error when using sourcemap for reporting an error: Can't resolve original location of error.
+
+src/components/ui/select.tsx (2:0): Error when using sourcemap for reporting an error: Can't resolve original location of error.
+
+src/components/ui/label.tsx (2:0): Error when using sourcemap for reporting an error: Can't resolve original location of error.
+
+✓ 2566 modules transformed.
+
+Generated an empty chunk: "vendor-react".
+
+rendering chunks...
+
+computing gzip size...
+
+dist/public/index.html                          1.10 kB │ gzip:  0.49 kB
+dist/public/assets/index-DsSB336l.css         123.12 kB │ gzip: 19.30 kB
+
+dist/public/assets/vendor-react-l0sNRNKZ.js     0.00 kB │ gzip:  0.02 kB
+dist/public/assets/check-C9JHpqJR.js            0.12 kB │ gzip:  0.14 kB
+dist/public/assets/chevron-down-C6C_zSVo.js     0.13 kB │ gzip:  0.14 kB
+dist/public/assets/clock-BC0pz3YW.js            0.17 kB │ gzip:  0.17 kB
+dist/public/assets/play-59rdcy0i.js             0.19 kB │ gzip:  0.18 kB
+dist/public/assets/copy-Bqcgw0L6.js             0.23 kB │ gzip:  0.20 kB
+dist/public/assets/database-krdK1BPh.js         0.24 kB │ gzip:  0.20 kB
+dist/public/assets/circle-alert-DxW_z8tc.js     0.25 kB │ gzip:  0.19 kB
+dist/public/assets/zap-ChgZkPZq.js              0.26 kB │ gzip:  0.21 kB
+dist/public/assets/server-Ul32NUZ6.js           0.34 kB │ gzip:  0.21 kB
+dist/public/assets/format-B1MC1Pb-.js           0.39 kB │ gzip:  0.23 kB
+dist/public/assets/hard-drive-C0dGVik3.js       0.39 kB │ gzip:  0.26 kB
+dist/public/assets/layers-De5MElfX.js           0.42 kB │ gzip:  0.24 kB
+dist/public/assets/vendor-charts-oemzPhB7.js    0.45 kB │ gzip:  0.29 kB
+dist/public/assets/index-inCBgeLc.js            0.54 kB │ gzip:  0.38 kB
+dist/public/assets/badge-B_aZl7jj.js            0.77 kB │ gzip:  0.43 kB
+dist/public/assets/not-found-fkWrklDF.js        0.84 kB │ gzip:  0.45 kB
+dist/public/assets/card-B9nFZzFn.js             1.05 kB │ gzip:  0.40 kB
+dist/public/assets/progress-DnJDj6ls.js         2.99 kB │ gzip:  1.39 kB
+dist/public/assets/api-C8sf0gms.js              3.23 kB │ gzip:  0.85 kB
+dist/public/assets/select-gflZ11Rj.js           4.14 kB │ gzip:  1.51 kB
+dist/public/assets/model-CtDntFvf.js            4.79 kB │ gzip:  1.29 kB
+dist/public/assets/gpu-yRBkrTIc.js              7.34 kB │ gzip:  1.73 kB
+dist/public/assets/content-BCBzLkrk.js          9.80 kB │ gzip:  3.17 kB
+dist/public/assets/dashboard-CwyhTL1s.js       11.27 kB │ gzip:  3.25 kB
+dist/public/assets/training-BXBzwyAr.js        11.84 kB │ gzip:  3.36 kB
+dist/public/assets/vendor-router-BbwuPELj.js   13.06 kB │ gzip:  5.29 kB
+dist/public/assets/vendor-date-BBErTw00.js     19.48 kB │ gzip:  5.47 kB
+dist/public/assets/video-studio-CH3AhW3i.js    22.37 kB │ gzip:  6.45 kB
+dist/public/assets/vendor-query-DdBYiJrk.js    35.77 kB │ gzip: 10.67 kB
+dist/public/assets/vendor-radix-DOVOVUN7.js    92.14 kB │ gzip: 31.48 kB
+dist/public/assets/api-keys-BJ6h_wK0.js       101.86 kB │ gzip: 28.84 kB
+dist/public/assets/vendor-motion-tYptFLOn.js  122.79 kB │ gzip: 40.41 kB
+dist/public/assets/index-hzASYOXw.js          246.02 kB │ gzip: 79.28 kB
+✓ built in 30.90s
+
+Scope: all 9 workspace projects
+
+Lockfile is up to date, resolution step is skipped
+
+Already up to date
+
+. preinstall$ sh -c 'rm -f package-lock.json yarn.lock; case "$npm_config_user_agent" in pnpm/*) ;; *) echo "Use pnpm instead" >&2; exit 1 ;; esac'
+
+. preinstall: Done
+
+Done in 11s using pnpm v10.26.1
+
+Resolved 
+102 packages in 91ms
+
+Audited 89 packages in 3ms
+
+
+> @workspace/api-server@0.0.0 build /home/runner/workspace/artifacts/api-server
+> tsx ./build.ts
+
+
+building server...
+
+
+  dist/index.mjs  909.4kb
+
+⚡ Done in 914ms
+
+
+> @workspace/ai-dashboard@0.0.0 build /home/runner/workspace/artifacts/ai-dashboard
+> vite build --config vite.config.ts
+
+
+vite v7.3.1 building client environment for production...
+
+transforming...
+
+src/components/ui/tooltip.tsx (2:0): Error when using sourcemap for reporting an error: Can't resolve original location of error.
+
+src/components/ui/progress.tsx (2:0): Error when using sourcemap for reporting an error: Can't resolve original location of error.
+
+src/components/ui/select.tsx (2:0): Error when using sourcemap for reporting an error: Can't resolve original location of error.
+
+src/components/ui/label.tsx (2:0): Error when using sourcemap for reporting an error: Can't resolve original location of error.
+
+✓ 2566 modules transformed.
+
+Generated an empty chunk: "vendor-react".
+
+rendering chunks...
+
+computing gzip size...
+
+dist/public/index.html                          1.10 kB │ gzip:  0.49 kB
+dist/public/assets/index-DsSB336l.css         123.12 kB │ gzip: 19.30 kB
+dist/public/assets/vendor-react-l0sNRNKZ.js     0.00 kB │ gzip:  0.02 kB
+dist/public/assets/check-C9JHpqJR.js            0.12 kB │ gzip:  0.14 kB
+dist/public/assets/chevron-down-C6C_zSVo.js     0.13 kB │ gzip:  0.14 kB
+
+dist/public/assets/clock-BC0pz3YW.js            0.17 kB │ gzip:  0.17 kB
+dist/public/assets/play-59rdcy0i.js             0.19 kB │ gzip:  0.18 kB
+dist/public/assets/copy-Bqcgw0L6.js             0.23 kB │ gzip:  0.20 kB
+dist/public/assets/database-krdK1BPh.js         0.24 kB │ gzip:  0.20 kB
+dist/public/assets/circle-alert-DxW_z8tc.js     0.25 kB │ gzip:  0.19 kB
+dist/public/assets/zap-ChgZkPZq.js              0.26 kB │ gzip:  0.21 kB
+dist/public/assets/server-Ul32NUZ6.js           0.34 kB │ gzip:  0.21 kB
+dist/public/assets/format-B1MC1Pb-.js           0.39 kB │ gzip:  0.23 kB
+
+dist/public/assets/hard-drive-C0dGVik3.js       0.39 kB │ gzip:  0.26 kB
+dist/public/assets/layers-De5MElfX.js           0.42 kB │ gzip:  0.24 kB
+dist/public/assets/vendor-charts-oemzPhB7.js    0.45 kB │ gzip:  0.29 kB
+dist/public/assets/index-inCBgeLc.js            0.54 kB │ gzip:  0.38 kB
+dist/public/assets/badge-B_aZl7jj.js            0.77 kB │ gzip:  0.43 kB
+dist/public/assets/not-found-fkWrklDF.js        0.84 kB │ gzip:  0.45 kB
+dist/public/assets/card-B9nFZzFn.js             1.05 kB │ gzip:  0.40 kB
+dist/public/assets/progress-DnJDj6ls.js         2.99 kB │ gzip:  1.39 kB
+dist/public/assets/api-C8sf0gms.js              3.23 kB │ gzip:  0.85 kB
+dist/public/assets/select-gflZ11Rj.js           4.14 kB │ gzip:  1.51 kB
+dist/public/assets/model-CtDntFvf.js            4.79 kB │ gzip:  1.29 kB
+dist/public/assets/gpu-yRBkrTIc.js              7.34 kB │ gzip:  1.73 kB
+dist/public/assets/content-BCBzLkrk.js          9.80 kB │ gzip:  3.17 kB
+dist/public/assets/dashboard-CwyhTL1s.js       11.27 kB │ gzip:  3.25 kB
+dist/public/assets/training-BXBzwyAr.js        11.84 kB │ gzip:  3.36 kB
+dist/public/assets/vendor-router-BbwuPELj.js   13.06 kB │ gzip:  5.29 kB
+dist/public/assets/vendor-date-BBErTw00.js     19.48 kB │ gzip:  5.47 kB
+dist/public/assets/video-studio-CH3AhW3i.js    22.37 kB │ gzip:  6.45 kB
+dist/public/assets/vendor-query-DdBYiJrk.js    35.77 kB │ gzip: 10.67 kB
+dist/public/assets/vendor-radix-DOVOVUN7.js    92.14 kB │ gzip: 31.48 kB
+dist/public/assets/api-keys-BJ6h_wK0.js       101.86 kB │ gzip: 28.84 kB
+dist/public/assets/vendor-motion-tYptFLOn.js  122.79 kB │ gzip: 40.41 kB
+dist/public/assets/index-hzASYOXw.js          246.02 kB │ gzip: 79.28 kB
+✓ built in 18.13s
+
+2026-06-16T02:04:04Z info: Pushing pid1 binary layer...
+2026-06-16T02:04:19Z info: Created pid1 binary layer
+2026-06-16T02:04:26Z info: Pushing Repl layer...
+2026-06-16T02:04:26Z info: Pushing hosting layer...
+2026-06-16T02:04:27Z info: Retrieved cached nix layer
+2026-06-16T02:04:27Z info: Created hosting layer
+2026-06-16T02:09:43Z info: Security Scan Complete
