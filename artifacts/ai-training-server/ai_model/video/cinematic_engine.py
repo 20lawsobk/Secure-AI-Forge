@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .scenes import SceneConfig, render_scene, composite_scenes, cleanup_temp
 from .renderer import ASPECT_RATIOS, PLATFORM_RATIOS
+from ..adaptive_concurrency import RENDER_GATE
 
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "uploads", "videos")
 
@@ -71,10 +72,14 @@ def render_cinematic_open(
     def _render_one(idx_scene):
         idx, scene = idx_scene
         sid = f"{uuid.uuid4().hex[:6]}_{idx}"
-        path = render_scene(scene, width, height, sid)
+        # Hold a global render slot so concurrent scenes (across all jobs) stay
+        # bounded to what the container's CPU/memory can handle right now.
+        with RENDER_GATE.slot(timeout=300):
+            path = render_scene(scene, width, height, sid)
         return idx, path
 
-    with ThreadPoolExecutor(max_workers=min(2, len(scenes))) as executor:
+    workers = max(1, min(RENDER_GATE.capacity, len(scenes)))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_render_one, (i, s)): i for i, s in enumerate(scenes)}
         results_map: Dict[int, str] = {}
         for future in as_completed(futures):

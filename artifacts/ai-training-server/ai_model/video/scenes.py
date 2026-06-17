@@ -325,7 +325,7 @@ def _render_pil_based(
     ]
 
     try:
-        result = run_ffmpeg(cmd, timeout=30)
+        result = run_ffmpeg(cmd, timeout=45)
         _safe_remove(bg_png)
         if result.returncode != 0:
             print(
@@ -368,7 +368,7 @@ def _render_fallback(
     ]
 
     try:
-        result = run_ffmpeg(cmd, timeout=30)
+        result = run_ffmpeg(cmd, timeout=45)
         if result.returncode != 0:
             print(
                 f"[VideoRender][ERROR] ffmpeg fallback render failed (rc={result.returncode}):\n{result.stderr[-800:]}",

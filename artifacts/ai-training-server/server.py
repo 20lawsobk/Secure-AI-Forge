@@ -231,6 +231,21 @@ async def _in_thread(fn):
     CPU-bound / blocking agent inference does not stall uvicorn's event loop."""
     return await asyncio.get_event_loop().run_in_executor(None, fn)
 
+
+from ai_model.adaptive_concurrency import INFERENCE_GATE, RENDER_GATE, GateBusy  # noqa: E402
+
+
+async def _in_thread_gated(gate, fn, timeout):
+    """Run ``fn`` in a worker thread while holding an adaptive-concurrency slot.
+
+    The blocking slot acquisition happens inside the worker thread so the event
+    loop is never stalled. Raises ``GateBusy`` if no slot frees up within
+    ``timeout`` (the caller surfaces that as HTTP 503)."""
+    def _run():
+        with gate.slot(timeout=timeout):
+            return fn()
+    return await _in_thread(_run)
+
 # ─── Static file serving for generated assets ────────────────────────────────
 
 _UPLOADS_PATH = Path(__file__).parent / "uploads"
@@ -3801,16 +3816,24 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
     cta  = "Stream now — link in bio 🔗"
 
     if _model_ready and _script_agent:
+        from ai_model.agents.script_agent import ScriptRequest
+        from ai_model.agents.distribution_agent import DistributionRequest
+
+        def _infer():
+            _sr = _script_agent.run(ScriptRequest(idea=topic, platform=platform, goal="engagement", tone=req.tone))
+            _distribution_agent.run(DistributionRequest(script=f"{_sr.hook}\n{_sr.body}\n{_sr.cta}", platform=platform, goal="engagement"))
+            return _sr
+
         try:
-            from ai_model.agents.script_agent import ScriptRequest
-            from ai_model.agents.distribution_agent import DistributionRequest
-            sr = await _in_thread(lambda: _script_agent.run(ScriptRequest(idea=topic, platform=platform, goal="engagement", tone=req.tone)))
-            _dr = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(script=f"{sr.hook}\n{sr.body}\n{sr.cta}", platform=platform, goal="engagement")))
+            sr = await _in_thread_gated(INFERENCE_GATE, _infer, timeout=35.0)
+        except GateBusy:
+            raise HTTPException(status_code=503, detail="AI server at capacity — retry shortly")
+        except Exception:
+            sr = None
+        if sr is not None:
             hook = sr.hook or hook
             body = sr.body or body
             cta  = sr.cta  or cta
-        except Exception:
-            pass
 
     hashtags = (req.preferred_hashtags or []) + _api_hashtags(topic, req.genre, req.platform)
     caption  = f"{hook}\n\n{body}\n\n{cta}"
@@ -3848,10 +3871,16 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
     content = f"Generated content for intent '{intent}'."
 
     if _model_ready and _script_agent:
+        from ai_model.agents.script_agent import ScriptRequest
+
+        def _infer():
+            return _script_agent.run(ScriptRequest(idea=str(inputs), platform="general", goal=intent, tone="authentic"))
+
         try:
-            from ai_model.agents.script_agent import ScriptRequest
-            sr      = await _in_thread(lambda: _script_agent.run(ScriptRequest(idea=str(inputs), platform="general", goal=intent, tone="authentic")))
+            sr      = await _in_thread_gated(INFERENCE_GATE, _infer, timeout=35.0)
             content = f"{sr.hook}\n{sr.body}\n{sr.cta}"
+        except GateBusy:
+            raise HTTPException(status_code=503, detail="AI server at capacity — retry shortly")
         except Exception:
             pass
 
@@ -4778,6 +4807,19 @@ async def api_cancel_video_job(job_id: str, _key=Depends(require_scope("generate
         return {"ok": True, "action": "purged", "job_id": job_id}
 
     return {"ok": True, "action": "no_op", "job_id": job_id}
+
+
+@app.get("/api/concurrency/stats")
+async def api_concurrency_stats(_key=Depends(require_scope("read"))):
+    """Live snapshot of the adaptive concurrency gates.
+
+    ``capacity`` is recomputed from the container's current usable CPU and
+    available memory, so it shrinks under pressure and grows when resources free
+    up — i.e. it auto-adjusts to whatever load MaxBooster sends."""
+    return {
+        "inference": INFERENCE_GATE.stats(),
+        "render": RENDER_GATE.stats(),
+    }
 
 
 @app.get("/api/video-jobs")
