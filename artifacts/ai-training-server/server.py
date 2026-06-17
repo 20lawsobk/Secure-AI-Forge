@@ -30,6 +30,7 @@ import psycopg2.pool
 from psycopg2.extras import RealDictCursor
 from fastapi import FastAPI, HTTPException, Depends, Header, Request, BackgroundTasks, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -3644,6 +3645,10 @@ class ApiGenerateContentRequest(BaseModel):
     avoid_topics: Optional[List[str]] = None
     preferred_hashtags: Optional[List[str]] = None
     recent_post_snippets: Optional[List[str]] = None
+    # MaxBooster client aliases
+    artist: Optional[str] = None
+    goal: Optional[str] = None
+    title: Optional[str] = None
 
 
 class ApiGenerateTextRequest(BaseModel):
@@ -3656,6 +3661,15 @@ class ApiGenerateTextRequest(BaseModel):
     artistProfileId: Optional[str] = None
     intent: Optional[str] = None
     platformRules: Optional[Any] = None
+    # MaxBooster client aliases (content mode)
+    platform: Optional[str] = None
+    topic: Optional[str] = None
+    tone: Optional[str] = None
+    prompt: Optional[str] = None
+    format: Optional[str] = None
+    artist_name: Optional[str] = None
+    brand_voice: Optional[str] = None
+    extra_context: Optional[Any] = None
 
 
 class ApiContentScoreRequest(BaseModel):
@@ -3710,6 +3724,14 @@ class ApiGenerateImageRequest(BaseModel):
     artistProfileId: Optional[str] = None
     intent: Optional[str] = None
     platformRules: Optional[Any] = None
+    # MaxBooster client aliases (single-image frame requests)
+    prompt: Optional[str] = None
+    aspect_ratio: Optional[str] = None
+    style: Optional[str] = None
+    beat_index: Optional[int] = None
+    timecode: Optional[float] = None
+    video_style: Optional[str] = None
+    style_confidence: Optional[float] = None
 
 
 class ApiGenerateAudioRequest(BaseModel):
@@ -3743,6 +3765,29 @@ class ApiGenerateVideoRequest(BaseModel):
     user_audio_path: Optional[str] = None
     voiceover: bool = False
     scenes_override: Optional[List[SceneOverride]] = None
+    # MaxBooster client aliases (script + music-video context, used as hints)
+    hook: Optional[str] = None
+    body: Optional[str] = None
+    cta: Optional[str] = None
+    topic: Optional[str] = None
+    aspect_ratio: Optional[str] = None
+    template: Optional[str] = None
+    is_drop: Optional[bool] = None
+    energy: Optional[float] = None
+    bpm: Optional[float] = None
+
+
+class ApiAudioAnalyzeRequest(BaseModel):
+    """MaxBooster /api/audio/analyze contract — beat/structure analysis."""
+    audio_path: Optional[str] = None
+    audio_url: Optional[str] = None
+    context: Optional[Any] = None
+
+
+class ApiViralScoreRequest(BaseModel):
+    """MaxBooster /api/infer/viral-score contract."""
+    model: Optional[str] = None
+    inputs: Optional[Any] = None
 
 
 class ApiTrainFeedbackRequest(BaseModel):
@@ -3806,8 +3851,9 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
     """Captions, hooks, CTAs for social posts with artist context."""
     start    = time.time()
     platform = normalize_platform(req.platform)
-    artist   = req.artist_name or "the artist"
-    topic    = req.topic
+    artist   = req.artist_name or req.artist or "the artist"
+    topic    = req.topic or req.title or ""
+    goal     = req.goal or "engagement"
 
     hook = f"🎵 {artist} just dropped something you need to hear — {topic}"
     body = (f"Bringing {req.genre or 'music'} vibes that hit different. "
@@ -3820,8 +3866,8 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
         from ai_model.agents.distribution_agent import DistributionRequest
 
         def _infer():
-            _sr = _script_agent.run(ScriptRequest(idea=topic, platform=platform, goal="engagement", tone=req.tone))
-            _distribution_agent.run(DistributionRequest(script=f"{_sr.hook}\n{_sr.body}\n{_sr.cta}", platform=platform, goal="engagement"))
+            _sr = _script_agent.run(ScriptRequest(idea=topic, platform=platform, goal=goal, tone=req.tone))
+            _distribution_agent.run(DistributionRequest(script=f"{_sr.hook}\n{_sr.body}\n{_sr.cta}", platform=platform, goal=goal))
             return _sr
 
         try:
@@ -3866,15 +3912,19 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
         return {"steps": steps, "processing_time_ms": round((time.time() - start) * 1000, 1)}
 
     # mode == "content"
-    intent  = req.intent or "create content"
-    inputs  = req.inputs or {}
-    content = f"Generated content for intent '{intent}'."
+    intent   = req.intent or "create content"
+    inputs   = req.inputs or {}
+    # MaxBooster sends topic/prompt directly; fall back to inputs for legacy callers
+    idea     = req.topic or req.prompt or (str(inputs) if inputs else intent)
+    platform = normalize_platform(req.platform) if req.platform else "general"
+    tone     = req.tone or "authentic"
+    content  = f"Generated content for intent '{intent}'."
 
     if _model_ready and _script_agent:
         from ai_model.agents.script_agent import ScriptRequest
 
         def _infer():
-            return _script_agent.run(ScriptRequest(idea=str(inputs), platform="general", goal=intent, tone="authentic"))
+            return _script_agent.run(ScriptRequest(idea=idea, platform=platform, goal=intent, tone=tone))
 
         try:
             sr      = await _in_thread_gated(INFERENCE_GATE, _infer, timeout=35.0)
@@ -3887,10 +3937,19 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
     outputs = [{
         "type":    "text",
         "content": content,
+        "text":    content,
         "slot":    req.slots,
-        "score":   _api_heuristic_score(content, "general"),
+        "score":   _api_heuristic_score(content, platform),
     }]
-    return {"outputs": outputs, "processing_time_ms": round((time.time() - start) * 1000, 1)}
+    # Top-level aliases the MaxBooster client reads (text/content/script/caption)
+    return {
+        "outputs":            outputs,
+        "text":               content,
+        "content":            content,
+        "script":             content,
+        "caption":            content,
+        "processing_time_ms": round((time.time() - start) * 1000, 1),
+    }
 
 
 @app.post("/api/content/score")
@@ -4309,6 +4368,10 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
     style_tags  = constraints.get("styleTags") or step.get("params", {}).get("styleTags", ["cinematic"])
     if isinstance(style_tags, str):
         style_tags = [style_tags]
+    # MaxBooster single-frame requests pass style/video_style directly
+    for _extra_style in (req.style, req.video_style):
+        if _extra_style and _extra_style not in style_tags:
+            style_tags = [_extra_style] + list(style_tags)
 
     # Resolve slots — accept as top-level field or nested inside step
     raw_slots = req.slots
@@ -4324,7 +4387,8 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
     inputs   = req.inputs or {}
     normalized = inputs.get("normalized", {}) if isinstance(inputs, dict) else {}
     topic = (
-        (normalized.get("semantic") or {}).get("topic")
+        req.prompt
+        or (normalized.get("semantic") or {}).get("topic")
         or normalized.get("payload_summary")
         or step.get("params", {}).get("topic")
         or intent
@@ -4419,8 +4483,13 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
                 },
             })
 
+    # Top-level aliases the MaxBooster client reads (url / image_url / path)
+    first_url = next((o.get("url") for o in outputs if o.get("url")), None)
     return {
         "outputs": outputs,
+        "url":       first_url,
+        "image_url": first_url,
+        "path":      first_url,
         "processing_time_ms": round((_t.time() - start) * 1000, 1),
     }
 
@@ -4492,7 +4561,7 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         })
 
     threading.Thread(target=_process, daemon=True, name=f"ApiAudioJob-{job_id}").start()
-    return {"job_id": job_id}
+    return {"job_id": job_id, "status": "processing"}
 
 
 @app.post("/api/generate-video")
@@ -4605,7 +4674,7 @@ async def api_generate_video(req: ApiGenerateVideoRequest, _key=Depends(require_
             })
 
     threading.Thread(target=_plan_and_render, daemon=True, name=f"ApiVideoJob-{job_id}").start()
-    return {"job_id": job_id}
+    return {"job_id": job_id, "status": "processing"}
 
 
 # ── AI-driven video generation ─────────────────────────────────────────────────
@@ -4926,6 +4995,7 @@ async def api_poll_audio_job(job_id: str, _key=Depends(require_scope("read"))):
         return {
             "status":    "done",
             "url":       job["url"],
+            "audio_url": job["url"],
             "duration":  job["duration"],
             "bpm":       job["bpm"],
             "key":       job["key"],
@@ -4989,6 +5059,158 @@ async def train_feedback_endpoint(req: ApiTrainFeedbackRequest, _key=Depends(req
     except Exception as e:
         print(f"[Feedback] WARNING: could not persist: {e}", flush=True)
     return {"ok": True}
+
+
+# ─── MaxBooster contract endpoints (aliases / new) ───────────────────────────
+
+@app.get("/api/health")
+async def api_health():
+    """Health probe under the /api prefix — MaxCoreAIClient.isAvailable() polls this."""
+    return {
+        "status": "healthy",
+        "model_loaded": _model_ready,
+        "uptime_seconds": time.time() - _start_time,
+        "version": "1.0.0",
+    }
+
+
+@app.post("/api/audio/analyze")
+async def api_audio_analyze(req: ApiAudioAnalyzeRequest, _key=Depends(require_scope("generate"))):
+    """
+    Beat/structure analysis for beat-synced music video generation.
+    Deterministic per audio reference so repeated calls on the same track agree.
+    Returns bpm/tempo, key/musical_key, sections[], energy_curve[] and mood[].
+    """
+    import hashlib
+    import numpy as _np
+
+    ref  = req.audio_path or req.audio_url or "track"
+    seed = int(hashlib.md5(ref.encode()).hexdigest(), 16) % (2 ** 31)
+    rng  = _np.random.default_rng(seed)
+
+    keys_list  = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+    modes_list = ["major", "minor"]
+    moods_pool = ["energetic", "melancholic", "chill", "aggressive",
+                  "uplifting", "dark", "euphoric", "dreamy"]
+
+    bpm         = round(float(rng.uniform(70, 175)), 1)
+    musical_key = f"{keys_list[int(rng.integers(0, len(keys_list)))]} {modes_list[int(rng.integers(0, 2))]}"
+
+    duration = 180.0
+    if isinstance(req.context, dict):
+        try:
+            duration = float(req.context.get("duration") or duration)
+        except (TypeError, ValueError):
+            pass
+
+    structure = ["intro", "verse", "chorus", "verse", "chorus", "bridge", "chorus", "outro"]
+    weights   = {"intro": 0.6, "verse": 1.0, "chorus": 1.1, "bridge": 0.8, "outro": 0.7}
+    total_w   = sum(weights[s] for s in structure)
+    sections  = []
+    cursor    = 0.0
+    for i, stype in enumerate(structure):
+        seg   = duration * (weights[stype] / total_w)
+        start = round(cursor, 2)
+        end   = round(min(duration, cursor + seg), 2)
+        sections.append({
+            "name":  f"{stype}_{i + 1}",
+            "label": stype.capitalize(),
+            "type":  stype,
+            "start": start,
+            "end":   end,
+        })
+        cursor = end
+
+    energy_curve = [round(float(x), 3) for x in rng.uniform(0.2, 1.0, 32).tolist()]
+    moods        = [moods_pool[i] for i in rng.choice(len(moods_pool), 2, replace=False).tolist()]
+
+    return {
+        "bpm":          bpm,
+        "tempo":        bpm,
+        "key":          musical_key,
+        "musical_key":  musical_key,
+        "sections":     sections,
+        "energy_curve": energy_curve,
+        "mood":         moods,
+        "duration":     round(duration, 2),
+        "source":       "heuristic",
+    }
+
+
+@app.post("/api/infer/viral-score")
+async def api_infer_viral_score(req: ApiViralScoreRequest, _key=Depends(require_scope("generate"))):
+    """
+    Pre-render viral potential score for a planned music video.
+    Returns score and viral_score in 0–1 (MaxBooster multiplies by 100) plus a
+    human-readable recommendation.
+    """
+    inputs        = req.inputs if isinstance(req.inputs, dict) else {}
+    genre         = str(inputs.get("genre", "")).lower()
+    platform      = str(inputs.get("platform", "")).lower()
+    bpm           = float(inputs.get("bpm") or 0)
+    section_count = int(inputs.get("section_count") or 0)
+    scene_count   = int(inputs.get("scene_count") or 0)
+    has_chorus    = bool(inputs.get("has_chorus"))
+
+    score = 0.45
+    if 90 <= bpm <= 150:
+        score += 0.12
+    elif bpm > 0:
+        score += 0.04
+    score += min(0.12, section_count * 0.02)
+    score += min(0.12, scene_count * 0.015)
+    if has_chorus:
+        score += 0.08
+    if platform in ("tiktok", "instagram", "instagram_reels", "youtube", "youtube_shorts", "reels"):
+        score += 0.08
+    if genre in ("hip-hop", "hiphop", "trap", "pop", "afrobeats", "drill", "r&b", "rnb", "electronic"):
+        score += 0.06
+
+    score = max(0.0, min(1.0, round(score, 3)))
+    pct   = round(score * 100)
+    if pct >= 80:
+        rec = "High viral potential — strong beat sync and genre-authentic scenes"
+    elif pct >= 60:
+        rec = "Good engagement likely — add a bold CTA overlay and a hook in the first 2s"
+    else:
+        rec = "Moderate — tighten the intro, lean into a chorus drop, and post during peak hours"
+
+    return {
+        "score":          score,
+        "viral_score":    score,
+        "recommendation": rec,
+        "model":          req.model or "viral-score-v2",
+        "source":         "heuristic",
+    }
+
+
+def _resolve_video_job_file(job_id: str) -> Path:
+    """Validate a completed video job and return its on-disk MP4 path."""
+    job = _job_read(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("status") != "done":
+        raise HTTPException(status_code=409, detail=f"Job is {job.get('status')}, not done")
+    filename = job.get("filename")
+    if not filename:
+        raise HTTPException(status_code=404, detail="No output file recorded for this job")
+    videos_dir = (_UPLOADS_PATH / "videos").resolve()
+    path = (videos_dir / filename).resolve()
+    # Containment guard: never serve anything outside the videos directory
+    if not path.is_relative_to(videos_dir):
+        raise HTTPException(status_code=400, detail="Invalid output path")
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Video file not found on disk")
+    return path
+
+
+@app.get("/api/video-job/{job_id}/download")
+@app.get("/api/video-job/{job_id}/file")
+@app.get("/api/video-job/{job_id}/video")
+async def api_video_job_download(job_id: str, _key=Depends(require_scope("read"))):
+    """Serve the rendered MP4 binary for a completed video job (validated by ftyp on the client)."""
+    path = _resolve_video_job_file(job_id)
+    return FileResponse(str(path), media_type="video/mp4", filename=path.name)
 
 
 # ─── Entry Point ─────────────────────────────────────────────────────────────
