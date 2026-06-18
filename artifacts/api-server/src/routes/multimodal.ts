@@ -575,6 +575,12 @@ async function handleGeneration(
   // A step is "ready" when all its inputFrom dependencies are resolved.
   const pending = plan.steps.filter((s) => s.type !== "analyze");
   const completed = new Set<string>(["normalizedInput"]);
+  // Analyze steps are folded into the normalized input and excluded from
+  // `pending`; mark their ids resolved so generate steps that declare them in
+  // `inputFrom` (e.g. ["analysis_step"]) become ready instead of deadlocking.
+  for (const step of plan.steps) {
+    if (step.type === "analyze") completed.add(step.id);
+  }
 
   while (pending.length > 0) {
     // Find all steps whose inputs are fully resolved

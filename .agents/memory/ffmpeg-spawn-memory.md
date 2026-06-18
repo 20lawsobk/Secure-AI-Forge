@@ -43,3 +43,13 @@ owner to bind the port then `os._exit(0)`, so exactly one model ever loads. Must
 `__main__` (NOT module top-level) or uvicorn's re-import of `server:app` would lock out the winner.
 **Remaining follow-up (not done):** also stop the 2nd API primary from managing Python at the
 Node layer — the flock is containment, not a control-plane fix.
+
+## Cold-start ffmpeg timeout (transient, NOT the EIO bug)
+The audio encode (`_render_audio_clip` → `run_ffmpeg` libmp3lame) normally finishes in <1s
+and a full clip job in ~5s on a warm server. But an audio request that lands in the first
+~15–20s after `restart_workflow` (model just loaded, `uptime_seconds` tiny) can hit the 45s
+ffmpeg timeout because model warmup saturates the CPU and starves the ffmpeg subprocess.
+This surfaces as job `status=error` with "...timed out after 45s" — handled correctly (no
+false "done", WAV cleaned up via `try/finally`). It is transient: the same durations pass in
+~5s once the server is warm. Don't mistake it for the posix_spawn/EIO issue above and don't
+"fix" it by gutting the timeout — just let cold requests fail explicitly and retry warm.

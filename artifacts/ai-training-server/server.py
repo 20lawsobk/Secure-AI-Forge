@@ -4684,6 +4684,93 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
     }
 
 
+def _render_audio_clip(job_id: str, bpm: float, key: str,
+                       duration_sec: float, sample_rate: int = 44100) -> str:
+    """Synthesize a short, musical audio clip 100% in-house (no external APIs)
+    and encode it to MP3 via ffmpeg. Returns the served relative URL.
+
+    The clip is a key/tempo-conditioned arpeggio over a soft four-on-the-floor
+    kick, so the output is an actual listenable track rather than silence or a
+    dangling URL. Raises on encode failure so the job reports an explicit error
+    instead of claiming success with a missing file.
+    """
+    import wave as _wave
+    import numpy as np
+    from ai_model.video.ffmpeg_util import run_ffmpeg
+
+    # ── Map "C major" / "A minor" → root frequency + scale intervals ──────
+    note_semitones = {"C": -9, "C#": -8, "D": -7, "D#": -6, "E": -5, "F": -4,
+                      "F#": -3, "G": -2, "G#": -1, "A": 0, "A#": 1, "B": 2}
+    parts = (key or "C major").split()
+    root_name = parts[0] if parts else "C"
+    is_minor = len(parts) > 1 and parts[1].lower().startswith("min")
+    root_freq = 220.0 * (2.0 ** (note_semitones.get(root_name, 0) / 12.0))
+    scale = [0, 2, 3, 5, 7, 8, 10] if is_minor else [0, 2, 4, 5, 7, 9, 11]
+
+    beat_sec = max(0.15, 60.0 / max(40.0, min(float(bpm), 200.0)))
+    note_sec = beat_sec / 2.0  # eighth-note arpeggio
+    n_total = int(duration_sec * sample_rate)
+    audio = np.zeros(n_total, dtype=np.float64)
+
+    # ── Arpeggio melody ───────────────────────────────────────────────────
+    degrees = [0, 2, 4, 6, 4, 2]
+    note_len = max(1, int(note_sec * sample_rate))
+    t_note = np.arange(note_len) / sample_rate
+    env = np.exp(-3.5 * t_note / max(note_sec, 1e-3))
+    idx = 0
+    step = 0
+    while idx < n_total:
+        deg = scale[degrees[step % len(degrees)] % len(scale)]
+        octave = 1 + (step // len(degrees)) % 2
+        freq = root_freq * (2.0 ** (deg / 12.0)) * octave
+        tone = (np.sin(2 * np.pi * freq * t_note)
+                + 0.4 * np.sin(2 * np.pi * freq * 1.5 * t_note)) * env
+        end = min(idx + note_len, n_total)
+        audio[idx:end] += 0.55 * tone[: end - idx]
+        idx += note_len
+        step += 1
+
+    # ── Soft kick on every beat ───────────────────────────────────────────
+    kick_len = int(min(beat_sec, 0.18) * sample_rate)
+    if kick_len > 1:
+        tk = np.arange(kick_len) / sample_rate
+        kfreq = 110.0 * np.exp(-18.0 * tk)
+        kick = np.sin(2 * np.pi * kfreq * tk) * np.exp(-10.0 * tk)
+        beat_len = max(1, int(beat_sec * sample_rate))
+        for b in range(0, n_total, beat_len):
+            end = min(b + kick_len, n_total)
+            audio[b:end] += 0.6 * kick[: end - b]
+
+    # ── Normalize → 16-bit PCM ────────────────────────────────────────────
+    peak = float(np.max(np.abs(audio))) or 1.0
+    pcm = (np.clip(audio / peak * 0.92, -1.0, 1.0) * 32767.0).astype(np.int16)
+
+    wav_path = _UPLOADS_PATH / f"audio_{job_id}.wav"
+    mp3_path = _UPLOADS_PATH / f"audio_{job_id}.mp3"
+    with _wave.open(str(wav_path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm.tobytes())
+
+    try:
+        result = run_ffmpeg(
+            ["ffmpeg", "-y", "-i", str(wav_path),
+             "-codec:a", "libmp3lame", "-q:a", "4", str(mp3_path)],
+            timeout=45,
+        )
+        if result.returncode != 0 or not mp3_path.exists():
+            raise RuntimeError(
+                f"ffmpeg mp3 encode failed (rc={result.returncode}): {result.stderr[-300:]}"
+            )
+    finally:
+        try:
+            wav_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return f"/uploads/audio_{job_id}.mp3"
+
+
 @app.post("/api/generate/audio")
 async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_scope("generate"))):
     """Async audio generation — style-conditioned via AI model for concept, BPM/key, creative direction."""
@@ -4747,10 +4834,24 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         else:
             rng2 = _np2.random.default_rng(abs(hash(bpm)) % (2**31))
             key  = keys_list[int(rng2.integers(0, len(keys_list)))]
+        # Render an actual in-house MP3 (key/tempo-conditioned synthesis) and
+        # serve it; only mark "done" once the file exists on disk.
+        duration_sec = max(4.0, min(float(req.duration or 30), 60.0))
+        try:
+            audio_url = _render_audio_clip(job_id, bpm, key, duration_sec)
+        except Exception as exc:  # explicit failure — never claim a missing file
+            _job_update(job_id, {
+                "status": "error",
+                "url":    None,
+                "bpm":    bpm,
+                "key":    key,
+                "error":  f"audio render failed: {exc}",
+            })
+            return
         _job_update(job_id, {
             "status":        "done",
-            "url":           f"/uploads/audio_{job_id}.mp3",
-            "duration":      req.duration or 30,
+            "url":           audio_url,
+            "duration":      int(duration_sec),
             "bpm":           bpm,
             "key":           key,
             "concept":       audio_concept,
