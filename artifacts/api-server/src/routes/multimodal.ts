@@ -1,10 +1,28 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import { randomUUID } from "crypto";
+import { Agent, fetch as undiciFetch } from "undici";
 import platformRules from "../platform_rules.json";
 
 const router: IRouter = Router();
 
 const MAXCORE_URL = `http://localhost:${process.env.MODEL_API_PORT || "9878"}`;
+
+// ─── Model connection pool ──────────────────────────────────────────────────
+// Multimodal generation fans out to several upstream model calls per request
+// (analyze + N per-asset generations). Under concurrent load a single asset
+// can legitimately sit in-flight for minutes. The bare global `fetch` (undici)
+// applies a default 300s headersTimeout, which aborts valid in-flight model
+// calls and surfaces as a 500. This pool raises that ceiling well past the
+// slowest observed multimodal render so honest, still-working requests are
+// never killed mid-flight. Same keep-alive pattern used by model-proxy.ts.
+const _modelPool = new Agent({
+  keepAliveTimeout: 30_000,
+  keepAliveMaxTimeout: 60_000,
+  connections: 32,
+  pipelining: 1,
+  headersTimeout: 900_000,
+  bodyTimeout: 900_000,
+});
 const MAXCORE_API_KEY =
   process.env.ADMIN_KEY ||
   "mbs_8a3edbac97ff333dda5068410227267e6d85b14a4c9caee279fbb18ddfb47edc";
@@ -358,13 +376,14 @@ function validateTaskPlan(raw: unknown, requestId: string): TaskPlan {
 }
 
 async function maxcorePost(path: string, body: unknown): Promise<unknown> {
-  const res = await fetch(`${MAXCORE_URL}${path}`, {
+  const res = await undiciFetch(`${MAXCORE_URL}${path}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "X-Api-Key": MAXCORE_API_KEY,
     },
     body: JSON.stringify(body),
+    dispatcher: _modelPool,
   });
   if (!res.ok) {
     const err = await res.text().catch(() => res.statusText);

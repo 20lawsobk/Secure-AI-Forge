@@ -3,7 +3,8 @@
 - [Video scene text generation](video-scene-generation.md) — use dataset_sampler not model.generate_batch() for scene text; batch inference exists but model is undertrained
 - [Request intelligence layer](request-intelligence-layer.md) — shared pre-gen brief on every generation endpoint; additive `intelligence` block; ranking only for text/content; keep raw-topic guardrail candidate
 - [MaxBooster↔MaxCore contract](maxbooster-contract.md) — client prepends /api; viral-score is 0–1 (client×100); satisfy contract via additive /api endpoints, don't port TS files
-- [ffmpeg spawn under memory pressure](ffmpeg-spawn-memory.md) — ffmpeg must use posix_spawn via run_ffmpeg(), not fork(), or prod renders die with [Errno 5] EIO under model memory; also covers transient cold-start encode timeout
+- [ffmpeg spawn under memory pressure](ffmpeg-spawn-memory.md) — ffmpeg must use posix_spawn via run_ffmpeg(), not fork(), or prod renders die with [Errno 5] EIO under model memory
+- [Upstream model fetch timeouts](upstream-model-fetch-timeouts.md) — api-server→Python generation must use long-timeout undici Agent, not bare fetch (300s default aborts valid in-flight calls → 500 under load); keep server.timeout=0
 - [Generation volume testing](generation-volume-testing.md) — slow in-house gen endpoints: use short sync bash batches + submit-job/poll; long detached harnesses get reaped mid-run (phantom "hang")
 - [Workflow topology](workflow-topology.md) — run ONLY `Start application` (api-server child-spawns Python); artifact workflows can't be deleted (PROHIBITED_ACTION), keep stopped; kill lingering artifact api-server tree to end model-lock contention
 - [server.py lock topology](maxcore-server-lock-topology.md) — 3 workflows launch server.py; one /tmp/maxcore_model_9878.lock wins. Restart the lock-HOLDER's workflow to reload edits; verify via a new route flipping 404→401/200
