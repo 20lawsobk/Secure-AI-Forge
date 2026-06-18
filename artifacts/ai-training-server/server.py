@@ -3855,18 +3855,27 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
     topic    = req.topic or req.title or ""
     goal     = req.goal or "engagement"
 
+    # ── Request intelligence: analyse intent, audience & strategy up front ──
+    from ai_model import request_intelligence as ri
+    brief = ri.build_brief(
+        modality="content", platform=platform, topic=topic, goal=goal,
+        tone=req.tone, genre=req.genre, artist=artist,
+        extra=" ".join(filter(None, [req.brand_voice, req.target_audience])),
+    )
+
     hook = f"🎵 {artist} just dropped something you need to hear — {topic}"
     body = (f"Bringing {req.genre or 'music'} vibes that hit different. "
             f"{req.brand_voice or 'Authentic, raw, and real.'} "
-            f"Crafted for {req.target_audience or 'fans everywhere'}.")
-    cta  = "Stream now — link in bio 🔗"
+            f"Crafted for {req.target_audience or brief.audience}.")
+    cta  = brief.suggested_cta
 
     if _model_ready and _script_agent:
         from ai_model.agents.script_agent import ScriptRequest
         from ai_model.agents.distribution_agent import DistributionRequest
 
         def _infer():
-            _sr = _script_agent.run(ScriptRequest(idea=topic, platform=platform, goal=goal, tone=req.tone))
+            # Feed the enriched, intent-aware idea + resolved tone to the agent.
+            _sr = _script_agent.run(ScriptRequest(idea=brief.augmented_idea, platform=platform, goal=goal, tone=brief.tone))
             _distribution_agent.run(DistributionRequest(script=f"{_sr.hook}\n{_sr.body}\n{_sr.cta}", platform=platform, goal=goal))
             return _sr
 
@@ -3881,16 +3890,29 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
             body = sr.body or body
             cta  = sr.cta  or cta
 
+    # ── Pick the strongest hook among the agent output + ranked variants ───
+    hook, hook_score, hooks_considered = ri.best_hook(topic, artist, hook, brief)
+    if not cta:
+        cta = brief.suggested_cta
+
     hashtags = (req.preferred_hashtags or []) + _api_hashtags(topic, req.genre, req.platform)
+    hashtag_cap = min(10, max(brief.hashtags_target, len(req.preferred_hashtags or [])))
     caption  = f"{hook}\n\n{body}\n\n{cta}"
+    quality  = ri.score_candidate(caption, brief)
     score    = _api_heuristic_score(caption, req.platform)
     return {
         "caption":    caption,
         "hook":       hook,
         "body":       body,
         "cta":        cta,
-        "hashtags":   list(dict.fromkeys(hashtags))[:10],
-        "confidence": round(score / 100, 3),
+        "hashtags":   list(dict.fromkeys(hashtags))[:hashtag_cap],
+        "confidence": round(max(quality, score) / 100, 3),
+        "quality_score": quality,
+        "intelligence": {
+            **brief.to_dict(),
+            "hook_score": hook_score,
+            "candidates_considered": hooks_considered,
+        },
         "processing_time_ms": round((time.time() - start) * 1000, 1),
     }
 
@@ -3918,28 +3940,51 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
     idea     = req.topic or req.prompt or (str(inputs) if inputs else intent)
     platform = normalize_platform(req.platform) if req.platform else "general"
     tone     = req.tone or "authentic"
-    content  = f"Generated content for intent '{intent}'."
+
+    # ── Request intelligence: analyse intent, audience & strategy up front ──
+    from ai_model import request_intelligence as ri
+    brief = ri.build_brief(
+        modality="text", platform=platform, topic=idea, goal=intent, tone=tone,
+        extra=getattr(req, "brand_voice", None),
+    )
+
+    fallback = f"Generated content for intent '{intent}'."
+    candidates: List[str] = []
 
     if _model_ready and _script_agent:
         from ai_model.agents.script_agent import ScriptRequest
 
         def _infer():
-            return _script_agent.run(ScriptRequest(idea=idea, platform=platform, goal=intent, tone=tone))
+            return _script_agent.run(ScriptRequest(idea=brief.augmented_idea, platform=platform, goal=intent, tone=brief.tone))
 
         try:
-            sr      = await _in_thread_gated(INFERENCE_GATE, _infer, timeout=35.0)
-            content = f"{sr.hook}\n{sr.body}\n{sr.cta}"
+            sr = await _in_thread_gated(INFERENCE_GATE, _infer, timeout=35.0)
+            candidates.append(f"{sr.hook}\n{sr.body}\n{sr.cta}")
+            # Add a hook-swapped variant so we can rank for the best opener.
+            alt_hook, _, _ = ri.best_hook(idea, "the artist", sr.hook, brief)
+            if alt_hook and alt_hook != sr.hook:
+                candidates.append(f"{alt_hook}\n{sr.body}\n{sr.cta}")
         except GateBusy:
             raise HTTPException(status_code=503, detail="AI server at capacity — retry shortly")
         except Exception:
             pass
+
+    # Quality guardrail: rank a deterministic raw-topic candidate alongside the
+    # model output so a clean variant wins if steering degraded the model.
+    candidates.append(ri.deterministic_candidate(idea, "the artist", brief))
+    if not candidates:
+        candidates = [fallback]
+
+    ranked  = ri.rank_candidates(candidates, brief)
+    content = ranked[0][0] if ranked else fallback
+    quality = ranked[0][1] if ranked else 0.0
 
     outputs = [{
         "type":    "text",
         "content": content,
         "text":    content,
         "slot":    req.slots,
-        "score":   _api_heuristic_score(content, platform),
+        "score":   max(quality, _api_heuristic_score(content, platform)),
     }]
     # Top-level aliases the MaxBooster client reads (text/content/script/caption)
     return {
@@ -3948,6 +3993,11 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
         "content":            content,
         "script":             content,
         "caption":            content,
+        "quality_score":      quality,
+        "intelligence": {
+            **brief.to_dict(),
+            "candidates_considered": len(ranked),
+        },
         "processing_time_ms": round((time.time() - start) * 1000, 1),
     }
 
@@ -4395,6 +4445,16 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
     )
     artist_name = req.artistProfileId or "MaxBooster"
 
+    # ── Request intelligence: analyse intent/audience & visual strategy ────
+    from ai_model import request_intelligence as ri
+    _first_plat = raw_slots[0].get("platform") if isinstance(raw_slots[0], dict) else str(raw_slots[0])
+    brief = ri.build_brief(
+        modality="image", platform=normalize_platform(_first_plat or "instagram"),
+        topic=str(topic), goal=intent,
+        tone=style_tags[0] if style_tags else None,
+        extra=" ".join(str(s) for s in style_tags),
+    )
+
     outputs = []
     for slot in raw_slots:
         if isinstance(slot, str):
@@ -4404,7 +4464,7 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
         purpose   = slot.get("purpose", intent)
 
         # ── Determine layout and color scheme via VisualSpecAgent ─────────────
-        layout       = "square_1_1"
+        layout       = brief.layout
         color_scheme = "dark_neon"
         prompt       = f"Eye-catching {style_tags[0] if style_tags else 'cinematic'} visual for: {topic}"
 
@@ -4412,9 +4472,9 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
             try:
                 from ai_model.agents.visual_spec_agent import VisualSpecRequest
                 vis = await _in_thread(lambda: _visual_spec_agent.run(VisualSpecRequest(
-                    idea=topic,
+                    idea=brief.augmented_idea,
                     platform=normalize_platform(platform),
-                    tone=style_tags[0] if style_tags else "cinematic",
+                    tone=style_tags[0] if style_tags else brief.tone,
                 )))
                 layout       = vis.layout or layout
                 color_scheme = vis.color_scheme or color_scheme
@@ -4422,6 +4482,10 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
                     prompt = vis.thumbnail_prompt
             except Exception:
                 pass
+
+        # Enrich the render prompt with intent-derived focus keywords.
+        if brief.keywords:
+            prompt = f"{prompt}. Focus: {', '.join(brief.keywords[:4])}"
 
         # ── Render via PIL ImageEngine ─────────────────────────────────────────
         result = None
@@ -4490,6 +4554,7 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
         "url":       first_url,
         "image_url": first_url,
         "path":      first_url,
+        "intelligence": brief.to_dict(),
         "processing_time_ms": round((_t.time() - start) * 1000, 1),
     }
 
@@ -4508,6 +4573,15 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         "error":      None,
     })
 
+    # ── Request intelligence: analyse intent & sonic strategy up front ─────
+    from ai_model import request_intelligence as ri
+    genre_hint = req.genre or "music"
+    brief = ri.build_brief(
+        modality="audio", platform="general",
+        topic=f"{genre_hint} {req.intent or req.instrument or 'music clip'}",
+        goal=req.intent, tone=None, genre=req.genre,
+    )
+
     # Pre-generate AI concept synchronously before spawning the thread
     audio_concept  = None
     style_hook     = None
@@ -4516,12 +4590,11 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
     if _model_ready and _script_agent:
         try:
             from ai_model.agents.script_agent import ScriptRequest
-            genre_hint = req.genre or "music"
             _mood_hint = req.intent or "energetic"
-            idea_text  = f"{genre_hint} audio track — {req.intent or req.instrument or 'music clip'}"
+            idea_text  = f"{genre_hint} audio track ({brief.tempo} tempo) — {brief.augmented_idea}"
             sr = await _in_thread(lambda: _script_agent.run(ScriptRequest(
                 idea=idea_text, platform="general",
-                goal="creative production", tone="energetic",
+                goal="creative production", tone=brief.tone,
             )))
             if sr:
                 audio_concept = sr.body
@@ -4560,8 +4633,9 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
             "source":        model_source,
         })
 
+    _job_update(job_id, {"intelligence": brief.to_dict()})
     threading.Thread(target=_process, daemon=True, name=f"ApiAudioJob-{job_id}").start()
-    return {"job_id": job_id, "status": "processing"}
+    return {"job_id": job_id, "status": "processing", "intelligence": brief.to_dict()}
 
 
 @app.post("/api/generate-video")
@@ -4572,6 +4646,15 @@ async def api_generate_video(req: ApiGenerateVideoRequest, _key=Depends(require_
     """
     if not _model_ready or _script_agent is None or _visual_spec_agent is None or _creative_model is None:
         raise HTTPException(status_code=503, detail="AI model is still initialising — try again shortly")
+
+    # ── Request intelligence: analyse intent & cinematic strategy up front ─
+    from ai_model import request_intelligence as ri
+    brief = ri.build_brief(
+        modality="video", platform=normalize_platform(req.platform),
+        topic=req.topic or req.idea, goal=req.goal, tone=req.tone, genre=req.genre,
+        artist=req.artist_name,
+        extra=" ".join(filter(None, [req.hook, req.body, req.cta])),
+    )
 
     job_id = str(uuid.uuid4())
     _job_write(job_id, {
@@ -4589,6 +4672,7 @@ async def api_generate_video(req: ApiGenerateVideoRequest, _key=Depends(require_
         "scenes_rendered": 0,
         "render_ms":       None,
         "error":           None,
+        "intelligence":    brief.to_dict(),
     })
 
     def _plan_and_render():
@@ -4601,10 +4685,10 @@ async def api_generate_video(req: ApiGenerateVideoRequest, _key=Depends(require_
 
             agent     = VideoAgent(_creative_model, _script_agent, _visual_spec_agent)
             agent_req = VideoAgentRequest(
-                idea=req.idea,
+                idea=f"{req.idea} | {brief.augmented_idea}" if req.idea else brief.augmented_idea,
                 platform=req.platform,
                 goal=req.goal,
-                tone=req.tone,
+                tone=req.tone or brief.tone,
                 genre=req.genre or "",
                 artist_name=req.artist_name or "",
                 duration=float(req.duration or 0),
@@ -4674,7 +4758,7 @@ async def api_generate_video(req: ApiGenerateVideoRequest, _key=Depends(require_
             })
 
     threading.Thread(target=_plan_and_render, daemon=True, name=f"ApiVideoJob-{job_id}").start()
-    return {"job_id": job_id, "status": "processing"}
+    return {"job_id": job_id, "status": "processing", "intelligence": brief.to_dict()}
 
 
 # ── AI-driven video generation ─────────────────────────────────────────────────
@@ -4716,12 +4800,19 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
     if not idea:
         raise HTTPException(status_code=422, detail="'idea' is required")
 
+    # ── Request intelligence: analyse intent & cinematic strategy up front ─
+    from ai_model import request_intelligence as ri
+    brief = ri.build_brief(
+        modality="video", platform=normalize_platform(platform),
+        topic=idea, goal=goal, tone=tone, genre=genre, artist=artist_name,
+    )
+
     from ai_model.video.video_agent import VideoAgent, VideoAgentRequest
     req = VideoAgentRequest(
-        idea=idea,
+        idea=f"{idea} | {brief.augmented_idea}",
         platform=platform,
         goal=goal,
-        tone=tone,
+        tone=tone or brief.tone,
         genre=genre,
         artist_name=artist_name,
         duration=duration,
@@ -4744,6 +4835,7 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
         "scenes_rendered": 0,
         "render_ms":       None,
         "error":           None,
+        "intelligence":    brief.to_dict(),
     })
 
     _req = req  # capture for closure
@@ -4812,6 +4904,7 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
         "job_id":   job_id,
         "status":   "pending",
         "poll_url": f"/api/video-job/{job_id}",
+        "intelligence": brief.to_dict(),
     }
 
 
