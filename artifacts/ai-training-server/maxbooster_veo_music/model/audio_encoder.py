@@ -1,5 +1,5 @@
 import numpy as np
-from typing import Dict
+from typing import Any, Dict
 from ai_model.gpu.hyper_core import HyperGPU
 
 
@@ -9,7 +9,7 @@ class AudioEncoder:
         self.embed_dim = embed_dim
         self.n_frames = n_frames
 
-    def encode(self, audio_waveform: np.ndarray, sample_rate: int) -> Dict[str, np.ndarray]:
+    def encode(self, audio_waveform: np.ndarray, sample_rate: int) -> Dict[str, Any]:
         T_audio = self.n_frames
         D = self.embed_dim
 
@@ -26,12 +26,38 @@ class AudioEncoder:
             energy_curve[i] = float(np.sqrt(np.mean(chunk ** 2))) if len(chunk) > 0 else 0.0
 
         section_labels = np.zeros(T_audio, dtype=np.int32)
-        if T_audio >= 4:
-            q = T_audio // 4
-            section_labels[0:q] = 0
-            section_labels[q:2*q] = 1
-            section_labels[2*q:3*q] = 2
-            section_labels[3*q:] = 3
+        beat_positions = np.linspace(0, 1, max(1, T_audio // 15), dtype=np.float32)
+        bpm = 120.0
+        key = "C"
+        mode = "major"
+        try:
+            from ai_model.audio.audio_analysis import analyze_audio
+
+            timeline = analyze_audio(audio_waveform, sample_rate)
+            dur = timeline.duration_sec
+            if timeline.sections and dur > 0:
+                last = len(timeline.sections) - 1
+                for i in range(T_audio):
+                    t = (i / T_audio) * dur
+                    for si, sec in enumerate(timeline.sections):
+                        if sec.start <= t < sec.end:
+                            section_labels[i] = si
+                            break
+                    else:
+                        section_labels[i] = last
+            positions = timeline.beat_positions_normalized()
+            if positions:
+                beat_positions = np.asarray(positions, dtype=np.float32)
+            bpm = float(timeline.bpm)
+            key = timeline.key
+            mode = timeline.mode
+        except Exception:
+            if T_audio >= 4:
+                q = T_audio // 4
+                section_labels[0:q] = 0
+                section_labels[q:2*q] = 1
+                section_labels[2*q:3*q] = 2
+                section_labels[3*q:] = 3
 
         raw_features = np.column_stack([
             energy_curve,
@@ -44,4 +70,8 @@ class AudioEncoder:
             "time_embeddings": time_embeddings,
             "section_labels": section_labels,
             "energy_curve": energy_curve,
+            "beat_positions": beat_positions,
+            "bpm": np.float32(bpm),
+            "key": key,
+            "mode": mode,
         }

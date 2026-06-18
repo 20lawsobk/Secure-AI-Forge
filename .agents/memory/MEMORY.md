@@ -4,3 +4,4 @@
 - [Request intelligence layer](request-intelligence-layer.md) — shared pre-gen brief on every generation endpoint; additive `intelligence` block; ranking only for text/content; keep raw-topic guardrail candidate
 - [MaxBooster↔MaxCore contract](maxbooster-contract.md) — client prepends /api; viral-score is 0–1 (client×100); satisfy contract via additive /api endpoints, don't port TS files
 - [ffmpeg spawn under memory pressure](ffmpeg-spawn-memory.md) — ffmpeg must use posix_spawn via run_ffmpeg(), not fork(), or prod renders die with [Errno 5] EIO under model memory
+- [Conductor + Resonance design](conductor-audio-analysis.md) — in-house=local libs (librosa ok); total never-raise audio→MusicalTimeline analyzer; phased audio-conducted "no broken fallback" video plan
