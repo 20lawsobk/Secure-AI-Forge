@@ -11,6 +11,12 @@ description: Which scaling levers already exist (don't rebuild) and how the flee
 # Honest scale thesis (recurring user debate)
 Storage scales cheaply/digitally; **compute is bounded by physical cores**. A "custom cloud" only orchestrates physical machines — it doesn't manufacture compute; a better-than-Redis store is still storage, not compute. Skipping recompute (dedup) is the only honest *software* lever that raises effective throughput.
 
+## Measured ceiling (single dev VM: 4 cores, INFERENCE_GATE capacity 2)
+Load-tested `/api/generate/content` (the *lightest* gen endpoint; image/audio/video are strictly heavier):
+- **Unique requests (cache misses): ~0.34 req/s, FLAT across 8/32/64 concurrency.** Adding concurrency does not raise throughput — it just deepens the queue (p50 latency climbed 18s→40s→46s) until the 35s gate timeout sheds overflow as 503 (backpressure working: 0/6/12 shed at 8/32/64). This is the real compute ceiling.
+- **Identical repeats (cache hits): ~182 req/s, 64ms p50, 0 errors** — the dedup win, but ONLY for repeats.
+- Extrapolation: 100 VMs × 0.34 ≈ 34 req/s ≈ ~3M unique gens/day. "90M *concurrent*" ≈ 45M VMs (2 in-flight each); "90M unique/day" ≈ ~3,000 VMs. The "90M easily" claim is off by ~6 orders of magnitude for unique work; cache only closes the gap to the extent traffic actually repeats.
+
 # Fleet-wide dedup cache (`ai_model/dedup_cache.py`)
 Pdim-backed result cache for the synchronous text endpoints (`/api/generate/content`, `/api/generate/text` content-mode). On hit returns the stored dict + additive `cached:true` + refreshed `processing_time_ms`. Measured 2.7s → 0.1ms on a repeat.
 - **Key = sha256 of the JSON-dumped request with only TOP-LEVEL transport metadata stripped** (id/ts/nonce…). **Never recurse** — nested `inputs`/`step`/`slots` are semantic; scrubbing nested `id`/`time` would let genuinely-different requests collide (architect-caught bug). `artistProfileId` is top-level and kept, so text dedup is naturally per-artist.
