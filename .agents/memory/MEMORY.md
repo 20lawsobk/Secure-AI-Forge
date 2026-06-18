@@ -5,3 +5,4 @@
 - [MaxBooster↔MaxCore contract](maxbooster-contract.md) — client prepends /api; viral-score is 0–1 (client×100); satisfy contract via additive /api endpoints, don't port TS files
 - [ffmpeg spawn under memory pressure](ffmpeg-spawn-memory.md) — ffmpeg must use posix_spawn via run_ffmpeg(), not fork(), or prod renders die with [Errno 5] EIO under model memory
 - [Conductor + Resonance design](conductor-audio-analysis.md) — in-house=local libs (librosa ok); total never-raise audio→MusicalTimeline analyzer; phased audio-conducted "no broken fallback" video plan
+- [Retrieval spine + self-healing](retrieval-self-healing.md) — model ALL self-healing on server Watchdog; all-real cascade (anchor core always loaded) = non-empty guarantee; atomic claim+re-enqueue drain
