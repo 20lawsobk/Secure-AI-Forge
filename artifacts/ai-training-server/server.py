@@ -5219,6 +5219,50 @@ if __name__ == "__main__":
     import multiprocessing
     import uvicorn
     port = int(os.environ.get("MODEL_API_PORT", 9878))
+
+    # ── Single-instance guard ───────────────────────────────────────────────
+    # uvicorn kicks off the model load (~1.7 GB) during application startup,
+    # which begins before the port is reliably bound.  In production the API
+    # server can run more than one cluster primary (e.g. ports 8080 and 3000),
+    # and each primary independently manages the Python AI server.  Two near-
+    # simultaneous spawns both pass the "is the port open yet?" check and each
+    # load the full model before either binds 9878 — doubling memory to ~3.4 GB
+    # and starving the video renderer, so even posix_spawn'd ffmpeg execve
+    # fails with OSError [Errno 5] (EIO) under the memory cgroup.
+    #
+    # An exclusive OS file lock guarantees exactly one instance ever loads the
+    # model.  A duplicate stands down *before* importing/loading anything heavy,
+    # then waits for the owner to bind the port so the Node lifecycle manager
+    # sees "port held by another process" and quietly stands by (no respawn
+    # loop).  The lock is advisory and tied to the open fd, so the kernel
+    # releases it automatically if the owner crashes.
+    import fcntl
+    _singleton_lock_path = os.environ.get(
+        "MODEL_SINGLETON_LOCK", f"/tmp/maxcore_model_{port}.lock"
+    )
+    _singleton_lock_fd = os.open(
+        _singleton_lock_path, os.O_CREAT | os.O_RDWR, 0o644
+    )
+    try:
+        fcntl.flock(_singleton_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print(
+            f"[Server] Another AI server instance already holds "
+            f"{_singleton_lock_path} — standing down to avoid a duplicate "
+            f"model load.",
+            flush=True,
+        )
+        import socket as _socket
+        import time as _time
+        _deadline = _time.time() + 90
+        while _time.time() < _deadline:
+            with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as _s:
+                _s.settimeout(1.0)
+                if _s.connect_ex(("127.0.0.1", port)) == 0:
+                    break
+            _time.sleep(1.0)
+        os._exit(0)
+
     # Single worker.  Each worker loads the full model (~1.7 GB) into its own
     # process address space.  2 workers = ~3.4 GB idle; on the 8 GB host that
     # leaves only ~2 GB headroom for render threads (PIL frame buffers +

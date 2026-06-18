@@ -28,3 +28,18 @@ no `pass_fds`, `cwd=None`, and NO PIPE redirections (use `DEVNULL` for stdout + 
 file for stderr instead of `capture_output=True`). Verify with a monkeypatched
 `os.posix_spawn` counter. The helper also retries only on transient errnos
 (EIO/ENOMEM/EAGAIN) and fails fast on permanent ones (ENOENT/EACCES).
+
+## posix_spawn alone was NOT enough — the deeper cause is duplicate model loads
+If ffmpeg EIO recurs in prod even though `run_ffmpeg` already uses posix_spawn (verified:
+posix_spawn=1, fork=0 with the helper's exact args), the real cause is **two copies of the
+~1.7GB model loaded at once**, which alone tips the cgroup so even a vfork'd execve of the
+ffmpeg binary fails with EIO. How it happens: the API server can run >1 cluster *primary*
+in prod (deploy logs showed `[Cluster] Primary` on BOTH 8080 and 3000), each independently
+runs `ensurePythonServer()`. uvicorn starts the model load before port 9878 is reliably bound,
+so two near-simultaneous spawns both pass the "is port open?" check and both load the model.
+**Fix in place:** a single-instance guard in `server.py`'s `__main__` (before `uvicorn.run`)
+takes an exclusive `fcntl.flock` on `/tmp/maxcore_model_<port>.lock`; a duplicate waits for the
+owner to bind the port then `os._exit(0)`, so exactly one model ever loads. Must stay in
+`__main__` (NOT module top-level) or uvicorn's re-import of `server:app` would lock out the winner.
+**Remaining follow-up (not done):** also stop the 2nd API primary from managing Python at the
+Node layer — the flock is containment, not a control-plane fix.
