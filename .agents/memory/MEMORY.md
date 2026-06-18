@@ -7,3 +7,6 @@
 - [server.py lock topology](maxcore-server-lock-topology.md) — 3 workflows launch server.py; one /tmp/maxcore_model_9878.lock wins. Restart the lock-HOLDER's workflow to reload edits; verify via a new route flipping 404→401/200
 - [Conductor + Resonance design](conductor-audio-analysis.md) — in-house=local libs (librosa ok); total never-raise audio→MusicalTimeline analyzer; phased audio-conducted "no broken fallback" video plan
 - [Retrieval spine + self-healing](retrieval-self-healing.md) — model ALL self-healing on server Watchdog; all-real cascade (anchor core always loaded) = non-empty guarantee; atomic claim+re-enqueue drain
+- [RCGS conditioning + probes](rcgs-conditioning.md) — real assets condition procedural BGs (total, never-raise); probe BEFORE fallback; flat asset→no modulation is CORRECT; verify via live_probes_total
+- [Seeded/deterministic output reuse](seeded-output-reuse.md) — reuse a deterministic-name file only after validating it; write temp+os.replace; module-level (not per-instance) key locks
+- [Retrieval flywheel + brand centroid](retrieval-self-healing.md) — ingestor folds rendered assets back into index (TOTAL enqueue, bounded retry); brand centroid is incremental accumulator that must equal a rebuild

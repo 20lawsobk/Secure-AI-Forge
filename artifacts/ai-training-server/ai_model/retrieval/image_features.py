@@ -22,7 +22,11 @@ None and lets the caller skip that asset.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+import hashlib
+import os
+import threading
+from collections import OrderedDict
+from typing import Any, Dict, Optional
 
 import numpy as np
 
@@ -48,6 +52,58 @@ EMBED_DIM = _PALETTE_LEN + _GRID_RGB_LEN + _GRID_LUM_LEN + _STATS_LEN   # 128
 PALETTE_SLICE = slice(0, _PALETTE_LEN)                 # [0:48] HSV histograms
 
 
+# ── Bounded embedding cache ──────────────────────────────────────────────────
+# Embedding is deterministic, so identical content always maps to the same vector.
+# A small content-keyed LRU lets repeat embeds (RCGS per-frame, re-ingesting the
+# same file) skip the full PIL + histogram pass. Thread-safe and TOTAL: any cache
+# error falls back to a fresh computation, so it can only ever speed things up.
+_CACHE_CAP = 2048
+_cache: "OrderedDict[str, np.ndarray]" = OrderedDict()
+_cache_lock = threading.Lock()
+_cache_hits = 0
+_cache_misses = 0
+
+
+def _cache_key(src: Any) -> Optional[str]:
+    """Stable content key for a cacheable source, or None to bypass the cache."""
+    try:
+        if isinstance(src, np.ndarray):
+            arr = np.ascontiguousarray(src)
+            digest = hashlib.blake2b(arr.tobytes(), digest_size=16).hexdigest()
+            return f"nd:{digest}:{arr.shape}:{arr.dtype}"
+        if _PIL_OK and isinstance(src, Image.Image):
+            arr = np.ascontiguousarray(np.asarray(src.convert("RGB")))
+            digest = hashlib.blake2b(arr.tobytes(), digest_size=16).hexdigest()
+            return f"im:{digest}:{arr.shape}"
+        # Otherwise treat as a filesystem path: key on path + mtime + size so a
+        # changed file misses (and recomputes) rather than serving a stale vector.
+        p = os.fspath(src) if hasattr(src, "__fspath__") else str(src)
+        st = os.stat(p)
+        return f"f:{os.path.abspath(p)}:{st.st_mtime_ns}:{st.st_size}"
+    except Exception:
+        return None
+
+
+def embedding_cache_stats() -> Dict[str, int]:
+    """Snapshot of cache size and hit/miss counters (for tests/observability)."""
+    with _cache_lock:
+        return {
+            "size": len(_cache),
+            "capacity": _CACHE_CAP,
+            "hits": _cache_hits,
+            "misses": _cache_misses,
+        }
+
+
+def clear_embedding_cache() -> None:
+    """Drop all cached vectors and reset counters."""
+    global _cache_hits, _cache_misses
+    with _cache_lock:
+        _cache.clear()
+        _cache_hits = 0
+        _cache_misses = 0
+
+
 def _to_rgb(src: Any) -> Optional["Image.Image"]:
     if not _PIL_OK:
         return None
@@ -64,7 +120,7 @@ def _to_rgb(src: Any) -> Optional["Image.Image"]:
         return None
 
 
-def image_to_vector(src: Any) -> Optional[np.ndarray]:
+def _compute_vector(src: Any) -> Optional[np.ndarray]:
     """Deterministic EMBED_DIM feature vector for a real image. Never raises."""
     img = _to_rgb(src)
     if img is None:
@@ -144,3 +200,36 @@ def image_to_vector(src: Any) -> Optional[np.ndarray]:
         return (vec / norm).astype(np.float32)
     except Exception:
         return None
+
+
+def image_to_vector(src: Any, *, use_cache: bool = True) -> Optional[np.ndarray]:
+    """
+    Deterministic EMBED_DIM feature vector for a real image. Never raises.
+
+    Results are cached by content (bounded LRU) so repeat embeds of identical
+    pixels are O(1). Cached vectors are copied in and out, so callers may mutate
+    the returned array freely. ``use_cache=False`` forces a fresh computation and
+    skips the cache entirely.
+    """
+    global _cache_hits, _cache_misses
+    key = _cache_key(src) if use_cache else None
+
+    if key is not None:
+        with _cache_lock:
+            hit = _cache.get(key)
+            if hit is not None:
+                _cache.move_to_end(key)
+                _cache_hits += 1
+                return hit.copy()
+
+    vec = _compute_vector(src)
+
+    if key is not None:
+        with _cache_lock:
+            _cache_misses += 1
+            if vec is not None:
+                _cache[key] = vec.copy()
+                _cache.move_to_end(key)
+                while len(_cache) > _CACHE_CAP:
+                    _cache.popitem(last=False)
+    return vec

@@ -34,6 +34,13 @@ from ai_model.retrieval.asset_index import AssetIndex, MIN_ANCHORS
 
 logger = logging.getLogger("coverage_watchdog")
 
+
+def _probe_vector(probe: Any) -> Any:
+    """Extract the feature vector from a probe payload or a raw vector alike."""
+    if isinstance(probe, dict):
+        return probe.get("vector")
+    return probe
+
 POLL_INTERVAL = 60          # seconds between coverage checks
 GAP_QUEUE_WARN = 200        # pending ingestion targets before we force a drain
 DRAIN_COOLDOWN = 120        # min seconds between ingestion drains
@@ -224,7 +231,8 @@ class CoverageWatchdog:
                 logger.error(f"[CoverageWatchdog] probe_source_fn error: {e}")
                 probes = []
 
-        report = self.index.coverage_report(probes or None)
+        vectors = [_probe_vector(p) for p in probes]
+        report = self.index.coverage_report(vectors or None)
         gate = report.get("gate", "healthy")
         with self._lock:
             self.stats["last_gate"] = gate
@@ -232,7 +240,8 @@ class CoverageWatchdog:
         if gate == "healthy":
             return
 
-        # Identify the probes that retrieval could not cover well and queue them.
+        # Identify the probes that retrieval could not cover well and queue them
+        # (full payloads, so brand/layout context survives into ingestion).
         gaps = self._weak_probes(probes)
         enqueued = self._enqueue_gaps(gaps)
 
@@ -272,7 +281,7 @@ class CoverageWatchdog:
         if self.probe_source_fn is not None:
             try:
                 ps = list(self.probe_source_fn() or [])
-                probe = ps[0] if ps else None
+                probe = _probe_vector(ps[0]) if ps else None
             except Exception:
                 probe = None
         if probe is None:
@@ -296,9 +305,12 @@ class CoverageWatchdog:
             return []
         weak: List[Any] = []
         for p in probes:
-            res = self.index.query(p)
+            vec = _probe_vector(p)
+            if vec is None:
+                continue
+            res = self.index.query(vec)
             if res is None or res.rung in ("brand_prior", "anchor") or res.distance > 0.35:
-                weak.append(p)
+                weak.append(p)  # preserve the full payload (vector + context)
         return weak
 
     def _enqueue_gaps(self, gaps: List[Any]) -> int:
@@ -308,8 +320,14 @@ class CoverageWatchdog:
             import numpy as np
             payload = []
             for g in gaps:
-                arr = np.asarray(g, dtype=np.float64).reshape(-1)
-                payload.append({"ts": time.time(), "vector": arr.tolist()})
+                vec = _probe_vector(g)
+                if vec is None:
+                    continue
+                ctx = g.get("context") or {} if isinstance(g, dict) else {}
+                if not isinstance(ctx, dict):
+                    ctx = {}
+                arr = np.asarray(vec, dtype=np.float64).reshape(-1)
+                payload.append({"ts": time.time(), "vector": arr.tolist(), "context": ctx})
             if not payload:
                 return 0
             with self._gap_lock:

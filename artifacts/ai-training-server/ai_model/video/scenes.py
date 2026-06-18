@@ -109,6 +109,8 @@ class SceneConfig:
     breathing: bool = False
     show_progress: bool = False
     progress_color: str = "0xe94560"
+    retrieval_conditioned: bool = True
+    brand: str = ""
 
 
 def _build_text_filter(te: TextElement, scene_dur: float) -> List[str]:
@@ -242,6 +244,16 @@ def _pil_bg_frame(scene: SceneConfig, width: int, height: int) -> str:
         arr = _np_plasma(c1, c2, width, height, bg_type)
     else:
         arr = _np_gradient(c1, c2, width, height)
+
+    if getattr(scene, "retrieval_conditioned", True):
+        try:
+            from ai_model.retrieval.rcgs import condition_background
+            arr = condition_background(
+                arr, width, height,
+                brand=(getattr(scene, "brand", "") or None),
+            )
+        except Exception:
+            pass
 
     grain = getattr(scene, "film_grain_amount", 0)
     if grain > 0:

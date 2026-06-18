@@ -471,6 +471,7 @@ def build_scenes(
             breathing=("breathing" in effects),
             show_progress=show_progress and idx == len(scenes_data) - 2,
             progress_color=palette.accent,
+            brand=artist_name or "",
         )
         configs.append(cfg)
 

@@ -9,11 +9,14 @@ No external AI APIs required — powered by:
 """
 from __future__ import annotations
 
+import hashlib
+import os
+import threading
 import uuid
 import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
@@ -132,9 +135,46 @@ def _scheme_for(name: str) -> tuple:
 
 # ─── Core renderer ────────────────────────────────────────────────────────────
 
+# Per-output-key locks (module-level so EVERY ImageEngine instance in this
+# process serializes on the same deterministic filename, not just one instance).
+_KEY_LOCKS: Dict[str, threading.Lock] = {}
+_KEY_LOCKS_GUARD = threading.Lock()
+
+
+def _key_lock(key: str) -> threading.Lock:
+    with _KEY_LOCKS_GUARD:
+        lk = _KEY_LOCKS.get(key)
+        if lk is None:
+            lk = threading.Lock()
+            _KEY_LOCKS[key] = lk
+        return lk
+
+
+def _valid_png(path: Path) -> bool:
+    """True only if ``path`` is an existing, non-empty, decodable PNG. Never raises."""
+    try:
+        if not path.exists() or path.stat().st_size <= 0:
+            return False
+        if _PIL_OK:
+            with Image.open(str(path)) as im:
+                im.verify()
+        return True
+    except Exception:
+        return False
+
+
 class ImageEngine:
     def __init__(self):
         _UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _seeded_fname(req: "ImageRequest") -> str:
+        """Deterministic filename for a seeded request — identical req → identical file."""
+        key = "|".join([
+            req.prompt, req.color_scheme, req.layout, req.platform,
+            req.artist_name, req.intent, ",".join(req.style_tags), str(req.seed),
+        ])
+        return f"seed_{hashlib.blake2b(key.encode(), digest_size=12).hexdigest()}.png"
 
     def render(self, req: ImageRequest) -> ImageResult:
         if not _PIL_OK:
@@ -145,6 +185,37 @@ class ImageEngine:
             )
 
         w, h = PLATFORM_DIMS.get(req.layout, (1080, 1080))
+
+        # Seeded renders are deterministic: reuse the existing output if present,
+        # and serialize concurrent identical seeds on a per-key lock so the same
+        # pixels are never rendered twice in parallel. Unseeded renders are unique.
+        if req.seed is not None:
+            fname = self._seeded_fname(req)
+            out_path = _UPLOADS_DIR / fname
+            with _key_lock(fname):
+                # Reuse only a VALID prior render. A partial/zero-byte/corrupt
+                # file (e.g. from an earlier crash) is re-rendered, so we always
+                # degrade to pre-dedupe behavior rather than serve junk forever.
+                if not _valid_png(out_path):
+                    self._render_to_path(req, w, h, out_path)
+        else:
+            fname = f"img_{uuid.uuid4().hex[:16]}.png"
+            out_path = _UPLOADS_DIR / fname
+            self._render_to_path(req, w, h, out_path)
+
+        return ImageResult(
+            success=True,
+            filename=fname,
+            url=f"/uploads/images/{fname}",
+            width=w,
+            height=h,
+            color_scheme=req.color_scheme,
+            layout=req.layout,
+            prompt_used=req.prompt,
+        )
+
+    def _render_to_path(self, req: ImageRequest, w: int, h: int, out_path: Path) -> None:
+        """Render the full composition for ``req`` at (w, h) and save it to ``out_path``."""
         grad_top, grad_bot, accent, text_col = _scheme_for(req.color_scheme)
         is_portrait = h > w
 
@@ -247,26 +318,16 @@ class ImageEngine:
             draw.ellipse([cx - dot_r, dot_y - dot_r, cx + dot_r, dot_y + dot_r],
                          fill=accent)
 
-        # ── Save ──────────────────────────────────────────────────────────────
-        if req.seed is not None:
-            import hashlib
-            key = "|".join([
-                req.prompt, req.color_scheme, req.layout, req.platform,
-                req.artist_name, req.intent, ",".join(req.style_tags), str(req.seed),
-            ])
-            fname = f"seed_{hashlib.blake2b(key.encode(), digest_size=12).hexdigest()}.png"
-        else:
-            fname = f"img_{uuid.uuid4().hex[:16]}.png"
-        out_path = _UPLOADS_DIR / fname
-        img.save(str(out_path), "PNG", optimize=True)
-
-        return ImageResult(
-            success=True,
-            filename=fname,
-            url=f"/uploads/images/{fname}",
-            width=w,
-            height=h,
-            color_scheme=req.color_scheme,
-            layout=req.layout,
-            prompt_used=req.prompt,
-        )
+        # ── Save (atomic: write to a temp sibling, then rename into place so a
+        # concurrent reader or a crash never observes a partial/zero-byte file) ──
+        tmp_path = out_path.with_name(f".{out_path.stem}.{uuid.uuid4().hex[:8]}.tmp")
+        try:
+            img.save(str(tmp_path), "PNG", optimize=True)
+            os.replace(str(tmp_path), str(out_path))
+        except Exception:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                pass
+            raise

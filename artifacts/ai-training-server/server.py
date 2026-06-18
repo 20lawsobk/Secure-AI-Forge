@@ -610,6 +610,7 @@ def _init_storage():
             ensure_library, get_asset_index, ingest_gaps,
         )
         from ai_model.retrieval.coverage_watchdog import get_coverage_watchdog
+        from ai_model.retrieval.probes import recent_probes
 
         with _workers_lock:
             _asset_index = get_asset_index()
@@ -628,7 +629,7 @@ def _init_storage():
 
         _coverage_watchdog.anchor_loader_fn = lambda: ensure_library(_asset_index)
         _coverage_watchdog.ingestion_fn     = lambda gaps: ingest_gaps(_asset_index, gaps)
-        _coverage_watchdog.probe_source_fn  = lambda: []  # live probes arrive in Phase 3
+        _coverage_watchdog.probe_source_fn  = lambda: recent_probes()  # live RCGS probes
 
         # Ensure the real domain library is present before the daemon starts.
         ensure_library(_asset_index)
@@ -637,6 +638,17 @@ def _init_storage():
               f"{_asset_index.anchor_count} anchors) — CoverageWatchdog running")
     except Exception as exc:
         print(f"[Coverage] init error (non-fatal): {exc}")
+
+    # ── Generated-asset ingestor (folds produced images back into the index) ──
+    try:
+        from ai_model.retrieval.generated_ingestor import get_generated_ingestor
+
+        _gen_ingestor = get_generated_ingestor()
+        _gen_ingestor.index = _asset_index  # share the live index (None-safe lazily too)
+        _gen_ingestor.start()
+        print("[Coverage] GeneratedIngestor running — produced images fold back into the index")
+    except Exception as exc:
+        print(f"[Coverage] generated-ingestor init error (non-fatal): {exc}")
 
 
 def _training_bridge(texts: list, epochs: int, phase_label: str,
@@ -1494,7 +1506,30 @@ async def coverage_report(_key = Depends(require_scope("read"))):
         idx = _asset_index
     if idx is None:
         return {"status": "not_initialized"}
-    return idx.coverage_report()
+    try:
+        from ai_model.retrieval.probes import probe_count, recent_probes
+        probes = recent_probes()
+        vectors = [p["vector"] for p in probes]
+        report = idx.coverage_report(vectors or None)
+        report["live_probes_total"] = probe_count()
+        report["live_probes_sampled"] = len(vectors)
+        try:
+            report["brands"] = idx.brand_stats()
+        except Exception:
+            pass
+        return report
+    except Exception:
+        return idx.coverage_report()
+
+
+@app.get("/coverage/ingestor")
+async def coverage_ingestor(_key = Depends(require_scope("read"))):
+    """Status of the generated-asset ingestor (produced images folded back in)."""
+    try:
+        from ai_model.retrieval.generated_ingestor import get_generated_ingestor
+        return get_generated_ingestor().get_status()
+    except Exception:
+        return {"status": "not_initialized", "running": False}
 
 
 @app.post("/coverage/reset")
@@ -4583,6 +4618,19 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
                 print(f"[ImageEngine] render error: {_img_err}")
 
         if result and result.success:
+            # Fold this produced image back into the retrieval index (non-blocking,
+            # deduped, bounded; TOTAL — never raises into the generation path).
+            try:
+                from ai_model.retrieval.generated_ingestor import get_generated_ingestor
+                from ai_model.image.image_engine import _UPLOADS_DIR as _IMG_DIR
+                get_generated_ingestor().enqueue(
+                    str(_IMG_DIR / result.filename),
+                    brand=artist_name,
+                    endpoint="/api/generate/image",
+                    platform=platform,
+                )
+            except Exception:
+                pass
             outputs.append({
                 "type":    "image",
                 "url":     result.url,

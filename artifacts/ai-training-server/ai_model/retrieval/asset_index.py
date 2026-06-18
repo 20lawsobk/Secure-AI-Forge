@@ -78,6 +78,12 @@ class AssetIndex:
         self._id_to_idx: Dict[str, int] = {}
         self._exact_to_idx: Dict[str, int] = {}    # content-hash → idx
 
+        # Per-brand running centroid accumulators (sum of unit vectors + count),
+        # maintained incrementally under _lock so a brand's visual identity is
+        # O(1) to read for brand-aware retrieval/conditioning.
+        self._brand_sum: Dict[str, np.ndarray] = {}
+        self._brand_count: Dict[str, int] = {}
+
     # ------------------------------------------------------------------ #
     # Mutation                                                            #
     # ------------------------------------------------------------------ #
@@ -100,6 +106,34 @@ class AssetIndex:
             return None
         return (v / norm).astype(np.float32)
 
+    def _brand_accumulate(self, brand: Optional[str], vec: np.ndarray, sign: int) -> None:
+        """Roll a vector into/out of a brand's centroid. Caller must hold _lock."""
+        if not brand:
+            return
+        contrib = np.asarray(vec, dtype=np.float64).reshape(-1)
+        if contrib.shape[0] != self.dim:
+            return
+        if sign > 0:
+            cur = self._brand_sum.get(brand)
+            self._brand_sum[brand] = contrib.copy() if cur is None else (cur + contrib)
+            self._brand_count[brand] = self._brand_count.get(brand, 0) + 1
+        else:
+            cur = self._brand_sum.get(brand)
+            if cur is None:
+                return
+            self._brand_sum[brand] = cur - contrib
+            self._brand_count[brand] = self._brand_count.get(brand, 1) - 1
+            if self._brand_count[brand] <= 0:
+                self._brand_sum.pop(brand, None)
+                self._brand_count.pop(brand, None)
+
+    def _recompute_brands(self) -> None:
+        """Rebuild every per-brand accumulator from scratch. Caller must hold _lock."""
+        self._brand_sum = {}
+        self._brand_count = {}
+        for i, b in enumerate(self._brand):
+            self._brand_accumulate(b, self._vecs[i], +1)
+
     def add(
         self,
         asset_id: str,
@@ -120,6 +154,8 @@ class AssetIndex:
                 old_key = _content_key(self._vecs[idx])
                 if self._exact_to_idx.get(old_key) == idx:
                     del self._exact_to_idx[old_key]
+                # Roll the prior vector/brand out of its centroid before replacing.
+                self._brand_accumulate(self._brand[idx], self._vecs[idx], -1)
                 self._vecs[idx] = v
                 self._meta[idx] = meta
                 self._is_anchor[idx] = bool(is_anchor)
@@ -132,6 +168,7 @@ class AssetIndex:
                 self._is_anchor.append(bool(is_anchor))
                 self._brand.append(brand)
                 self._id_to_idx[asset_id] = idx
+            self._brand_accumulate(brand, v, +1)
             self._exact_to_idx[_content_key(v)] = idx
         return True
 
@@ -151,6 +188,7 @@ class AssetIndex:
             self._exact_to_idx = {
                 _content_key(self._vecs[i]): i for i in range(len(self._ids))
             }
+            self._recompute_brands()
             return True
 
     # ------------------------------------------------------------------ #
@@ -170,6 +208,35 @@ class AssetIndex:
     def brands(self) -> List[str]:
         with self._lock:
             return sorted({b for b in self._brand if b})
+
+    def brand_centroid(self, brand: str) -> Optional[np.ndarray]:
+        """
+        Unit-normalized mean embedding of every asset carrying ``brand`` — the
+        brand's visual "identity vector" for brand-aware retrieval/conditioning.
+        Returns None for an unknown/empty brand. Never raises.
+        """
+        if not brand:
+            return None
+        with self._lock:
+            s = self._brand_sum.get(brand)
+            c = int(self._brand_count.get(brand, 0))
+            if s is None or c <= 0:
+                return None
+            mean = s / float(c)
+        norm = float(np.linalg.norm(mean))
+        if norm <= 1e-12:
+            return None
+        return (mean / norm).astype(np.float32)
+
+    def brand_count(self, brand: str) -> int:
+        """Number of assets contributing to a brand's centroid."""
+        with self._lock:
+            return int(self._brand_count.get(brand, 0))
+
+    def brand_stats(self) -> Dict[str, int]:
+        """Snapshot of {brand: contributing_asset_count} for all known brands."""
+        with self._lock:
+            return {b: int(c) for b, c in self._brand_count.items()}
 
     # ------------------------------------------------------------------ #
     # Query — the all-real cascade                                         #
@@ -348,6 +415,7 @@ class AssetIndex:
             self._ids, self._vecs, self._meta = [], [], []
             self._is_anchor, self._brand = [], []
             self._id_to_idx, self._exact_to_idx = {}, {}
+            self._brand_sum, self._brand_count = {}, {}
         for i, aid in enumerate(ids):
             v = vecs[i] if i < len(vecs) else None
             m = meta[i] if i < len(meta) else {}
