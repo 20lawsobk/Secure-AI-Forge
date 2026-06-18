@@ -3962,6 +3962,17 @@ def _api_model_state(domain: str) -> dict:
 async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(require_scope("generate"))):
     """Captions, hooks, CTAs for social posts with artist context."""
     start    = time.time()
+
+    # ── Fleet-wide dedup: an identical request returns the stored result ────
+    from ai_model import dedup_cache
+    _cache_key = dedup_cache.key_for("api_content", req)
+    _hit = dedup_cache.get(_cache_key)
+    if isinstance(_hit, dict):
+        _hit = dict(_hit)
+        _hit["cached"] = True
+        _hit["processing_time_ms"] = round((time.time() - start) * 1000, 1)
+        return _hit
+
     platform = normalize_platform(req.platform)
     artist   = req.artist_name or req.artist or "the artist"
     topic    = req.topic or req.title or ""
@@ -4012,7 +4023,7 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
     caption  = f"{hook}\n\n{body}\n\n{cta}"
     quality  = ri.score_candidate(caption, brief)
     score    = _api_heuristic_score(caption, req.platform)
-    return {
+    result = {
         "caption":    caption,
         "hook":       hook,
         "body":       body,
@@ -4027,6 +4038,9 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
         },
         "processing_time_ms": round((time.time() - start) * 1000, 1),
     }
+    if _model_ready:
+        dedup_cache.put(_cache_key, result)
+    return result
 
 
 @app.post("/api/generate/text")
@@ -4046,6 +4060,16 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
         return {"steps": steps, "processing_time_ms": round((time.time() - start) * 1000, 1)}
 
     # mode == "content"
+    # ── Fleet-wide dedup: an identical request returns the stored result ────
+    from ai_model import dedup_cache
+    _cache_key = dedup_cache.key_for("api_text", req)
+    _hit = dedup_cache.get(_cache_key)
+    if isinstance(_hit, dict):
+        _hit = dict(_hit)
+        _hit["cached"] = True
+        _hit["processing_time_ms"] = round((time.time() - start) * 1000, 1)
+        return _hit
+
     intent   = req.intent or "create content"
     inputs   = req.inputs or {}
     # MaxBooster sends topic/prompt directly; fall back to inputs for legacy callers
@@ -4099,7 +4123,7 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
         "score":   max(quality, _api_heuristic_score(content, platform)),
     }]
     # Top-level aliases the MaxBooster client reads (text/content/script/caption)
-    return {
+    result = {
         "outputs":            outputs,
         "text":               content,
         "content":            content,
@@ -4112,6 +4136,9 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
         },
         "processing_time_ms": round((time.time() - start) * 1000, 1),
     }
+    if _model_ready:
+        dedup_cache.put(_cache_key, result)
+    return result
 
 
 @app.post("/api/content/score")
@@ -5204,9 +5231,11 @@ async def api_concurrency_stats(_key=Depends(require_scope("read"))):
     ``capacity`` is recomputed from the container's current usable CPU and
     available memory, so it shrinks under pressure and grows when resources free
     up — i.e. it auto-adjusts to whatever load MaxBooster sends."""
+    from ai_model import dedup_cache
     return {
         "inference": INFERENCE_GATE.stats(),
         "render": RENDER_GATE.stats(),
+        "dedup_cache": dedup_cache.stats(),
     }
 
 

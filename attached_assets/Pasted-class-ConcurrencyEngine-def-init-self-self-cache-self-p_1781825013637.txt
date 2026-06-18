@@ -1,0 +1,61 @@
+class ConcurrencyEngine:
+    def __init__(self):
+        self.cache = {}
+        self.pending_batches = {}
+        self.batch_size = 16
+
+    def _hash(self, prompt, params):
+        import hashlib, json
+        blob = json.dumps({"p": prompt, "params": params}, sort_keys=True)
+        return hashlib.sha256(blob.encode()).hexdigest()
+
+    def submit(self, prompt, params):
+        key = self._hash(prompt, params)
+
+        # 1. Deduplication
+        if key in self.cache:
+            return self.cache[key], "cache"
+
+        # 2. Microbatching
+        bucket = params.get("bucket", "default")
+        if bucket not in self.pending_batches:
+            self.pending_batches[bucket] = []
+        self.pending_batches[bucket].append((key, prompt, params))
+
+        # If batch is full → process
+        if len(self.pending_batches[bucket]) >= self.batch_size:
+            self._process_batch(bucket)
+
+        return {"status": "queued"}, "queued"
+
+    def _process_batch(self, bucket):
+        batch = self.pending_batches[bucket]
+        self.pending_batches[bucket] = []
+
+        # 3. Preview-first generation
+        previews = [self._preview(p, params) for _, p, params in batch]
+
+        # 4. Quality filter
+        final_jobs = []
+        for i, (key, prompt, params) in enumerate(batch):
+            if self._is_good(previews[i]):
+                self.cache[key] = previews[i]
+            else:
+                final_jobs.append((key, prompt, params))
+
+        # 5. Full generation only for needed items
+        for key, prompt, params in final_jobs:
+            result = self._full_generate(prompt, params)
+            self.cache[key] = result
+
+    def _preview(self, prompt, params):
+        # cheap low-res generation
+        return {"preview": True, "prompt": prompt}
+
+    def _is_good(self, preview):
+        # TODO: add classifier
+        return False
+
+    def _full_generate(self, prompt, params):
+        # heavy generation
+        return {"final": True, "prompt": prompt}
