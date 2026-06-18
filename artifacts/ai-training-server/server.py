@@ -278,6 +278,8 @@ _model_lock = threading.Lock()
 _data_puller = None
 _continuous_trainer = None
 _watchdog = None
+_asset_index = None
+_coverage_watchdog = None
 _workers_lock = threading.Lock()
 
 def _init_ai_model():
@@ -521,6 +523,7 @@ async def on_startup():
 def _init_storage():
     """Connect to storage server, load checkpoint, and start workers."""
     global _data_puller, _continuous_trainer, _watchdog
+    global _asset_index, _coverage_watchdog
     from storage_client import get_storage
     storage = get_storage()
     ok = storage.ping()
@@ -600,6 +603,40 @@ def _init_storage():
     _watchdog.start()
 
     print("[Workers] DataPuller, ContinuousTrainer, and Watchdog initialized and running")
+
+    # ── Retrieval coverage system (mirrors the watchdog DI + lifecycle) ──
+    try:
+        from ai_model.retrieval.asset_pipeline import (
+            ensure_library, get_asset_index, ingest_gaps,
+        )
+        from ai_model.retrieval.coverage_watchdog import get_coverage_watchdog
+
+        with _workers_lock:
+            _asset_index = get_asset_index()
+            _coverage_watchdog = get_coverage_watchdog()
+
+        _coverage_watchdog.index   = _asset_index
+        _coverage_watchdog.storage = storage
+
+        # Restore a persisted index snapshot if one exists.
+        try:
+            snap = storage.get(_coverage_watchdog.STATE_KEY + ":index")
+            if snap:
+                _asset_index.load_state(snap)
+        except Exception as exc:
+            print(f"[Coverage] index restore skipped: {exc}")
+
+        _coverage_watchdog.anchor_loader_fn = lambda: ensure_library(_asset_index)
+        _coverage_watchdog.ingestion_fn     = lambda gaps: ingest_gaps(_asset_index, gaps)
+        _coverage_watchdog.probe_source_fn  = lambda: []  # live probes arrive in Phase 3
+
+        # Ensure the real domain library is present before the daemon starts.
+        ensure_library(_asset_index)
+        _coverage_watchdog.start()
+        print(f"[Coverage] AssetIndex ready ({_asset_index.size} assets, "
+              f"{_asset_index.anchor_count} anchors) — CoverageWatchdog running")
+    except Exception as exc:
+        print(f"[Coverage] init error (non-fatal): {exc}")
 
 
 def _training_bridge(texts: list, epochs: int, phase_label: str,
@@ -1428,6 +1465,46 @@ async def watchdog_reset(_key = Depends(require_scope("train"))):
         return {"success": False, "message": "Watchdog not initialized"}
     wd.reset_alerts()
     return {"success": True, "message": "Watchdog alert log cleared"}
+
+
+# ─── Coverage (Retrieval) Endpoints ─────────────────────────────────────────────
+
+@app.get("/coverage/status")
+async def coverage_status(_key = Depends(require_scope("read"))):
+    with _workers_lock:
+        wd = _coverage_watchdog
+    if wd is None:
+        return {"status": "not_initialized", "running": False}
+    return wd.get_status()
+
+
+@app.get("/coverage/log")
+async def coverage_log(limit: int = 50, _key = Depends(require_scope("read"))):
+    with _workers_lock:
+        wd = _coverage_watchdog
+    if wd is None:
+        return {"log": [], "count": 0}
+    entries = wd.get_log(limit=limit)
+    return {"log": entries, "count": len(entries)}
+
+
+@app.get("/coverage/report")
+async def coverage_report(_key = Depends(require_scope("read"))):
+    with _workers_lock:
+        idx = _asset_index
+    if idx is None:
+        return {"status": "not_initialized"}
+    return idx.coverage_report()
+
+
+@app.post("/coverage/reset")
+async def coverage_reset(_key = Depends(require_scope("train"))):
+    with _workers_lock:
+        wd = _coverage_watchdog
+    if wd is None:
+        return {"success": False, "message": "CoverageWatchdog not initialized"}
+    wd.reset_alerts()
+    return {"success": True, "message": "Coverage alert log cleared"}
 
 
 # ─── Content Generation ───────────────────────────────────────────────────────

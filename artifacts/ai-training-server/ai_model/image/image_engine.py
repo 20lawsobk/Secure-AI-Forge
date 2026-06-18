@@ -13,7 +13,7 @@ import uuid
 import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -63,6 +63,10 @@ class ImageRequest:
     artist_name: str = "MaxBooster"
     intent: str = "promotional"
     style_tags: list = field(default_factory=lambda: ["cinematic"])
+    # When set, renders deterministically (seeded grain + stable filename) so the
+    # same request always yields identical pixels — used by the retrieval pipeline
+    # for idempotent anchor/seed assets. Default None keeps legacy random behavior.
+    seed: Optional[int] = None
 
 
 @dataclass
@@ -97,9 +101,11 @@ def _gradient_array(w: int, h: int, top: tuple, bottom: tuple) -> np.ndarray:
     return arr
 
 
-def _add_noise_texture(arr: np.ndarray, strength: int = 12) -> np.ndarray:
+def _add_noise_texture(arr: np.ndarray, strength: int = 12,
+                       rng: Optional["np.random.RandomState"] = None) -> np.ndarray:
     """Light grain overlay for a film/cinematic feel."""
-    noise = np.random.randint(-strength, strength + 1, arr.shape, dtype=np.int16)
+    gen = rng if rng is not None else np.random
+    noise = gen.randint(-strength, strength + 1, arr.shape, dtype=np.int16)
     return np.clip(arr.astype(np.int16) + noise, 0, 255).astype(np.uint8)
 
 
@@ -143,8 +149,9 @@ class ImageEngine:
         is_portrait = h > w
 
         # ── Background gradient ────────────────────────────────────────────────
+        rng = np.random.RandomState(req.seed) if req.seed is not None else None
         bg_arr = _gradient_array(w, h, grad_top, grad_bot)
-        bg_arr = _add_noise_texture(bg_arr, strength=10)
+        bg_arr = _add_noise_texture(bg_arr, strength=10, rng=rng)
         img = Image.fromarray(bg_arr, "RGB")
         draw = ImageDraw.Draw(img)
 
@@ -241,7 +248,15 @@ class ImageEngine:
                          fill=accent)
 
         # ── Save ──────────────────────────────────────────────────────────────
-        fname = f"img_{uuid.uuid4().hex[:16]}.png"
+        if req.seed is not None:
+            import hashlib
+            key = "|".join([
+                req.prompt, req.color_scheme, req.layout, req.platform,
+                req.artist_name, req.intent, ",".join(req.style_tags), str(req.seed),
+            ])
+            fname = f"seed_{hashlib.blake2b(key.encode(), digest_size=12).hexdigest()}.png"
+        else:
+            fname = f"img_{uuid.uuid4().hex[:16]}.png"
         out_path = _UPLOADS_DIR / fname
         img.save(str(out_path), "PNG", optimize=True)
 
