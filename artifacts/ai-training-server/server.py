@@ -280,12 +280,14 @@ _continuous_trainer = None
 _watchdog = None
 _asset_index = None
 _coverage_watchdog = None
+_gen_coalescer = None
 _workers_lock = threading.Lock()
 
 def _init_ai_model():
     global _model_ready, _tokenizer, _creative_model, _script_agent
     global _visual_spec_agent, _distribution_agent, _optimization_agent
     global _repo, _adapter, _render_manager, _model_config, _image_engine
+    global _gen_coalescer
 
     try:
         sys.path.insert(0, str(Path(__file__).parent))
@@ -367,6 +369,22 @@ def _init_ai_model():
             print("[AI Model] torch.compile applied (aot_eager / CPU-safe mode)")
         except Exception as ce:
             print(f"[AI Model] torch.compile skipped: {ce}")
+
+        # ── Cross-request dynamic batching (opt-in: AI_DYNAMIC_BATCHING=1) ─────
+        # Coalesces concurrent generate() calls into one batched forward. When
+        # the flag is unset, _creative_model.generate is left untouched and
+        # behavior is byte-for-byte identical to before.
+        try:
+            from ai_model.dynamic_batching import install as _install_coalescer
+            _gen_coalescer = _install_coalescer(_creative_model)
+            if _gen_coalescer is not None:
+                print(
+                    "[AI Model] Dynamic batching ENABLED "
+                    f"(max_batch={_gen_coalescer.max_batch}, "
+                    f"window={_gen_coalescer.window_s * 1000:.0f}ms)"
+                )
+        except Exception as be:
+            print(f"[AI Model] Dynamic batching not installed: {be}")
 
         _model_config = {"dim": dim, "layers": n_layers, "heads": n_heads, "max_len": max_len}
         _training_state["weights_exist"] = weights_path.exists()

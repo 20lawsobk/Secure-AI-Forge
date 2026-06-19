@@ -79,8 +79,14 @@ class RoPESelfAttention(nn.Module):
 
     def forward_with_kv(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
                         mask: torch.Tensor | None = None,
+                        key_padding_mask: torch.Tensor | None = None,
                         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Prefill pass — identical to forward() but also returns K, V for cache seeding."""
+        """Prefill pass — identical to forward() but also returns K, V for cache seeding.
+
+        ``key_padding_mask`` (optional): bool [B, T], True at PAD key positions to
+        exclude from attention. Used for batched generation of unequal-length
+        prompts (left-padded). None preserves the original single-sequence path.
+        """
         B, T, C = x.shape
         qkv = self.qkv(x).reshape(B, T, 3, self.n_heads, self.head_dim)
         q, k, v = qkv.unbind(2)
@@ -95,6 +101,10 @@ class RoPESelfAttention(nn.Module):
         attn = (q @ k.transpose(-2, -1)) * self.scale
         if mask is not None:
             attn = attn + mask.unsqueeze(0).unsqueeze(0)
+        if key_padding_mask is not None:
+            # Large finite negative (not -inf) so fully-masked PAD query rows
+            # produce a finite (discarded) output instead of NaN.
+            attn = attn.masked_fill(key_padding_mask[:, None, None, :], -1e9)
         attn = F.softmax(attn, dim=-1)
         attn = self.attn_drop(attn)
 
@@ -103,10 +113,15 @@ class RoPESelfAttention(nn.Module):
 
     def decode_one(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
                    past_k: torch.Tensor, past_v: torch.Tensor,
+                   key_padding_mask: torch.Tensor | None = None,
                    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Single-token KV-cache decode step.
         x: [B, 1, C]  —  past_k / past_v: [B, H, T_past, D_h]
         Returns: (out [B, 1, C], new_k [B, H, T_past+1, D_h], new_v)
+
+        ``key_padding_mask`` (optional): bool [B, T_past+1] over the full cache
+        (incl. the new token) marking PAD positions to exclude. None preserves
+        the original single-sequence path.
         """
         offset = past_k.shape[2]
         B, T, C = x.shape  # T == 1
@@ -124,8 +139,10 @@ class RoPESelfAttention(nn.Module):
         k_cat = torch.cat([past_k, k], dim=2)  # [B, H, T_past+1, D_h]
         v_cat = torch.cat([past_v, v], dim=2)
 
-        # Single query attends to entire causal context — no mask needed
+        # Single query attends to entire causal context.
         attn = (q @ k_cat.transpose(-2, -1)) * self.scale  # [B, H, 1, T_past+1]
+        if key_padding_mask is not None:
+            attn = attn.masked_fill(key_padding_mask[:, None, None, :], -1e9)
         attn = F.softmax(attn, dim=-1)
 
         out = (attn @ v_cat).transpose(1, 2).contiguous().reshape(B, T, C)
@@ -168,18 +185,21 @@ class TransformerDecoderLayer(nn.Module):
 
     def forward_with_kv(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
                         mask: torch.Tensor | None = None,
+                        key_padding_mask: torch.Tensor | None = None,
                         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Prefill: returns (output, k, v) for KV cache seeding."""
-        attn_out, k, v = self.attn.forward_with_kv(self.ln1(x), cos, sin, mask)
+        attn_out, k, v = self.attn.forward_with_kv(self.ln1(x), cos, sin, mask, key_padding_mask)
         x = x + self.drop(attn_out)
         x = x + self.drop(self.ffn(self.ln2(x)))
         return x, k, v
 
     def decode_one(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
                    past_k: torch.Tensor, past_v: torch.Tensor,
+                   key_padding_mask: torch.Tensor | None = None,
                    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Single-token decode with KV cache. No dropout at inference."""
-        attn_out, new_k, new_v = self.attn.decode_one(self.ln1(x), cos, sin, past_k, past_v)
+        attn_out, new_k, new_v = self.attn.decode_one(
+            self.ln1(x), cos, sin, past_k, past_v, key_padding_mask)
         x = x + attn_out
         x = x + self.ffn(self.ln2(x))
         return x, new_k, new_v
@@ -260,12 +280,17 @@ class TransformerLM(nn.Module):
         h = self.ln_final(h)
         return self.head(h)
 
-    def prefill(self, x: torch.Tensor) -> tuple[torch.Tensor, list]:
+    def prefill(self, x: torch.Tensor,
+                key_padding_mask: torch.Tensor | None = None,
+                ) -> tuple[torch.Tensor, list]:
         """
         KV-cache prefill: process the full prompt in one batched pass.
         Returns (logits [B, T, vocab], kv_cache).
         kv_cache is a list of (k, v) per layer — [B, H, T, D_h] each.
         Use kv_cache with decode_one() for O(1)-per-step generation.
+
+        ``key_padding_mask`` (optional): bool [B, T], True at PAD positions. Pass
+        when batching left-padded unequal-length prompts. None → original path.
         """
         B, T = x.shape
         h = self.emb_dropout(self.token_emb(x))
@@ -275,7 +300,7 @@ class TransformerLM(nn.Module):
 
         kv_cache: list[tuple[torch.Tensor, torch.Tensor]] = []
         for layer in self.layers:
-            h, k, v = layer.forward_with_kv(h, cos, sin, mask)
+            h, k, v = layer.forward_with_kv(h, cos, sin, mask, key_padding_mask)
             kv_cache.append((k, v))
 
         h = self.ln_final(h)
@@ -283,18 +308,24 @@ class TransformerLM(nn.Module):
 
     def decode_one(self, x_new: torch.Tensor,
                    kv_cache: list[tuple[torch.Tensor, torch.Tensor]],
+                   key_padding_mask: torch.Tensor | None = None,
                    ) -> tuple[torch.Tensor, list]:
         """
         Single-token KV-cache decode step — O(1) per token (constant context cost).
         x_new: [B, 1] — single new token id.
         Returns (logits [B, 1, vocab], new_kv_cache).
+
+        ``key_padding_mask`` (optional): bool [B, T_cache] over the full cache
+        (incl. the new token). Pass when batching left-padded prompts. None →
+        original path.
         """
         h = self.token_emb(x_new)  # [B, 1, dim] — no dropout at inference
 
         new_cache: list[tuple[torch.Tensor, torch.Tensor]] = []
         for i, layer in enumerate(self.layers):
             past_k, past_v = kv_cache[i]
-            h, new_k, new_v = layer.decode_one(h, self.rope_cos, self.rope_sin, past_k, past_v)
+            h, new_k, new_v = layer.decode_one(
+                h, self.rope_cos, self.rope_sin, past_k, past_v, key_padding_mask)
             new_cache.append((new_k, new_v))
 
         h = self.ln_final(h)

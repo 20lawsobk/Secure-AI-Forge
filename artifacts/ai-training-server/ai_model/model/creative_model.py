@@ -287,6 +287,126 @@ class CreativeModel:
             for b in range(B)
         ]
 
+    # ── Heterogeneous coalesced batch (cross-request dynamic batching) ─────────
+
+    def generate_batch_rows(self, rows: list[dict]) -> list[str]:
+        """
+        Batched generation for a coalesced set of *independent* requests.
+
+        Each row is a dict: ``{"prompt": str, ...optional sampling params}`` where
+        params default to the same values as :meth:`generate` — ``max_new_tokens``,
+        ``temperature``, ``top_p``, ``top_k``, ``repetition_penalty``, ``min_length``.
+
+        Prompts are **left-padded** to a common length with a ``key_padding_mask``
+        that excludes PAD positions. Because RoPE attention is relative, the output
+        for each row is identical (same RNG) to generating that row alone,
+        regardless of the other rows in the batch — this is what makes it safe to
+        merge unrelated concurrent requests into one forward pass.
+
+        Returns decoded strings aligned to ``rows``.
+        """
+        if not rows:
+            return []
+        B = len(rows)
+
+        eos_id = self.tokenizer.token_to_id("<EOS>")
+        pad_id = self.tokenizer.token_to_id("<PAD>")
+        bos_id = self.tokenizer.token_to_id("<BOS>")
+        unk_id = self.tokenizer.token_to_id("<UNK>")
+        special_ids = (pad_id, unk_id, eos_id)
+        max_ctx = getattr(self.model, "max_len", 1024)
+
+        r_max_new = [int(r.get("max_new_tokens", 200)) for r in rows]
+        r_temp = [float(r.get("temperature", 0.85)) for r in rows]
+        r_top_p = [float(r.get("top_p", 0.92)) for r in rows]
+        r_top_k = [int(r.get("top_k", 50)) for r in rows]
+        r_rep = [float(r.get("repetition_penalty", 1.15)) for r in rows]
+        r_min = [int(r.get("min_length", 10)) for r in rows]
+
+        prompt_ids_list: list[list[int]] = []
+        for r in rows:
+            ids = self.tokenizer.encode(r["prompt"]).ids or [bos_id]
+            if len(ids) > max_ctx:
+                ids = ids[-max_ctx:]
+            prompt_ids_list.append(ids)
+
+        max_plen = max(len(ids) for ids in prompt_ids_list)
+        pad_counts = [max_plen - len(ids) for ids in prompt_ids_list]
+        # LEFT-pad: the last position is always a real token for every row.
+        padded = [[pad_id] * pc + ids for pc, ids in zip(pad_counts, prompt_ids_list)]
+        has_pad = any(pc > 0 for pc in pad_counts)
+
+        generated: list[list[int]] = [[] for _ in range(B)]
+        done = [False] * B
+        max_steps = max(r_max_new) if r_max_new else 0
+
+        _autocast = torch.autocast("cpu", dtype=torch.bfloat16, enabled=True)
+        with torch.no_grad(), _autocast:
+            x = torch.tensor(padded, device=self.device)  # [B, max_plen]
+            # None when no padding -> bit-identical to the original single-seq path
+            # (this is the B=1 / equal-length fast path).
+            kpm = None
+            if has_pad:
+                kpm = torch.tensor(
+                    [[True] * pc + [False] * (max_plen - pc) for pc in pad_counts],
+                    device=self.device, dtype=torch.bool,
+                )
+            logits_all, kv_cache = self.model.prefill(x, key_padding_mask=kpm)
+            next_logits = logits_all[:, -1, :].float().clone()  # [B, vocab]
+
+            for step in range(max_steps):
+                next_logits[:, pad_id] = float("-inf")
+                next_logits[:, unk_id] = float("-inf")
+
+                next_tokens: list[int] = []
+                for b in range(B):
+                    if done[b] or step >= r_max_new[b]:
+                        done[b] = True
+                        next_tokens.append(pad_id)
+                        continue
+                    lb = next_logits[b : b + 1].clone()  # [1, vocab]
+                    if len(generated[b]) < r_min[b]:
+                        lb[:, eos_id] = float("-inf")
+                    if generated[b]:
+                        lb = self._apply_repetition_penalty(
+                            lb, generated[b][-64:], r_rep[b], special_ids
+                        )
+                    nid = int(
+                        self._sample_next(lb, r_temp[b], r_top_p[b], r_top_k[b]).item()
+                    )
+                    generated[b].append(nid)
+                    if nid == eos_id:
+                        done[b] = True
+                        next_tokens.append(pad_id)
+                    else:
+                        next_tokens.append(nid)
+
+                if all(done):
+                    break
+
+                ctx_used = max_plen + max(len(g) for g in generated)
+                if ctx_used >= max_ctx:
+                    kv_cache = [(k[:, :, 1:, :], v[:, :, 1:, :]) for k, v in kv_cache]
+                    if kpm is not None:
+                        kpm = kpm[:, 1:]
+
+                nt = torch.tensor([[t] for t in next_tokens], device=self.device)
+                if kpm is not None:
+                    # New token column: real for active rows -> never masked.
+                    kpm = torch.cat(
+                        [kpm, torch.zeros(B, 1, dtype=torch.bool, device=self.device)],
+                        dim=1,
+                    )
+                logits_new, kv_cache = self.model.decode_one(
+                    nt, kv_cache, key_padding_mask=kpm
+                )
+                next_logits = logits_new[:, 0, :].float().clone()  # [B, vocab]
+
+        return [
+            self.tokenizer.decode(prompt_ids_list[b] + generated[b])
+            for b in range(B)
+        ]
+
     # ── Beam search generation ────────────────────────────────────────────────
 
     def beam_search(
