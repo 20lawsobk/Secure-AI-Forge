@@ -1761,6 +1761,43 @@ async def register_dataset(dataset: DatasetRegister, _admin = Depends(verify_adm
     return {"status": "registered", "name": dataset.name}
 
 
+# Single-flight guard: the seeder reads-then-writes mb:dataset:audio:meta, so
+# concurrent runs would race on the start_idx/index snapshot and corrupt the
+# manifest. Only one seed may run per process at a time.
+_AUDIO_SEED_LOCK = threading.Lock()
+
+
+@app.post("/storage/datasets/audio/seed")
+async def seed_audio_dataset(count: int = 12, replace: bool = False,
+                             _admin = Depends(verify_admin)):
+    """Seed REAL music samples from a public dataset into pdim storage so that
+    ``/api/generate/audio`` produces output from real audio. Runs in the
+    background; poll ``GET /storage/datasets`` for the ``audio`` manifest."""
+    from storage_client import get_storage
+    from workers import seed_audio_dataset as _seed
+
+    storage = get_storage()
+    if not storage.is_available:
+        raise HTTPException(
+            status_code=503,
+            detail="storage backend unavailable — cannot seed audio dataset",
+        )
+
+    if not _AUDIO_SEED_LOCK.acquire(blocking=False):
+        return {"status": "already_seeding"}
+
+    def _run():
+        try:
+            _seed.seed(storage, count=int(count), replace=bool(replace))
+        except Exception as exc:  # background — surface explicit failure
+            print(f"[seed_audio] seeding failed: {exc}", flush=True)
+        finally:
+            _AUDIO_SEED_LOCK.release()
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "seeding", "count": int(count), "replace": bool(replace)}
+
+
 @app.post("/storage/checkpoint/save")
 async def save_checkpoint(payload: CheckpointSave, _admin = Depends(verify_admin)):
     from storage_client import get_checkpoint_client
@@ -4816,6 +4853,84 @@ def _render_audio_clip(job_id: str, bpm: float, key: str,
     return f"/uploads/audio_{job_id}.mp3"
 
 
+def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
+                               duration_sec: float) -> str:
+    """Render an audio clip from REAL dataset samples stored in pdim.
+
+    Selects the stored real-music sample whose key/tempo best matches the
+    requested ``(key, bpm)``, then loops/trims it to the requested duration and
+    re-encodes to MP3. Raises explicitly if no real audio dataset is available
+    so the job reports an error rather than silently synthesizing a fallback.
+
+    Returns the served relative URL of the produced MP3.
+    """
+    import base64 as _b64
+    from storage_client import get_storage
+    from ai_model.video.ffmpeg_util import run_ffmpeg
+
+    storage = get_storage()
+    meta = storage.get("mb:dataset:audio:meta")
+    if not meta or int(meta.get("num_chunks", 0)) <= 0:
+        raise RuntimeError(
+            "no real audio dataset available in storage (mb:dataset:audio); "
+            "seed it via POST /storage/datasets/audio/seed — refusing to "
+            "synthesize a fallback"
+        )
+
+    index = meta.get("index") or [
+        {"idx": i} for i in range(int(meta["num_chunks"]))
+    ]
+
+    # ── Select best match: same key first, then closest tempo ─────────────
+    def _norm_key(k: Any) -> str:
+        return str(k or "").strip().lower()
+
+    want_key = _norm_key(key)
+    want_bpm = float(bpm or 0.0)
+
+    def _bpm_dist(entry: dict) -> float:
+        b = float(entry.get("bpm") or 0.0)
+        return abs(b - want_bpm) if b > 0 else 1e6
+
+    key_matches = [e for e in index if _norm_key(e.get("key")) == want_key]
+    pool = key_matches or index
+    best = min(pool, key=lambda e: (_bpm_dist(e), int(e.get("idx", 0))))
+    best_idx = int(best.get("idx", 0))
+
+    sample = storage.get(f"mb:dataset:audio:chunk:{best_idx}")
+    if not sample or not sample.get("b64"):
+        raise RuntimeError(
+            f"real audio sample {best_idx} missing data in storage"
+        )
+
+    raw = _b64.b64decode(sample["b64"])
+    src_path = _UPLOADS_PATH / f"audio_src_{job_id}.mp3"
+    mp3_path = _UPLOADS_PATH / f"audio_{job_id}.mp3"
+    src_path.write_bytes(raw)
+
+    fade_out_start = max(0.0, float(duration_sec) - 0.3)
+    try:
+        result = run_ffmpeg(
+            ["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(src_path),
+             "-t", f"{float(duration_sec):.2f}",
+             "-af", (f"afade=t=in:st=0:d=0.05,"
+                     f"afade=t=out:st={fade_out_start:.2f}:d=0.3"),
+             "-codec:a", "libmp3lame", "-q:a", "4", str(mp3_path)],
+            timeout=60,
+        )
+        if result.returncode != 0 or not mp3_path.exists():
+            raise RuntimeError(
+                f"ffmpeg assemble failed (rc={result.returncode}): "
+                f"{result.stderr[-300:]}"
+            )
+    finally:
+        try:
+            src_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return f"/uploads/audio_{job_id}.mp3"
+
+
 @app.post("/api/generate/audio")
 async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_scope("generate"))):
     """Async audio generation — style-conditioned via AI model for concept, BPM/key, creative direction."""
@@ -4883,7 +4998,7 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         # serve it; only mark "done" once the file exists on disk.
         duration_sec = max(4.0, min(float(req.duration or 30), 60.0))
         try:
-            audio_url = _render_audio_clip(job_id, bpm, key, duration_sec)
+            audio_url = _render_audio_from_dataset(job_id, bpm, key, duration_sec)
         except Exception as exc:  # explicit failure — never claim a missing file
             _job_update(job_id, {
                 "status": "error",

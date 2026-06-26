@@ -1,57 +1,59 @@
 ---
 name: pdim storage topology & WRONGPASS diagnosis
-description: How pdim (pocketdimensionstorage.replit.app) auth works, why STORAGE_BEARER_TOKEN can be WRONGPASS, and how to make env-var token changes actually take effect
+description: How pdim (pocketdimensionstorage.replit.app) per-instance auth works, why STORAGE_BEARER_TOKEN shows WRONGPASS, which env vars storage_client actually reads, and how availability self-heals
 ---
 
 # pdim storage: multi-instance auth
 
 pdim (`pocketdimensionstorage.replit.app`) is a Redis-like HTTP exec API
 (`POST /api/redis/instances/{id}/exec` with `{"cmd","args"}`, `Authorization: Bearer <token>`).
-It hosts **multiple named instances, each with its OWN token**.
+It hosts **multiple named instances, each with its OWN token**, and tokens are
+**rotated by the user on pdim** — a token that worked yesterday can WRONGPASS today.
 
 - `GET /api/redis/instances` is **unauthenticated** and lists every instance with
-  `id`, `name`, `tokenHint` (e.g. `mbs_c6fe…3a0d`), `keyCount`, `lastUsedAt`.
+  `id`, `name`, `tokenHint`, `keyCount`.
 - `WRONGPASS Invalid token for this instance` (HTTP 403) means the token does NOT
   match the instance in the URL path. It is a **token/instance mismatch, NOT a dead
   server** — the instance can be perfectly healthy.
 
-**Diagnosis recipe:** `GET /api/redis/instances`, then PING each instance id
-against every token you hold in env (`STORAGE_BEARER_TOKEN`, `AI_TRAINING_KEY_PROD`,
-`ADMIN_KEY`). Match `tokenHint` prefix/suffix to find the right pairing.
+**Diagnosis recipe (decisive):** `GET /api/redis/instances`, then PING **each**
+instance id using the *current* `$STORAGE_BEARER_TOKEN`. Whichever returns `PONG`
+is the instance that token belongs to. Point the app there. Do NOT keep re-testing
+the same token against the same instance — scan instances instead.
 
-**Why:** the configured instance's correct token may live in a *differently-named*
-env var. The valid token for the configured `max-booster-training` instance was the
-value in `AI_TRAINING_KEY_PROD`, while `STORAGE_BEARER_TOKEN` (and the token embedded
-in `STORAGE_CONNECTION_URL`) held a stale value matching no live instance.
+# Which env vars actually drive storage
 
-**How to apply:** before assuming pdim is offline, verify `available:false` against
-`/api/redis/instances` + per-instance PING. If a token authenticates an instance,
-fix the env var to that value (storage_client reads `STORAGE_HTTP_URL` +
-`STORAGE_BEARER_TOKEN`; also fix the token embedded in `STORAGE_CONNECTION_URL`).
+`storage_client.py` reads only: `STORAGE_HTTP_URL` (the `.../instances/{id}/exec`
+URL), `STORAGE_BEARER_TOKEN` (the bearer), and `STORAGE_INSTANCE` (cosmetic name in
+`/storage/status`). **`STORAGE_CONNECTION_URL` is UNUSED by code** — it was observed
+mangled (`pdim://pdim://<agentTok>@.../22c8e6d2…@.../f26378c8…`) and ignoring it is
+safe. So to repoint instances you only need to fix `STORAGE_HTTP_URL` (+ optionally
+`STORAGE_INSTANCE`); the token stays in `STORAGE_BEARER_TOKEN`.
 
-# Making a shared env-var token change actually take effect
+**Why:** the token/URL can drift to different instances independently (URL still
+points at the old instance after the user rotates+regenerates a token for another
+instance). `available:false` with `url_configured:true` = token doesn't match the
+URL's instance.
 
-Changing a shared env var is not enough — `restart_workflow` does NOT reliably
-reload it because the `Start application` command backgrounds the api-server with `&`,
-and that detached supervisor survives the restart carrying the OLD env. It keeps
-respawning `uv run python3 server.py` children that inherit the stale token, and
-whichever Python grabs the `/tmp/maxcore_model_9878.lock` on :9878 wins.
+# Availability self-heals — a startup 403 is not permanent
 
-**Symptom:** `/storage/status` still `available:false` after a token fix; newly
-spawned `server.py` procs still show the old token.
+`is_available` caches the first `ping()`, BUT a daemon `_periodic_health_check`
+thread re-pings every 30s and flips `_available` back. So once `STORAGE_HTTP_URL`
++ `STORAGE_BEARER_TOKEN` are a matching pair, availability recovers within ~30s (or
+immediately on a fresh process). A transient startup ping failure does not wedge it.
 
-**Fix:** find the live procs and inspect their loaded token via
-`tr '\0' '\n' < /proc/<pid>/environ | grep STORAGE_BEARER_TOKEN`. Kill the entire
-OLD-token supervisor tree (the detached node api-server + its `uv`/python children),
-not just the workflows. A correct-token supervisor then rebinds :9878. Verify with
-`curl -H "X-Admin-Key: $ADMIN_KEY" http://localhost:9878/storage/status` → `available:true`.
+# Making an env-var change take effect
 
-# What is actually in the configured instance (max-booster-training)
+After `setEnvVars`, restart the workflows so a Python with the new env wins the
+`/tmp/maxcore_model_9878.lock` on :9878. Multiple workflows spawn `server.py`
+(`Start application` and `artifacts/api-server: API Server`); **restart BOTH** so no
+old-env standby Python can grab the lock. Verify with
+`curl -H "X-Admin-Key: $ADMIN_KEY" localhost:9878/storage/status` → `available:true`
+and the expected `instance` name.
 
-Only 5 keys, NO audio corpus: `received:chunks` (zset, ~114k chunk-id refs),
-`received:stream` (stream of {chunkId,offset,size=64MB,receivedAt} manifest entries —
-no binaries stored as keys), `mb:watchdog:state`, `mb:coverage:state(:index)`.
-The 5219-key, actively-used instance is the separate `max-booster-agent` (its token,
-hint `18cf…7713`, is NOT in this repl's env). Dataset retrieval code expects
-`mb:dataset:{name}:meta` + `:chunk:{idx}` (lists of TEXT records) — none exist here.
-Public dataset sources (MusicBench/MusicCaps) yield TEXT captions only, not waveforms.
+# Resolution of record
+
+App was repointed from `max-booster-training` (id `f26378c8…`) to
+**`max-booster-agent`** (id `22c8e6d237afe8ae41541f87`) because that is the instance
+the user's `STORAGE_BEARER_TOKEN` authenticates. Audio dataset
+(`mb:dataset:audio:meta` + `:chunk:{idx}`) is seeded into that instance.

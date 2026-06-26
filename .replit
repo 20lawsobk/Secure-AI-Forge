@@ -146,12 +146,12 @@ packages = ["ffmpeg-full", "freetype", "glibcLocales", "lcms2", "libimagequant",
 [userenv]
 
 [userenv.shared]
-STORAGE_INSTANCE = "max-booster-training"
+STORAGE_INSTANCE = "max-booster-agent"
 ADMIN_KEY = "mbs_8a3edbac97ff333dda5068410227267e6d85b14a4c9caee279fbb18ddfb47edc"
-STORAGE_HTTP_URL = "https://pocketdimensionstorage.replit.app/api/redis/instances/f26378c8b4faf9f237a0f816/exec"
-STORAGE_CONNECTION_URL = "pdim://mbs_c6fe3b6e7eb7f4c6957f256ef20ae072c2c6ae75b0c88d5448b35707249f3a0d@pocketdimensionstorage.replit.app/api/redis/instances/f26378c8b4faf9f237a0f816"
-STORAGE_BEARER_TOKEN = "mbs_c6fe3b6e7eb7f4c6957f256ef20ae072c2c6ae75b0c88d5448b35707249f3a0d"
-AI_TRAINING_KEY_PROD = "mbs_c6fe3b6e7eb7f4c6957f256ef20ae072c2c6ae75b0c88d5448b35707249f3a0d"
+STORAGE_HTTP_URL = "https://pocketdimensionstorage.replit.app/api/redis/instances/22c8e6d237afe8ae41541f87/exec"
+STORAGE_CONNECTION_URL = "pdim://pdim://62f13338cc6f313fee4bbd601a9da514a54840f537f0f055770ed212a85eeec8@pocketdimensionstorage.replit.app/api/redis/instances/22c8e6d237afe8ae41541f87@pocketdimensionstorage.replit.app/api/redis/instances/f26378c8b4faf9f237a0f816"
+STORAGE_BEARER_TOKEN = "62f13338cc6f313fee4bbd601a9da514a54840f537f0f055770ed212a85eeec8"
+AI_TRAINING_KEY_PROD = "f242bf97d7e46b7ca0b17cd6b01ca9239bc327b862a86b703556565523849701"
 AI_DYNAMIC_BATCHING = "1"
 
 [[ports]]

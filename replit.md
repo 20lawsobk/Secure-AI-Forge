@@ -44,6 +44,7 @@ Required env vars: `DATABASE_URL`, `PORT`, `MODEL_API_PORT`, `ADMIN_KEY`, `STORA
 - API key management (create, rotate, delete)
 - Training controls (start/stop, continuous training, data puller)
 - Multi-platform content generation (TikTok, Instagram, YouTube, etc.)
+- Audio generation (`/api/generate/audio`) renders from REAL music samples (Free Music Archive) seeded into pdim storage — no procedural synthesis
 - Video Studio for AI-generated video content
 - Generators for social content, DAW scripts, distribution plans
 - Watchdog system health monitoring
@@ -59,6 +60,9 @@ _Populate as you build_
 - DB push is interactive by default; use `push-force` flag or pipe `""` to auto-select
 - Python typecheck (mypy) is fully green; keep it that way. Mixed-type state dicts (e.g. `self.state`, `_training_state`) should be annotated `dict[str, Any]`; read-only constant config dicts (mixed str/int/float values) use `typing.cast(...)` at the point of use rather than annotation
 - Storage warnings about "pdim storage offline" are expected in dev; the system falls back gracefully
+- Real audio generation needs the `mb:dataset:audio` dataset seeded into pdim first: `POST /storage/datasets/audio/seed?count=N&replace=` (admin-only, runs in a background thread, pulls CC tracks from FMA-small via the HF datasets-server). If the dataset is empty, `/api/generate/audio` raises explicitly — there is no synth fallback
+- The seed worker module is import-cached per server process; after editing `workers/seed_audio_dataset.py` (or storage/env config) restart the workflow(s) that spawn `server.py` so a process with the new code/env wins the `:9878` lock
+- pdim storage is multi-instance: `STORAGE_BEARER_TOKEN` must match the instance in `STORAGE_HTTP_URL`. `available:false` + `url_configured:true` = token/instance mismatch (HTTP 403 WRONGPASS). Diagnose via the unauthenticated `GET /api/redis/instances` list + per-instance PING; the app is currently pointed at the `max-booster-agent` instance
 
 ## Pointers
 
