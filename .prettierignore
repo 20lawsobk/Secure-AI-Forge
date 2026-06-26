@@ -1,0 +1,6 @@
+# Generated code — formatting is owned by the generator, not prettier
+**/.generated/
+
+# Build output & deps
+**/dist/
+**/node_modules/

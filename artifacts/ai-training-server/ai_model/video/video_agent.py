@@ -266,7 +266,6 @@ class VideoAgent:
         """
         platform = req.platform.lower().replace(" ", "_")
         tone = req.tone.lower()
-        goal = req.goal.lower()
         genre = req.genre.lower().replace(" ", "_")
 
         specs = _PLATFORM_SPECS.get(platform, _PLATFORM_SPECS["tiktok"])

@@ -291,7 +291,11 @@ export default function Dashboard() {
                     : "border-amber-500/50 text-amber-400"
                 }
               >
-                {storageOnline ? "Online" : storageStatus ? "Offline" : "Checking…"}
+                {storageOnline
+                  ? "Online"
+                  : storageStatus
+                    ? "Offline"
+                    : "Checking…"}
               </Badge>
             </div>
             {storageStatus?.instance_id && (
@@ -304,7 +308,9 @@ export default function Dashboard() {
             )}
             {storageStatus?.keys_count != null && (
               <div className="flex justify-between items-center p-3 bg-black/20 rounded-xl border border-white/5">
-                <span className="text-sm text-muted-foreground">Keys stored</span>
+                <span className="text-sm text-muted-foreground">
+                  Keys stored
+                </span>
                 <span className="text-sm font-mono text-white">
                   {storageStatus.keys_count}
                 </span>

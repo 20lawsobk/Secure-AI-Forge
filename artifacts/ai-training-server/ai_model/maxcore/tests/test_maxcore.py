@@ -25,7 +25,6 @@ if _SERVER_DIR not in sys.path:
     sys.path.insert(0, _SERVER_DIR)
 
 from ai_model.maxcore import (  # noqa: E402
-    Compiler,
     DigitalGPU,
     GraphBuilder,
     OpType,

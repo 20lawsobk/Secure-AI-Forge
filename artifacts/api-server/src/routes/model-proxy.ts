@@ -105,7 +105,11 @@ async function parseBodyText(body: {
 
 // ─── Shared error handler for proxy network failures ─────────────────────────
 
-function handleProxyNetworkError(err: unknown, res: Response, path: string): void {
+function handleProxyNetworkError(
+  err: unknown,
+  res: Response,
+  path: string,
+): void {
   const elapsed = Date.now();
   console.error(`[Proxy] Network error proxying to ${path}:`, err);
   const e = err as any;
@@ -218,7 +222,10 @@ async function proxyRequest(
     res.setHeader("X-Cache", "MISS");
     res.status(upstreamRes.statusCode).json(data);
   } catch (err) {
-    console.error(`[Proxy] Error proxying to ${path} (${Date.now() - startTime}ms):`, err);
+    console.error(
+      `[Proxy] Error proxying to ${path} (${Date.now() - startTime}ms):`,
+      err,
+    );
     handleProxyNetworkError(err, res, path);
   }
 }

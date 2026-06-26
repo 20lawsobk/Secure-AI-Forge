@@ -5078,7 +5078,7 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
         topic=idea, goal=goal, tone=tone, genre=genre, artist=artist_name,
     )
 
-    from ai_model.video.video_agent import VideoAgent, VideoAgentRequest
+    from ai_model.video.video_agent import VideoAgentRequest
     req = VideoAgentRequest(
         idea=f"{idea} | {brief.augmented_idea}",
         platform=platform,

@@ -8,7 +8,6 @@ from typing import Optional, List, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .scenes import SceneConfig, render_scene, composite_scenes, cleanup_temp
-from .renderer import ASPECT_RATIOS, PLATFORM_RATIOS
 from ..adaptive_concurrency import RENDER_GATE
 
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "uploads", "videos")

@@ -426,10 +426,7 @@ export default function ApiKeys() {
                                   checked={field.value?.includes(scope)}
                                   onCheckedChange={(checked) =>
                                     checked
-                                      ? field.onChange([
-                                          ...field.value,
-                                          scope,
-                                        ])
+                                      ? field.onChange([...field.value, scope])
                                       : field.onChange(
                                           field.value?.filter(
                                             (v) => v !== scope,

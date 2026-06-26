@@ -42,12 +42,14 @@ const _uploadsPool = new Agent({
 
 app.get("/uploads/*path", async (req: Request, res: Response) => {
   try {
-    const upstreamRes = await undiciRequest(
-      `${_MODEL_API_BASE}${req.path}`,
-      { method: "GET", dispatcher: _uploadsPool },
-    );
+    const upstreamRes = await undiciRequest(`${_MODEL_API_BASE}${req.path}`, {
+      method: "GET",
+      dispatcher: _uploadsPool,
+    });
     if (upstreamRes.statusCode >= 400) {
-      res.status(upstreamRes.statusCode).send(upstreamRes.statusCode.toString());
+      res
+        .status(upstreamRes.statusCode)
+        .send(upstreamRes.statusCode.toString());
       await upstreamRes.body.dump();
       return;
     }

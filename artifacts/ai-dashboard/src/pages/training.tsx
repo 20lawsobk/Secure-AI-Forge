@@ -124,7 +124,10 @@ export default function Training() {
       refetchCont();
     },
     onError: () =>
-      toast({ variant: "destructive", title: "Failed to start continuous training" }),
+      toast({
+        variant: "destructive",
+        title: "Failed to start continuous training",
+      }),
   });
 
   const contStopMut = useMutation({
@@ -135,7 +138,10 @@ export default function Training() {
       refetchCont();
     },
     onError: () =>
-      toast({ variant: "destructive", title: "Failed to stop continuous training" }),
+      toast({
+        variant: "destructive",
+        title: "Failed to stop continuous training",
+      }),
   });
 
   const { data: pullerStatus, refetch: refetchPuller } = useQuery({
@@ -258,7 +264,9 @@ export default function Training() {
                   <div className="flex justify-between p-2 rounded bg-white/5 text-sm">
                     <span className="text-muted-foreground">State</span>
                     <Badge
-                      variant={isRunning(status?.state) ? "default" : "secondary"}
+                      variant={
+                        isRunning(status?.state) ? "default" : "secondary"
+                      }
                       className={
                         isRunning(status?.state)
                           ? "bg-amber-500/20 text-amber-400 hover:bg-amber-500/20"
@@ -269,21 +277,27 @@ export default function Training() {
                     </Badge>
                   </div>
                   <div className="flex justify-between p-2 rounded bg-white/5 text-sm">
-                    <span className="text-muted-foreground">Samples Trained</span>
+                    <span className="text-muted-foreground">
+                      Samples Trained
+                    </span>
                     <span className="text-white font-mono">
                       {(status?.samples_trained ?? 0).toLocaleString()}
                     </span>
                   </div>
                   <div className="flex justify-between p-2 rounded bg-white/5 text-sm">
                     <span className="text-muted-foreground">Time Elapsed</span>
-                    <span className="text-white font-mono">{elapsedFormatted}</span>
+                    <span className="text-white font-mono">
+                      {elapsedFormatted}
+                    </span>
                   </div>
                   {status?.eta_seconds != null && (
                     <div className="flex justify-between p-2 rounded bg-primary/10 border border-primary/20 text-sm">
                       <span className="text-primary-foreground flex items-center gap-1.5">
                         <Clock className="w-3.5 h-3.5" /> ETA
                       </span>
-                      <span className="text-white font-mono">{etaFormatted}</span>
+                      <span className="text-white font-mono">
+                        {etaFormatted}
+                      </span>
                     </div>
                   )}
                 </div>

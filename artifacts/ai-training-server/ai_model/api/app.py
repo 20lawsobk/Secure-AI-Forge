@@ -17,8 +17,7 @@ from .schemas import (
     SyntheticDataRequest, SyntheticDataResponse,
     TrainingStatusResponse,
     VideoGenerateRequest, VideoGenerateResponse,
-    CinematicTemplatesResponse, CinematicTemplateInfo,
-    HealthResponse,
+    CinematicTemplatesResponse, HealthResponse,
     MultiTrainRequest, MultiGPUStatusResponse,
     HyperGPUStatusResponse, GPUClusterStatusResponse, ClusterScaleRequest,
 )
