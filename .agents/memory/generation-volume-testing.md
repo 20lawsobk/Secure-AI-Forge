@@ -65,6 +65,12 @@ pre-warm the dedup cache directly on :9878 then drive identical requests through
 return ~ms cache hits); (3) `curl 000` in a burst is the CLIENT `-m` timeout firing before
 the proxy's 45s, not a server crash — never read `000` as a 5xx.
 
+## load_test.py (the "90M concurrency" test) — sizing reality
+`ai_model/maxcore/tests/load_test.py` is a PROJECTION test: `LOAD_TARGET=90M` is never executed — it's extrapolated from measured throughput. Size the executed phases via env (`LOAD_UNIQUE/LOAD_THREADS/LOAD_CONC/LOAD_SAMPLE/LOAD_MT`) to finish inside the 120s bash ceiling; keep `LOAD_TARGET=90000000`. PASS = correctness OK + single-flight held (max-per-key computes==1) + zero engine fallbacks.
+- **Two CPU-bound costs dominate, NOT network:** each cold DigitalGPU graph compute ≈143ms (~7/s); each `dedup_cache` get/put ≈ tens of ms (pdim/disk-backed). So Phase 0 ≈ UNIQUE×0.143s and any cache-hit phase ≈ ops×(dedup latency).
+- **Phase 1 thundering-herd:** at high `THREADS` on a 2-core box, follower threads in the single-flight wait/recheck loop starve the GIL and cold computes crawl — Phase 1 hangs even at trivial UNIQUE/CONC. `inflight_wait_seconds=180` so it's not a short-timeout spin; the lever is **THREADS (keep ≤8)**, not UNIQUE/CONC.
+- **Config that completes + PASSes 10/10 in ~38s each:** `LOAD_UNIQUE=40 LOAD_THREADS=8 LOAD_CONC=500 LOAD_SAMPLE=400 LOAD_MT=160`. Run as short SYNC bash batches (≤2 runs/call) — never a detached harness (reaped ~85–120s).
+
 ## uploads/ is runtime media — gitignored
 
 `artifacts/ai-training-server/uploads/` holds AI-generated media regenerated on demand; it

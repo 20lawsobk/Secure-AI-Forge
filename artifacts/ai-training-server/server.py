@@ -247,6 +247,28 @@ async def _in_thread_gated(gate, fn, timeout):
             return fn()
     return await _in_thread(_run)
 
+
+# ─── PDIM orchestrator: dedup + single-flight (default for content gen) ────────
+_pdim_orchestrator = None
+_pdim_orch_lock = threading.Lock()
+
+
+def _get_pdim_orchestrator():
+    """Process-wide PDIM orchestrator — fleet-wide dedup + single-flight.
+
+    Backed by the existing ``dedup_cache`` module, so cache keys and TTL
+    semantics are unchanged. This only ADDS single-flight: N concurrent
+    identical requests collapse to ONE real compute while the rest wait and
+    share its result. This is the proven 90M-scale concurrency path and the
+    default method for content generation."""
+    global _pdim_orchestrator
+    if _pdim_orchestrator is None:
+        with _pdim_orch_lock:
+            if _pdim_orchestrator is None:
+                from ai_model.maxcore.pdim import PDIMOrchestrator
+                _pdim_orchestrator = PDIMOrchestrator()
+    return _pdim_orchestrator
+
 # ─── Static file serving for generated assets ────────────────────────────────
 
 _UPLOADS_PATH = Path(__file__).parent / "uploads"
@@ -4018,83 +4040,86 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
     """Captions, hooks, CTAs for social posts with artist context."""
     start    = time.time()
 
-    # ── Fleet-wide dedup: an identical request returns the stored result ────
-    from ai_model import dedup_cache
-    _cache_key = dedup_cache.key_for("api_content", req)
-    _hit = dedup_cache.get(_cache_key)
-    if isinstance(_hit, dict):
-        _hit = dict(_hit)
-        _hit["cached"] = True
-        _hit["processing_time_ms"] = round((time.time() - start) * 1000, 1)
-        return _hit
-
     platform = normalize_platform(req.platform)
     artist   = req.artist_name or req.artist or "the artist"
     topic    = req.topic or req.title or ""
     goal     = req.goal or "engagement"
 
-    # ── Request intelligence: analyse intent, audience & strategy up front ──
-    from ai_model import request_intelligence as ri
-    brief = ri.build_brief(
-        modality="content", platform=platform, topic=topic, goal=goal,
-        tone=req.tone, genre=req.genre, artist=artist,
-        extra=" ".join(filter(None, [req.brand_voice, req.target_audience])),
-    )
+    def _build(_request=None):
+        # ── Request intelligence: analyse intent, audience & strategy up front ──
+        from ai_model import request_intelligence as ri
+        brief = ri.build_brief(
+            modality="content", platform=platform, topic=topic, goal=goal,
+            tone=req.tone, genre=req.genre, artist=artist,
+            extra=" ".join(filter(None, [req.brand_voice, req.target_audience])),
+        )
 
-    hook = f"🎵 {artist} just dropped something you need to hear — {topic}"
-    body = (f"Bringing {req.genre or 'music'} vibes that hit different. "
-            f"{req.brand_voice or 'Authentic, raw, and real.'} "
-            f"Crafted for {req.target_audience or brief.audience}.")
-    cta  = brief.suggested_cta
+        hook = f"🎵 {artist} just dropped something you need to hear — {topic}"
+        body = (f"Bringing {req.genre or 'music'} vibes that hit different. "
+                f"{req.brand_voice or 'Authentic, raw, and real.'} "
+                f"Crafted for {req.target_audience or brief.audience}.")
+        cta  = brief.suggested_cta
 
-    if _model_ready and _script_agent:
-        from ai_model.agents.script_agent import ScriptRequest
-        from ai_model.agents.distribution_agent import DistributionRequest
+        if _model_ready and _script_agent:
+            from ai_model.agents.script_agent import ScriptRequest
+            from ai_model.agents.distribution_agent import DistributionRequest
 
-        def _infer():
-            # Feed the enriched, intent-aware idea + resolved tone to the agent.
-            _sr = _script_agent.run(ScriptRequest(idea=brief.augmented_idea, platform=platform, goal=goal, tone=brief.tone))
-            _distribution_agent.run(DistributionRequest(script=f"{_sr.hook}\n{_sr.body}\n{_sr.cta}", platform=platform, goal=goal))
-            return _sr
+            def _infer():
+                # Feed the enriched, intent-aware idea + resolved tone to the agent.
+                _sr = _script_agent.run(ScriptRequest(idea=brief.augmented_idea, platform=platform, goal=goal, tone=brief.tone))
+                _distribution_agent.run(DistributionRequest(script=f"{_sr.hook}\n{_sr.body}\n{_sr.cta}", platform=platform, goal=goal))
+                return _sr
 
-        try:
-            sr = await _in_thread_gated(INFERENCE_GATE, _infer, timeout=35.0)
-        except GateBusy:
-            raise HTTPException(status_code=503, detail="AI server at capacity — retry shortly")
-        except Exception:
-            sr = None
-        if sr is not None:
-            hook = sr.hook or hook
-            body = sr.body or body
-            cta  = sr.cta  or cta
+            try:
+                # Hold an adaptive-concurrency slot for the duration of inference.
+                with INFERENCE_GATE.slot(timeout=35.0):
+                    sr = _infer()
+            except GateBusy:
+                raise HTTPException(status_code=503, detail="AI server at capacity — retry shortly")
+            except Exception:
+                sr = None
+            if sr is not None:
+                hook = sr.hook or hook
+                body = sr.body or body
+                cta  = sr.cta  or cta
 
-    # ── Pick the strongest hook among the agent output + ranked variants ───
-    hook, hook_score, hooks_considered = ri.best_hook(topic, artist, hook, brief)
-    if not cta:
-        cta = brief.suggested_cta
+        # ── Pick the strongest hook among the agent output + ranked variants ───
+        hook, hook_score, hooks_considered = ri.best_hook(topic, artist, hook, brief)
+        if not cta:
+            cta = brief.suggested_cta
 
-    hashtags = (req.preferred_hashtags or []) + _api_hashtags(topic, req.genre, req.platform)
-    hashtag_cap = min(10, max(brief.hashtags_target, len(req.preferred_hashtags or [])))
-    caption  = f"{hook}\n\n{body}\n\n{cta}"
-    quality  = ri.score_candidate(caption, brief)
-    score    = _api_heuristic_score(caption, req.platform)
-    result = {
-        "caption":    caption,
-        "hook":       hook,
-        "body":       body,
-        "cta":        cta,
-        "hashtags":   list(dict.fromkeys(hashtags))[:hashtag_cap],
-        "confidence": round(max(quality, score) / 100, 3),
-        "quality_score": quality,
-        "intelligence": {
-            **brief.to_dict(),
-            "hook_score": hook_score,
-            "candidates_considered": hooks_considered,
-        },
-        "processing_time_ms": round((time.time() - start) * 1000, 1),
-    }
+        hashtags = (req.preferred_hashtags or []) + _api_hashtags(topic, req.genre, req.platform)
+        hashtag_cap = min(10, max(brief.hashtags_target, len(req.preferred_hashtags or [])))
+        caption  = f"{hook}\n\n{body}\n\n{cta}"
+        quality  = ri.score_candidate(caption, brief)
+        score    = _api_heuristic_score(caption, req.platform)
+        return {
+            "caption":    caption,
+            "hook":       hook,
+            "body":       body,
+            "cta":        cta,
+            "hashtags":   list(dict.fromkeys(hashtags))[:hashtag_cap],
+            "confidence": round(max(quality, score) / 100, 3),
+            "quality_score": quality,
+            "intelligence": {
+                **brief.to_dict(),
+                "hook_score": hook_score,
+                "candidates_considered": hooks_considered,
+            },
+        }
+
+    # ── Default content-gen path: dedup + single-flight via PDIM orchestrator ──
+    # Concurrent identical requests collapse to ONE compute; the rest share it.
+    # Only the model path is cached — heuristic-only output stays uncached, as before.
     if _model_ready:
-        dedup_cache.put(_cache_key, result)
+        _orch = _get_pdim_orchestrator()
+        _out = await _in_thread(lambda: _orch.compute(req, _build, namespace="api_content"))
+        result = dict(_out["result"])
+        if _out.get("source") in ("cache", "coalesced"):
+            result["cached"] = True
+    else:
+        result = _build()
+    result["processing_time_ms"] = round((time.time() - start) * 1000, 1)
     return result
 
 
@@ -4115,16 +4140,6 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
         return {"steps": steps, "processing_time_ms": round((time.time() - start) * 1000, 1)}
 
     # mode == "content"
-    # ── Fleet-wide dedup: an identical request returns the stored result ────
-    from ai_model import dedup_cache
-    _cache_key = dedup_cache.key_for("api_text", req)
-    _hit = dedup_cache.get(_cache_key)
-    if isinstance(_hit, dict):
-        _hit = dict(_hit)
-        _hit["cached"] = True
-        _hit["processing_time_ms"] = round((time.time() - start) * 1000, 1)
-        return _hit
-
     intent   = req.intent or "create content"
     inputs   = req.inputs or {}
     # MaxBooster sends topic/prompt directly; fall back to inputs for legacy callers
@@ -4132,67 +4147,80 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
     platform = normalize_platform(req.platform) if req.platform else "general"
     tone     = req.tone or "authentic"
 
-    # ── Request intelligence: analyse intent, audience & strategy up front ──
-    from ai_model import request_intelligence as ri
-    brief = ri.build_brief(
-        modality="text", platform=platform, topic=idea, goal=intent, tone=tone,
-        extra=getattr(req, "brand_voice", None),
-    )
+    def _build(_request=None):
+        # ── Request intelligence: analyse intent, audience & strategy up front ──
+        from ai_model import request_intelligence as ri
+        brief = ri.build_brief(
+            modality="text", platform=platform, topic=idea, goal=intent, tone=tone,
+            extra=getattr(req, "brand_voice", None),
+        )
 
-    fallback = f"Generated content for intent '{intent}'."
-    candidates: List[str] = []
+        fallback = f"Generated content for intent '{intent}'."
+        candidates: List[str] = []
 
-    if _model_ready and _script_agent:
-        from ai_model.agents.script_agent import ScriptRequest
+        if _model_ready and _script_agent:
+            from ai_model.agents.script_agent import ScriptRequest
 
-        def _infer():
-            return _script_agent.run(ScriptRequest(idea=brief.augmented_idea, platform=platform, goal=intent, tone=brief.tone))
+            def _infer():
+                return _script_agent.run(ScriptRequest(idea=brief.augmented_idea, platform=platform, goal=intent, tone=brief.tone))
 
-        try:
-            sr = await _in_thread_gated(INFERENCE_GATE, _infer, timeout=35.0)
-            candidates.append(f"{sr.hook}\n{sr.body}\n{sr.cta}")
-            # Add a hook-swapped variant so we can rank for the best opener.
-            alt_hook, _, _ = ri.best_hook(idea, "the artist", sr.hook, brief)
-            if alt_hook and alt_hook != sr.hook:
-                candidates.append(f"{alt_hook}\n{sr.body}\n{sr.cta}")
-        except GateBusy:
-            raise HTTPException(status_code=503, detail="AI server at capacity — retry shortly")
-        except Exception:
-            pass
+            try:
+                # Hold an adaptive-concurrency slot for the duration of inference.
+                with INFERENCE_GATE.slot(timeout=35.0):
+                    sr = _infer()
+                candidates.append(f"{sr.hook}\n{sr.body}\n{sr.cta}")
+                # Add a hook-swapped variant so we can rank for the best opener.
+                alt_hook, _, _ = ri.best_hook(idea, "the artist", sr.hook, brief)
+                if alt_hook and alt_hook != sr.hook:
+                    candidates.append(f"{alt_hook}\n{sr.body}\n{sr.cta}")
+            except GateBusy:
+                raise HTTPException(status_code=503, detail="AI server at capacity — retry shortly")
+            except Exception:
+                pass
 
-    # Quality guardrail: rank a deterministic raw-topic candidate alongside the
-    # model output so a clean variant wins if steering degraded the model.
-    candidates.append(ri.deterministic_candidate(idea, "the artist", brief))
-    if not candidates:
-        candidates = [fallback]
+        # Quality guardrail: rank a deterministic raw-topic candidate alongside the
+        # model output so a clean variant wins if steering degraded the model.
+        candidates.append(ri.deterministic_candidate(idea, "the artist", brief))
+        if not candidates:
+            candidates = [fallback]
 
-    ranked  = ri.rank_candidates(candidates, brief)
-    content = ranked[0][0] if ranked else fallback
-    quality = ranked[0][1] if ranked else 0.0
+        ranked  = ri.rank_candidates(candidates, brief)
+        content = ranked[0][0] if ranked else fallback
+        quality = ranked[0][1] if ranked else 0.0
 
-    outputs = [{
-        "type":    "text",
-        "content": content,
-        "text":    content,
-        "slot":    req.slots,
-        "score":   max(quality, _api_heuristic_score(content, platform)),
-    }]
-    # Top-level aliases the MaxBooster client reads (text/content/script/caption)
-    result = {
-        "outputs":            outputs,
-        "text":               content,
-        "content":            content,
-        "script":             content,
-        "caption":            content,
-        "quality_score":      quality,
-        "intelligence": {
-            **brief.to_dict(),
-            "candidates_considered": len(ranked),
-        },
-        "processing_time_ms": round((time.time() - start) * 1000, 1),
-    }
+        outputs = [{
+            "type":    "text",
+            "content": content,
+            "text":    content,
+            "slot":    req.slots,
+            "score":   max(quality, _api_heuristic_score(content, platform)),
+        }]
+        # Top-level aliases the MaxBooster client reads (text/content/script/caption)
+        return {
+            "outputs":            outputs,
+            "text":               content,
+            "content":            content,
+            "script":             content,
+            "caption":            content,
+            "quality_score":      quality,
+            "intelligence": {
+                **brief.to_dict(),
+                "candidates_considered": len(ranked),
+            },
+        }
+
+    # ── Default content-gen path: dedup + single-flight via PDIM orchestrator ──
+    # Concurrent identical requests collapse to ONE compute; the rest share it.
+    # Only the model path is cached — heuristic-only output stays uncached, as before.
     if _model_ready:
-        dedup_cache.put(_cache_key, result)
+        _orch = _get_pdim_orchestrator()
+        _out = await _in_thread(lambda: _orch.compute(req, _build, namespace="api_text"))
+        result = dict(_out["result"])
+        if _out.get("source") in ("cache", "coalesced"):
+            result["cached"] = True
+    else:
+        result = _build()
+    result["processing_time_ms"] = round((time.time() - start) * 1000, 1)
     return result
 
 
