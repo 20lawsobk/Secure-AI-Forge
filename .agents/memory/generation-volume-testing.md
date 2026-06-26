@@ -34,3 +34,39 @@ run as several short sync batches + submit/poll for video. Verify served media b
 the `/uploads/...` URL and asserting HTTP 200 + non-zero bytes (sizes should scale with
 duration/count). If something genuinely hangs, suspect a degraded server (check
 `GET /api/health` uptime + a fresh `restart_workflow`) before suspecting the code.
+
+## Honest pass criteria — two independent verdicts, never one
+
+A load test must split **crash/backpressure** from **correctness**, and a phase passes
+only if BOTH pass. Do NOT use `status < 500` as a correctness gate — it launders a 503/504
+or a 422 (bad request body) into a green result.
+- **crash/backpressure verdict:** no `-1` (connection death) and no real 5xx. A `503` from
+  the AdaptiveGate IS backpressure working → allowed, not a failure.
+- **correctness verdict:** the endpoint actually produced real output. Assert modality
+  invariants, not a self-reported `source`: text → non-empty caption/hook/body; image →
+  real `image_url`/`path`; audio/video → a `job_id` whose job polls through to COMPLETED
+  with a real `audio_url` / video `filename`/`scenes_rendered`. For concurrency bursts,
+  require `accepted + 503 == N` (every request got a definitive answer) and `accepted >= 1`.
+- Observable fallbacks are fine and expected: completed audio jobs report `source=template`,
+  video `source=datasets`. Labeled ≠ silent → satisfies the honesty contract.
+- The harness lives at `ai_model/maxcore/tests/endpoint_load_test.py` (phases text|image|
+  audio|video|all); its in-process sibling is `load_test.py`.
+
+## Proxy (:8080) has a hard 45s synchronous ceiling — engine (:9878) does not
+
+`api-server/src/routes/model-proxy.ts` wraps each proxied call in a 45s `AbortController`;
+on abort it returns **504** ("Upstream timeout") and records a circuit-breaker failure.
+**Why:** synchronous generation (`/api/generate/content|image`) under a saturated box can
+exceed 45s on cold compute and get shed as 504 — this is a full-stack SLA limit, not an
+engine bug; direct-to-:9878 the same call succeeds. **How to apply:** (1) job-based audio/
+video are immune (submit returns a `job_id` instantly, render happens server-side); (2) the
+text dedup cache makes the warm path instant through the proxy — to prove the proxy works,
+pre-warm the dedup cache directly on :9878 then drive identical requests through :8080 (all
+return ~ms cache hits); (3) `curl 000` in a burst is the CLIENT `-m` timeout firing before
+the proxy's 45s, not a server crash — never read `000` as a 5xx.
+
+## uploads/ is runtime media — gitignored
+
+`artifacts/ai-training-server/uploads/` holds AI-generated media regenerated on demand; it
+is gitignored. Load tests dump dozens of files there — they will NOT pollute the commit, but
+delete them for disk hygiene after a run.

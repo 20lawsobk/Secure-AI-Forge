@@ -47,3 +47,6 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Runtime-generated media (regenerated on demand by the AI server)
+artifacts/ai-training-server/uploads/
