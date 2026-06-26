@@ -44,6 +44,12 @@ owner to bind the port then `os._exit(0)`, so exactly one model ever loads. Must
 **Remaining follow-up (not done):** also stop the 2nd API primary from managing Python at the
 Node layer — the flock is containment, not a control-plane fix.
 
+## ffmpeg must be a DECLARED deployment dependency (the real prod EIO cause)
+Prod video failed every scene with `OSError: [Errno 5] Input/output error: '/nix/store/...ffmpeg-full.../bin/ffmpeg'` while content/image worked — even though `run_ffmpeg` already uses posix_spawn (verified posix_spawn=1/fork=0) and local renders pass end-to-end. Root cause: **`replit.nix` declared only `pkgs.dejavu_fonts`, NOT ffmpeg.** Dev works because the dev shell provides ffmpeg, so `shutil.which("ffmpeg")` resolves the absolute /nix/store path at import; but the GCE deployment closure didn't include it, so the path exists as a dirent yet its content isn't materialized → execve faults with **EIO (not ENOENT)**.
+- **Tell-tale:** EIO with the FULL absolute /nix/store binary path = dirent-present-but-unmaterialized = a binary the code execs that isn't a declared deploy dep. (ENOENT would mean the path itself is gone.) This is independent of memory pressure — don't chase the cgroup/duplicate-model theory first when replit.nix is missing the dep.
+- **Fix:** `installSystemDependencies(["ffmpeg-full"])` (adds `pkgs.ffmpeg-full` to replit.nix — direct edits to replit.nix are blocked, must go through package management). Use `ffmpeg-full` to match the dev codec set the renderer relies on.
+- **How to apply:** any external binary the server execs in prod (ffmpeg, etc.) MUST be a declared dep in replit.nix, not just whatever the dev shell happens to provide. Takes effect only on the NEXT publish — an already-published deployment stays broken until re-deployed.
+
 ## Cold-start ffmpeg timeout (transient, NOT the EIO bug)
 The audio encode (`_render_audio_clip` → `run_ffmpeg` libmp3lame) normally finishes in <1s
 and a full clip job in ~5s on a warm server. But an audio request that lands in the first
