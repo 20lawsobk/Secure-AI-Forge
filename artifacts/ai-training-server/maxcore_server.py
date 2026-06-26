@@ -481,6 +481,8 @@ def datasets_stream(
         # Add low-frequency spatial structure so it's not pure noise
         xx = np.linspace(-1, 1, W)
         yy = np.linspace(-1, 1, H)
+        gx: np.ndarray
+        gy: np.ndarray
         gx, gy = np.meshgrid(xx, yy)
         for t in range(T):
             freq   = rng.uniform(1, 4)

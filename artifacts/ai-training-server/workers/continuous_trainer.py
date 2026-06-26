@@ -15,7 +15,7 @@ State is persisted to pdim at mb:training:continuous:state so it survives restar
 import logging
 import threading
 import time
-from typing import Optional, Callable
+from typing import Optional, Callable, Any
 
 logger = logging.getLogger("continuous_trainer")
 
@@ -47,7 +47,7 @@ class ContinuousTrainer:
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
 
-        self.state = {
+        self.state: dict[str, Any] = {
             "running": False,
             "status": "stopped",
             "cycle": 0,

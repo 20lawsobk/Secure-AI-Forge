@@ -192,11 +192,11 @@ def _np_gradient(c1: tuple, c2: tuple, w: int, h: int):
 def _np_radial(c1: tuple, c2: tuple, w: int, h: int):
     import numpy as np
     cx, cy = w / 2.0, h / 2.0
-    xs = np.arange(w, dtype=np.float32).reshape(1, -1)
-    ys = np.arange(h, dtype=np.float32).reshape(-1, 1)
+    xs: np.ndarray = np.arange(w, dtype=np.float32).reshape(1, -1)
+    ys: np.ndarray = np.arange(h, dtype=np.float32).reshape(-1, 1)
     d = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2)
     d = (d / float(d.max())).astype(np.float32)
-    arr = np.zeros((h, w, 3), dtype=np.uint8)
+    arr: np.ndarray = np.zeros((h, w, 3), dtype=np.uint8)
     for ch in range(3):
         arr[:, :, ch] = np.clip(c1[ch] + (c2[ch] - c1[ch]) * d, 0, 255).astype(np.uint8)
     return arr
@@ -213,7 +213,7 @@ def _np_plasma(c1: tuple, c2: tuple, w: int, h: int, style: str = "plasma"):
     else:
         field = 0.5 + 0.25 * np.sin(xs * 8.0 + 1.0) + 0.25 * np.cos(ys * 6.0 + 0.5)
     field = np.clip(field, 0.0, 1.0).astype(np.float32)
-    arr = np.zeros((sh, sw, 3), dtype=np.uint8)
+    arr: np.ndarray = np.zeros((sh, sw, 3), dtype=np.uint8)
     for ch in range(3):
         arr[:, :, ch] = np.clip(c1[ch] + (c2[ch] - c1[ch]) * field, 0, 255).astype(np.uint8)
     return np.array(Image.fromarray(arr).resize((w, h), Image.BILINEAR))

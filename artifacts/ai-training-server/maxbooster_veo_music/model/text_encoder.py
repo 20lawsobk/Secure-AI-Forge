@@ -12,7 +12,7 @@ class TextEncoder:
             return np.zeros(self.embed_dim, dtype=np.float32)
 
         tokens = text.lower().split()
-        token_hash = np.zeros(self.embed_dim, dtype=np.float32)
+        token_hash: np.ndarray = np.zeros(self.embed_dim, dtype=np.float32)
         for i, tok in enumerate(tokens):
             h = hash(tok) % (2**31)
             rng = np.random.RandomState(h)

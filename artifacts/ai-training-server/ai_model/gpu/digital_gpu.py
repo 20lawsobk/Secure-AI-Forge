@@ -154,7 +154,7 @@ class Scheduler:
     def __init__(self, vram: VRAM, core: SIMDCore):
         self.vram = vram
         self.core = core
-        self.last_profile = []
+        self.last_profile: list = []
 
     def _validate_handles(self, *hids):
         for h in hids:

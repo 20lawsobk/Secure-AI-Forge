@@ -16,7 +16,7 @@ class AudioEncoder:
         n_samples = audio_waveform.shape[0] if audio_waveform.ndim == 1 else audio_waveform.shape[0]
         hop = max(1, n_samples // T_audio)
 
-        energy_curve = np.zeros(T_audio, dtype=np.float32)
+        energy_curve: np.ndarray = np.zeros(T_audio, dtype=np.float32)
         for i in range(T_audio):
             start = i * hop
             end = min(start + hop, n_samples)
@@ -25,7 +25,7 @@ class AudioEncoder:
                 chunk = chunk.mean(axis=-1)
             energy_curve[i] = float(np.sqrt(np.mean(chunk ** 2))) if len(chunk) > 0 else 0.0
 
-        section_labels = np.zeros(T_audio, dtype=np.int32)
+        section_labels: np.ndarray = np.zeros(T_audio, dtype=np.int32)
         beat_positions = np.linspace(0, 1, max(1, T_audio // 15), dtype=np.float32)
         bpm = 120.0
         key = "C"

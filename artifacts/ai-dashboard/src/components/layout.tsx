@@ -237,7 +237,23 @@ export function Layout({ children }: { children: React.ReactNode }) {
               settings.
             </DialogDescription>
           </DialogHeader>
-          <div className="py-4">
+          <form
+            className="py-4"
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleSaveKey();
+            }}
+          >
+            <input
+              type="text"
+              name="username"
+              value="admin"
+              autoComplete="username"
+              readOnly
+              hidden
+              aria-hidden="true"
+              tabIndex={-1}
+            />
             <Input
               type="password"
               placeholder="Enter Admin Key..."
@@ -245,9 +261,10 @@ export function Layout({ children }: { children: React.ReactNode }) {
               onChange={(e) => setKeyInput(e.target.value)}
               onKeyDown={handleKeyDown}
               className="bg-black/50 border-white/10 focus:border-primary text-white"
+              autoComplete="current-password"
               autoFocus
             />
-          </div>
+          </form>
           <DialogFooter>
             <Button variant="ghost" onClick={() => setIsAuthDialogOpen(false)}>
               Cancel

@@ -180,7 +180,7 @@ def test_condition_background() -> None:
 
     # A procedural gradient background (what scenes.py produces).
     h, w = 128, 96
-    base = np.zeros((h, w, 3), dtype=np.uint8)
+    base: np.ndarray = np.zeros((h, w, 3), dtype=np.uint8)
     base[:, :, 0] = np.linspace(20, 180, h, dtype=np.uint8).reshape(-1, 1)
     base[:, :, 2] = np.linspace(60, 220, h, dtype=np.uint8).reshape(-1, 1)
 
@@ -214,7 +214,7 @@ def test_condition_background() -> None:
            int(out[:, :, 1].max()) <= 8)
 
     # Totality: a malformed background is returned unchanged.
-    bad = np.zeros((10, 10), dtype=np.uint8)  # 2-D, not HxWx3
+    bad: np.ndarray = np.zeros((10, 10), dtype=np.uint8)  # 2-D, not HxWx3
     _check("malformed bg returned unchanged",
            np.array_equal(rcgs_mod.condition_background(bad, 10, 10), bad))
 

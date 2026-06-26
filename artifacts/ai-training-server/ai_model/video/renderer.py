@@ -3,7 +3,7 @@ import subprocess
 import os
 import uuid
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, cast
 from .ffmpeg_util import run_ffmpeg
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
@@ -142,9 +142,9 @@ def render_video(req: VideoRequest) -> VideoResult:
     ac = req.accent_color.replace("#", "0x") if req.accent_color else style["accent_color"]
     cta_bg = style.get("cta_bg", ac)
 
-    hs = style["hook_size"]
-    bs = style["body_size"]
-    cs = style["cta_size"]
+    hs = cast(int, style["hook_size"])
+    bs = cast(int, style["body_size"])
+    cs = cast(int, style["cta_size"])
     if width < 1080:
         s = width / 1080
         hs = int(hs * s)

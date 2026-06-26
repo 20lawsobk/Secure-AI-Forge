@@ -97,7 +97,7 @@ def _load_font(size: int, bold: bool = False) -> "ImageFont.FreeTypeFont":
 
 def _gradient_array(w: int, h: int, top: tuple, bottom: tuple) -> np.ndarray:
     """Create a vertical gradient as an H×W×3 uint8 array."""
-    arr = np.zeros((h, w, 3), dtype=np.uint8)
+    arr: np.ndarray = np.zeros((h, w, 3), dtype=np.uint8)
     for i, (a, b) in enumerate(zip(top, bottom)):
         col = np.linspace(a, b, h, dtype=np.float32)
         arr[:, :, i] = col[:, np.newaxis]

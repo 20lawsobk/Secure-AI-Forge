@@ -2,7 +2,7 @@ from __future__ import annotations
 import re
 import json
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, cast
 from urllib.parse import urlparse
 
 try:
@@ -573,7 +573,7 @@ class UrlMetadataExtractor:
                     targets.append({
                         "platform": p,
                         "goal": goal,
-                        "duration_sec": min(defaults["duration"], 30.0),
+                        "duration_sec": min(cast(float, defaults["duration"]), 30.0),
                         "aspect_ratio": defaults["aspect"],
                     })
             if targets:

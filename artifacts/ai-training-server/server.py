@@ -180,7 +180,7 @@ def log_training(message: str, level: str = "info", epoch: int = None,
 
 # ─── Training State ──────────────────────────────────────────────────────────
 
-_training_state = {
+_training_state: dict[str, Any] = {
     "state": "idle",
     "epoch": 0,
     "total_epochs": 0,
@@ -269,7 +269,7 @@ _render_manager = None
 _image_engine = None
 _hyper_backend = None
 _digital_gpu_backend = None
-_model_config = {}
+_model_config: dict[str, Any] = {}
 
 _model_lock = threading.Lock()
 
@@ -1875,6 +1875,7 @@ async def platform_social_generate(req: PlatformSocialRequest, _key = Depends(re
     personalized_tone = _build_personalized_tone(req.user_id, platform, req.tone)
 
     variants = []
+    variant: dict[str, Any]
     for i in range(req.num_variants):
         if not _model_ready or _script_agent is None:
             variant = {
@@ -3217,7 +3218,7 @@ async def ads_autopilot(req: AdAutopilotRequest, _key = Depends(require_scope("g
     # Cross-enrich with organic engagement signals
     try:
         curriculum   = get_curriculum_client()
-        organic_tops = curriculum.get_top_performers(req.user_id, limit=10)
+        organic_tops = curriculum.get_top_performers(req.user_id, top_n=10)
         organic_tags = list({t for p in organic_tops for t in p.get("style_tags", [])})
     except Exception:
         organic_tops = []
@@ -3590,12 +3591,13 @@ def _run_storage_training(req: StorageTrainRequest, job_id: str):
                 with open(data_path, "w") as f:
                     json.dump([{"text": t} for t in samples_written], f)
 
-                config = TrainConfig(
-                    epochs=1,
-                    batch_size=min(req.batch_size, len(samples_written)),
-                    lr=req.learning_rate,
-                    grad_clip=1.0,
-                )
+                config = TrainConfig({
+                    "train": {
+                        "epochs": 1,
+                        "batch_size": min(req.batch_size, len(samples_written)),
+                        "lr": req.learning_rate,
+                    }
+                })
                 with _model_lock:
                     model = _creative_model.model if _creative_model else None
 
@@ -3720,8 +3722,6 @@ async def start_training_from_storage(
 # own in-process threading.Lock for the brief read-modify-write window; POSIX
 # os.replace() gives us atomic final writes, so cross-worker reads are safe.
 
-import json as _json
-
 _JOBS_DIR = "/tmp/maxbooster_jobs"
 os.makedirs(_JOBS_DIR, exist_ok=True)
 _api_jobs_lock = threading.Lock()   # kept for legacy; file ops are the real store
@@ -3735,7 +3735,7 @@ def _job_write(job_id: str, data: dict) -> None:
     """Write job data atomically (create or overwrite)."""
     tmp = _job_path(job_id) + ".tmp"
     with open(tmp, "w") as f:
-        _json.dump(data, f)
+        json.dump(data, f)
     os.replace(tmp, _job_path(job_id))
 
 
@@ -3746,7 +3746,7 @@ def _job_read(job_id: str) -> dict | None:
         return None
     try:
         with open(path, "r") as f:
-            return _json.load(f)
+            return json.load(f)
     except Exception:
         return None
 
@@ -4755,7 +4755,7 @@ def _render_audio_clip(job_id: str, bpm: float, key: str,
     beat_sec = max(0.15, 60.0 / max(40.0, min(float(bpm), 200.0)))
     note_sec = beat_sec / 2.0  # eighth-note arpeggio
     n_total = int(duration_sec * sample_rate)
-    audio = np.zeros(n_total, dtype=np.float64)
+    audio: np.ndarray = np.zeros(n_total, dtype=np.float64)
 
     # ── Arpeggio melody ───────────────────────────────────────────────────
     degrees = [0, 2, 4, 6, 4, 2]

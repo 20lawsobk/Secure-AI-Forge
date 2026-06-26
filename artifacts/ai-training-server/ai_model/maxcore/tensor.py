@@ -25,6 +25,8 @@ _DTYPE_MAP = {
 class Tensor:
     """Backend-agnostic tensor handle wrapping a numpy buffer."""
 
+    data: np.ndarray
+    device: str
     __slots__ = ("data", "device")
 
     def __init__(self, data: Any, dtype: str | None = "float32", device: str = "cpu"):

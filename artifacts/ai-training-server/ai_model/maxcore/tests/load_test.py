@@ -140,7 +140,7 @@ def main() -> int:
     orch2 = PDIMOrchestrator()
     ns_conc = f"loadtest_conc_{run}"
     compute_calls.clear()
-    src_counts = Counter()
+    src_counts: Counter[str] = Counter()
     src_lock = threading.Lock()
     per_thread = max(1, CONC // THREADS)
     barrier = threading.Barrier(THREADS)

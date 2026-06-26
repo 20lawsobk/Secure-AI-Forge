@@ -1,5 +1,5 @@
 import numpy as np
-from typing import Dict, List
+from typing import Dict, List, cast
 from ai_model.gpu.hyper_core import HyperGPU
 from ..boostsheets.schema import PlatformTarget
 from .video_generator import VideoGenerator
@@ -219,9 +219,9 @@ class PlatformHeads:
         boostsheet_repr: Dict[str, np.ndarray],
     ) -> Dict:
         defaults = PLATFORM_DEFAULTS.get(target.platform, {"duration": 15.0, "aspect": "16:9", "fps": 24})
-        duration = target.duration_sec or defaults["duration"]
-        aspect = target.aspect_ratio or defaults["aspect"]
-        fps = defaults["fps"]
+        duration = cast(float, target.duration_sec or defaults["duration"])
+        aspect = cast(str, target.aspect_ratio or defaults["aspect"])
+        fps = cast(int, defaults["fps"])
 
         goal_spec = GOAL_SPECS.get(target.goal, GOAL_SPECS["promo_clip"])
 
@@ -234,7 +234,7 @@ class PlatformHeads:
         )
 
         if goal_spec.get("beat_sync", False):
-            frames = self._apply_beat_sync(frames, audio_repr, goal_spec["fx_intensity"])
+            frames = self._apply_beat_sync(frames, audio_repr, cast(float, goal_spec["fx_intensity"]))
 
         return {
             "platform": target.platform,

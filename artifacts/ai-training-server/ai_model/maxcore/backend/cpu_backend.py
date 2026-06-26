@@ -181,7 +181,7 @@ class CPUBackend(Backend):
 
     # ── softmax: engine-served for ANY axis (move-to-last, fold to 2D) ─────────
     def softmax(self, x, axis: int = -1):
-        X = to_numpy(x).astype(np.float32, copy=False)
+        X: np.ndarray = to_numpy(x).astype(np.float32, copy=False)
         ax = axis if axis >= 0 else X.ndim + axis
         with METRICS.timer("cpu.softmax"):
             out = None
@@ -204,9 +204,9 @@ class CPUBackend(Backend):
 
     # ── attention: engine-served incl. masked / multi-head / cross-attention ──
     def attention(self, q, k, v, mask=None, causal: bool = False):
-        Q = to_numpy(q).astype(np.float32, copy=False)
-        K = to_numpy(k).astype(np.float32, copy=False)
-        V = to_numpy(v).astype(np.float32, copy=False)
+        Q: np.ndarray = to_numpy(q).astype(np.float32, copy=False)
+        K: np.ndarray = to_numpy(k).astype(np.float32, copy=False)
+        V: np.ndarray = to_numpy(v).astype(np.float32, copy=False)
         with METRICS.timer("cpu.attention"):
             out = None
             used_engine = False
@@ -260,8 +260,8 @@ class CPUBackend(Backend):
 
     # ── conv2d: im2col + a single engine GEMM ─────────────────────────────────
     def conv2d(self, x, w, bias=None, stride: int = 1, padding: int = 0):
-        X = to_numpy(x).astype(np.float32, copy=False)
-        W = to_numpy(w).astype(np.float32, copy=False)
+        X: np.ndarray = to_numpy(x).astype(np.float32, copy=False)
+        W: np.ndarray = to_numpy(w).astype(np.float32, copy=False)
         if X.ndim != 4 or W.ndim != 4:
             raise ValueError("conv2d expects X[N,C,H,W] and W[O,C,kh,kw]")
         n, c, h, ww = X.shape

@@ -243,7 +243,7 @@ class DataPuller:
     # ------------------------------------------------------------------ #
 
     def _pull_from_pdim(self) -> list[str]:
-        texts = []
+        texts: list[str] = []
         if not self.storage.is_available:
             return texts
 

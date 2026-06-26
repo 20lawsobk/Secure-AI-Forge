@@ -3,7 +3,7 @@ import time
 import threading
 import numpy as np
 from enum import Enum, auto
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, field
 from ai_model.gpu.digital_gpu import (
     GPUError, ShapeError, SIMDCore, VRAM
@@ -66,8 +66,8 @@ class TensorCoreUnit:
         return C
 
     def mixed_precision_matmul(self, A: np.ndarray, B: np.ndarray) -> np.ndarray:
-        A_half = A.astype(np.float16)
-        B_half = B.astype(np.float16)
+        A_half: np.ndarray = A.astype(np.float16)
+        B_half: np.ndarray = B.astype(np.float16)
         M, K = A.shape
         K2, N = B.shape
         C = np.zeros((M, N), dtype=np.float32)
@@ -340,7 +340,7 @@ class HyperSIMDCore(SIMDCore):
         training: bool = True, eps: float = 1e-5, momentum: float = 0.1,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         if X.ndim == 4:
-            axis = (0, 2, 3)
+            axis: tuple[int, ...] = (0, 2, 3)
         elif X.ndim == 2:
             axis = (0,)
         else:
@@ -714,7 +714,7 @@ class GPUCluster:
         if node_ids is None:
             node_ids = list(self.nodes.keys())[:len(data_chunks)]
 
-        results = [None] * len(data_chunks)
+        results: list[Any] = [None] * len(data_chunks)
         errors = {}
         threads = []
 

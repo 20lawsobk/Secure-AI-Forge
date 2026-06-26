@@ -16,3 +16,4 @@
 - [Seeded/deterministic output reuse](seeded-output-reuse.md) — reuse a deterministic-name file only after validating it; write temp+os.replace; module-level (not per-instance) key locks
 - [Retrieval flywheel + brand centroid](retrieval-self-healing.md) — ingestor folds rendered assets back into index (TOTAL enqueue, bounded retry); brand centroid is incremental accumulator that must equal a rebuild
 - [Dynamic batching coalescer](dynamic-batching-coalescer.md) — opt-in cross-request generate batching; lone batcher thread owns model (never take INFERENCE_GATE); left-pad+kpm = logits-exact, text-exact only B=1
+- [mypy object-from-dict pattern](mypy-object-dict-pattern.md) — state dicts → dict[str,Any]; constant config dicts → cast() at use; call-arg errors are often real bugs (TrainConfig takes one cfg dict)

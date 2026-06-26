@@ -57,7 +57,7 @@ _Populate as you build_
 - Always use `pnpm` (not npm/yarn) — the preinstall script enforces this
 - The `Start application` workflow starts both API server (bg) and dashboard together
 - DB push is interactive by default; use `push-force` flag or pipe `""` to auto-select
-- Python typecheck (mypy) has known non-blocking type errors — these are warnings, not blockers
+- Python typecheck (mypy) is fully green; keep it that way. Mixed-type state dicts (e.g. `self.state`, `_training_state`) should be annotated `dict[str, Any]`; read-only constant config dicts (mixed str/int/float values) use `typing.cast(...)` at the point of use rather than annotation
 - Storage warnings about "pdim storage offline" are expected in dev; the system falls back gracefully
 
 ## Pointers

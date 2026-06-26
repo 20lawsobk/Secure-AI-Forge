@@ -550,8 +550,8 @@ def _download_ytdlp(ds: Dataset, dest: Path):
     try:
         import yt_dlp as _  # noqa: F401
     except ImportError:
-        rc = subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', 'yt-dlp'])
-        if rc.returncode != 0:
+        proc = subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', 'yt-dlp'])
+        if proc.returncode != 0:
             print("  [WARN] Could not install yt-dlp. Skipping.", flush=True)
             return False
 

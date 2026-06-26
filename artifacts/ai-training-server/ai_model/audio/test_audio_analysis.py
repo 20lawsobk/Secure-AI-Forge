@@ -17,9 +17,9 @@ SR = 22050
 
 
 def _click_track(bpm: float, duration: float, sr: int = SR) -> np.ndarray:
-    y = np.zeros(int(duration * sr), dtype=np.float32)
+    y: np.ndarray = np.zeros(int(duration * sr), dtype=np.float32)
     period = int(sr * 60.0 / bpm)
-    click = np.hanning(64).astype(np.float32)
+    click: np.ndarray = np.hanning(64).astype(np.float32)
     for start in range(0, len(y) - 64, period):
         y[start : start + 64] += click
     return y
