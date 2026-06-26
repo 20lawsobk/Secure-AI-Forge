@@ -4,7 +4,8 @@
 - [Request intelligence layer](request-intelligence-layer.md) — shared pre-gen brief on every generation endpoint; additive `intelligence` block; ranking only for text/content; keep raw-topic guardrail candidate
 - [MaxBooster↔MaxCore contract](maxbooster-contract.md) — client prepends /api; viral-score is 0–1 (client×100); satisfy contract via additive /api endpoints, don't port TS files
 - [ffmpeg spawn under memory pressure](ffmpeg-spawn-memory.md) — ffmpeg must use posix_spawn via run_ffmpeg(), not fork(), or prod renders die with [Errno 5] EIO under model memory
-- [Concurrency & dedup](concurrency-dedup.md) — backpressure+image-dedup ALREADY exist (don't rebuild); fleet-wide dedup_cache design (top-level-scrub only, in-layer TTL envelope); compute≠storage
+- [Concurrency & dedup](concurrency-dedup.md) — backpressure+image-dedup exist (don't rebuild); dedup_cache (top-level-scrub, in-layer TTL); single-flight needs double-check + re-contention loop; compute≠storage
+- [Engine-serve all kernels](engine-serve-all-kernels.md) — fold batched-matmul/any-axis-softmax/masked-attn onto a 2D engine; `.numpy`(no kernel) vs `.engine_fallback`(engine failed); "no fallback"=fallback counter 0, assert via counter-delta tests
 - [Upstream model fetch timeouts](upstream-model-fetch-timeouts.md) — api-server→Python generation must use long-timeout undici Agent, not bare fetch (300s default aborts valid in-flight calls → 500 under load); keep server.timeout=0
 - [Generation volume testing](generation-volume-testing.md) — slow in-house gen endpoints: use short sync bash batches + submit-job/poll; long detached harnesses get reaped mid-run (phantom "hang")
 - [Workflow topology](workflow-topology.md) — run ONLY `Start application` (api-server child-spawns Python); artifact workflows can't be deleted (PROHIBITED_ACTION), keep stopped; kill lingering artifact api-server tree to end model-lock contention
