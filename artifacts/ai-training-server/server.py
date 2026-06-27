@@ -25,6 +25,20 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Optional, List
 
+# ── Size BLAS/OpenMP thread pools to the real host BEFORE numpy is imported ───
+# Derived from os.cpu_count() at runtime — 2 on the dev box, 16 on the prod
+# Reserved VM — never hardcoded. setdefault() means an explicit operator override
+# always wins. For a single process this equals OpenBLAS's own all-core default;
+# it becomes load-bearing only when running multiple worker *processes*, where
+# each must be capped to cpus // workers. Canonical helper:
+# ai_model/maxcore/hardware.py (configure_blas_threads / plan_blas_threads).
+_cpus = os.cpu_count() or 1
+for _blas_var in (
+    "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
+):
+    os.environ.setdefault(_blas_var, str(_cpus))
+
 import psycopg2
 import psycopg2.pool
 from psycopg2.extras import RealDictCursor

@@ -1139,3 +1139,9 @@ yta-general-utils = [{ index = "pytorch-cpu", marker = "platform_system == 'Linu
 zensvi = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
 zetascale = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
 zuko = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
+
+[tool.ruff.lint.per-file-ignores]
+# server.py sizes BLAS/OpenMP thread pools from os.cpu_count() *before* numpy is
+# imported (the prod Reserved VM has 16 cores, dev has 2); this requires a few
+# statements ahead of the third-party imports, which is the intended pattern.
+"server.py" = ["E402"]
