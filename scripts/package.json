@@ -6,6 +6,7 @@
   "scripts": {
     "hello": "tsx ./src/hello.ts",
     "generate-patent": "tsx ./src/generate-patent.ts",
+    "smoke-load-test": "tsx ./src/smoke-load-test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
