@@ -38,6 +38,7 @@ class ScriptGenerateRequest(BaseModel):
     platform: str = "tiktok"
     goal: str = "growth"
     tone: str = "energetic"
+    awareness: Optional[str] = None
 
 
 class ScriptGenerateResponse(BaseModel):
@@ -68,6 +69,7 @@ class DistributionGenerateRequest(BaseModel):
     script: str
     platform: str = "tiktok"
     goal: str = "growth"
+    awareness: Optional[str] = None
 
 
 class DistributionGenerateResponse(BaseModel):
@@ -87,6 +89,7 @@ class ContentGenerateRequest(BaseModel):
     include_hashtags: bool = True
     include_visual_spec: bool = False
     include_distribution: bool = True
+    awareness: Optional[str] = None
 
 
 class ContentGenerateResponse(BaseModel):
@@ -113,6 +116,7 @@ class MultiPlatformRequest(BaseModel):
     target_audience: Optional[str] = None
     format: str = "text"
     url: Optional[str] = None
+    awareness: Optional[str] = None
 
 
 class MultiPlatformResponse(BaseModel):
@@ -204,6 +208,7 @@ class VideoGenerateRequest(BaseModel):
     goal: str = "growth"
     tone: str = "energetic"
     quality: str = "cinematic"
+    awareness: Optional[str] = None
 
 
 class VideoGenerateResponse(BaseModel):

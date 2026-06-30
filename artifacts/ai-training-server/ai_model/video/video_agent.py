@@ -168,6 +168,7 @@ class VideoAgentRequest:
     artist_name: str = ""
     duration: float = 0.0
     artist_context: Dict[str, Any] = field(default_factory=dict)
+    awareness: str = ""
 
 
 @dataclass
@@ -292,6 +293,7 @@ class VideoAgent:
             tone=tone,
             platform=platform,
             artist_name=req.artist_name,
+            awareness=req.awareness,
         )
 
         # ── Assemble VideoScene list in order ────────────────────────────
