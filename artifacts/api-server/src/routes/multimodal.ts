@@ -2,6 +2,10 @@ import { Router, type IRouter, type Request, type Response } from "express";
 import { randomUUID } from "crypto";
 import { Agent, fetch as undiciFetch } from "undici";
 import platformRules from "../platform_rules.json";
+import {
+  contentAwarenessService,
+  type ContentAwarenessContext,
+} from "../services/contentAwarenessService.js";
 
 const router: IRouter = Router();
 
@@ -469,12 +473,19 @@ function buildFallbackPlan(
 
 // ─── Workers ──────────────────────────────────────────────────────────────────
 
+type WorkerAwareness = ContentAwarenessContext | null;
+
 const textWorker = {
-  async run(step: TaskStep, inputs: unknown): Promise<GeneratedAsset[]> {
+  async run(
+    step: TaskStep,
+    inputs: unknown,
+    awareness: WorkerAwareness,
+  ): Promise<GeneratedAsset[]> {
     const result = (await maxcorePost("/generate/text", {
       mode: "content",
       step,
       inputs,
+      ...(awareness?.contextString ? { awareness } : {}),
     })) as {
       outputs: Array<{
         text: string;
@@ -496,10 +507,15 @@ const textWorker = {
 };
 
 const imageWorker = {
-  async run(step: TaskStep, inputs: unknown): Promise<GeneratedAsset[]> {
+  async run(
+    step: TaskStep,
+    inputs: unknown,
+    awareness: WorkerAwareness,
+  ): Promise<GeneratedAsset[]> {
     const result = (await maxcorePost("/generate/image", {
       step,
       inputs,
+      ...(awareness?.contextString ? { awareness } : {}),
     })) as {
       outputs: Array<{
         url: string;
@@ -521,10 +537,15 @@ const imageWorker = {
 };
 
 const audioWorker = {
-  async run(step: TaskStep, inputs: unknown): Promise<GeneratedAsset[]> {
+  async run(
+    step: TaskStep,
+    inputs: unknown,
+    awareness: WorkerAwareness,
+  ): Promise<GeneratedAsset[]> {
     const result = (await maxcorePost("/generate/audio", {
       step,
       inputs,
+      ...(awareness?.contextString ? { awareness } : {}),
     })) as {
       outputs: Array<{
         url: string;
@@ -546,10 +567,15 @@ const audioWorker = {
 };
 
 const videoWorker = {
-  async run(step: TaskStep, inputs: unknown): Promise<GeneratedAsset[]> {
+  async run(
+    step: TaskStep,
+    inputs: unknown,
+    awareness: WorkerAwareness,
+  ): Promise<GeneratedAsset[]> {
     const result = (await maxcorePost("/generate/video", {
       step,
       inputs,
+      ...(awareness?.contextString ? { awareness } : {}),
     })) as {
       outputs: Array<{
         url: string;
@@ -572,7 +598,13 @@ const videoWorker = {
 
 const workers: Record<
   string,
-  { run: (step: TaskStep, inputs: unknown) => Promise<GeneratedAsset[]> }
+  {
+    run: (
+      step: TaskStep,
+      inputs: unknown,
+      awareness: WorkerAwareness,
+    ) => Promise<GeneratedAsset[]>;
+  }
 > = {
   text: textWorker,
   image: imageWorker,
@@ -587,6 +619,48 @@ async function handleGeneration(
 ): Promise<MultimodalPackage> {
   const normalized = await normalizeInput(req);
   const plan = await planTasks(normalized, req);
+
+  // Fetch per-modality awareness contexts in parallel, racing against a 3 s
+  // guard so a cold-cache RSS fetch never delays the generation pipeline.
+  const AWARENESS_TIMEOUT_MS = 3_000;
+  const awarenessRace = <T>(p: Promise<T>): Promise<T | null> =>
+    Promise.race([
+      p,
+      new Promise<null>((resolve) =>
+        setTimeout(() => resolve(null), AWARENESS_TIMEOUT_MS),
+      ),
+    ]);
+
+  const [textAwareness, imageAwareness, audioAwareness, videoAwareness] =
+    await Promise.all([
+      awarenessRace(
+        contentAwarenessService
+          .getContextForMode("social")
+          .catch(() => null),
+      ),
+      awarenessRace(
+        contentAwarenessService
+          .getContextForMode("content")
+          .catch(() => null),
+      ),
+      awarenessRace(
+        contentAwarenessService
+          .getContextForMode("music")
+          .catch(() => null),
+      ),
+      awarenessRace(
+        contentAwarenessService
+          .getContextForMode("video_script")
+          .catch(() => null),
+      ),
+    ]);
+
+  const awarenessMap: Record<string, WorkerAwareness> = {
+    text: textAwareness?.confidence ? textAwareness : null,
+    image: imageAwareness?.confidence ? imageAwareness : null,
+    audio: audioAwareness?.confidence ? audioAwareness : null,
+    video: videoAwareness?.confidence ? videoAwareness : null,
+  };
 
   const stepOutputs = new Map<string, GeneratedAsset[]>();
 
@@ -632,7 +706,11 @@ async function handleGeneration(
                 ),
               };
 
-        const assets = await worker.run(step, inputs);
+        const assets = await worker.run(
+          step,
+          inputs,
+          awarenessMap[step.worker] ?? null,
+        );
         stepOutputs.set(step.id, assets);
         completed.add(step.id);
       }),
