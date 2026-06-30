@@ -634,19 +634,13 @@ async function handleGeneration(
   const [textAwareness, imageAwareness, audioAwareness, videoAwareness] =
     await Promise.all([
       awarenessRace(
-        contentAwarenessService
-          .getContextForMode("social")
-          .catch(() => null),
+        contentAwarenessService.getContextForMode("social").catch(() => null),
       ),
       awarenessRace(
-        contentAwarenessService
-          .getContextForMode("content")
-          .catch(() => null),
+        contentAwarenessService.getContextForMode("content").catch(() => null),
       ),
       awarenessRace(
-        contentAwarenessService
-          .getContextForMode("music")
-          .catch(() => null),
+        contentAwarenessService.getContextForMode("music").catch(() => null),
       ),
       awarenessRace(
         contentAwarenessService

@@ -154,7 +154,9 @@ class IndustryMonitorService {
 
   async fetchLiveChanges(): Promise<LiveIndustryChange[]> {
     if (this?.cache && Date?.now() - this?.cache.fetchedAt < CACHE_TTL_MS) {
-      const fresh = this?.cache.changes?.filter((c) => !this?.seenIds.has(c?.id));
+      const fresh = this?.cache.changes?.filter(
+        (c) => !this?.seenIds.has(c?.id),
+      );
       for (const c of fresh) this?.seenIds.add(c?.id);
       return fresh;
     }
@@ -306,7 +308,9 @@ class IndustryMonitorService {
     const [tavilyResults, exaResults] = await Promise?.all([
       tavilyKey
         ? Promise?.allSettled(
-            MUSIC_INDUSTRY_QUERIES?.map((q) => this?.tavilySearch(q, tavilyKey)),
+            MUSIC_INDUSTRY_QUERIES?.map((q) =>
+              this?.tavilySearch(q, tavilyKey),
+            ),
           )
         : Promise?.resolve([]),
       exaKey

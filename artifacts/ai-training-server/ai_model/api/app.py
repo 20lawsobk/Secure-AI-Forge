@@ -170,6 +170,7 @@ async def generate_script(req: ScriptGenerateRequest):
         platform=platform,
         goal=req.goal,
         tone=req.tone,
+        awareness=req.awareness or "",
     ))
     return ScriptGenerateResponse(
         success=True,
@@ -206,6 +207,7 @@ async def generate_distribution(req: DistributionGenerateRequest):
         script=req.script,
         platform=platform,
         goal=req.goal,
+        awareness=req.awareness or "",
     ))
     return DistributionGenerateResponse(
         success=True,
@@ -227,6 +229,7 @@ async def generate_content(req: ContentGenerateRequest):
         platform=platform,
         goal=req.goal,
         tone=req.tone,
+        awareness=req.awareness or "",
     ))
 
     dist_result = None
@@ -236,6 +239,7 @@ async def generate_content(req: ContentGenerateRequest):
             script=full_script,
             platform=platform,
             goal=req.goal,
+            awareness=req.awareness or "",
         ))
 
     visual_spec = None
@@ -290,6 +294,7 @@ async def generate_multi_platform(req: MultiPlatformRequest):
             platform=platform,
             goal=req.goal,
             tone=req.tone,
+            awareness=req.awareness or "",
         ))
 
         full_script = f"{script_result.hook}\n{script_result.body}\n{script_result.cta}"
@@ -298,6 +303,7 @@ async def generate_multi_platform(req: MultiPlatformRequest):
             script=full_script,
             platform=platform,
             goal=req.goal,
+            awareness=req.awareness or "",
         ))
 
         caption = dist_result.caption
@@ -619,6 +625,7 @@ async def generate_video(req: VideoGenerateRequest):
         genre=getattr(req, "genre", "") or "",
         artist_name=req.artist_name or "",
         duration=float(req.duration or 0),
+        awareness=req.awareness or "",
     )
     production = agent.plan(agent_req)
 

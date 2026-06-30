@@ -462,7 +462,9 @@ class MusicIndustryContextFilterService {
       case "advertising":
         parts?.push("[Music Industry Context]");
         if (ctx?.trendingGenres.length)
-          parts?.push(`Trending: ${ctx?.trendingGenres.slice(0, 3).join(", ")}`);
+          parts?.push(
+            `Trending: ${ctx?.trendingGenres.slice(0, 3).join(", ")}`,
+          );
         if (ctx?.platformSignals.length) {
           const top = ctx?.platformSignals
             .slice(0, 3)
@@ -471,7 +473,9 @@ class MusicIndustryContextFilterService {
           parts?.push(`Platform: ${top}`);
         }
         if (ctx?.viralHookPatterns.length)
-          parts?.push(`Hooks: ${ctx?.viralHookPatterns.slice(0, 2).join(", ")}`);
+          parts?.push(
+            `Hooks: ${ctx?.viralHookPatterns.slice(0, 2).join(", ")}`,
+          );
         if (ctx?.lyricThemes.length)
           parts?.push(`Themes: ${ctx?.lyricThemes.slice(0, 2).join(", ")}`);
         break;
