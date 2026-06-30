@@ -1,7 +1,10 @@
 from __future__ import annotations
 import time
 import os
+import logging
+import re
 import torch
+from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -71,6 +74,104 @@ PLATFORM_NORMALIZE = {
 
 def normalize_platform(p: str) -> str:
     return PLATFORM_NORMALIZE.get(p.lower(), p.lower())
+
+
+# ── URL-topic resolution ───────────────────────────────────────────────────────
+# When Spotify/YouTube (and similar) block the HTML crawler, the topic that
+# arrives here is just the domain ("open.spotify.com").  We detect that and
+# reconstruct a useful idea from the URL path + a platform label so the
+# awareness layer has real content to work with instead of a bare hostname.
+
+_logger = logging.getLogger(__name__)
+
+_MUSIC_PLATFORM_LABELS: dict[str, str] = {
+    "spotify.com":       "music release on Spotify",
+    "open.spotify.com":  "music release on Spotify",
+    "youtube.com":       "music video on YouTube",
+    "youtu.be":          "music video on YouTube",
+    "music.youtube.com": "music video on YouTube",
+    "soundcloud.com":    "track on SoundCloud",
+    "music.apple.com":   "music release on Apple Music",
+    "tidal.com":         "music release on Tidal",
+    "deezer.com":        "music release on Deezer",
+    "bandcamp.com":      "music release on Bandcamp",
+    "audiomack.com":     "track on Audiomack",
+    "distrokid.com":     "release via DistroKid",
+}
+
+_URL_RE = re.compile(r"^(https?://|www\.)\S+", re.IGNORECASE)
+_DOMAIN_ONLY_RE = re.compile(
+    r"^([\w-]+\.)+[\w-]{2,}(/[\w.~%-]*)?$", re.IGNORECASE
+)
+
+
+def _resolve_topic_from_url(raw_topic: str) -> str:
+    """
+    Detect when `raw_topic` is a crawl-blocked URL or bare domain and return
+    a descriptive idea string the agents can use.  Returns the original string
+    unchanged when it is already a real topic (not a URL/domain).
+
+    Extraction order:
+      1. URL path segments  → track / artist / album slug from the path
+      2. Platform label     → "music release on Spotify" etc.
+      3. Bare domain        → hostname used as-is (never empty)
+    """
+    topic = raw_topic.strip()
+    if not topic:
+        return topic
+
+    # Normalise — add scheme so urlparse can parse bare domains too
+    url_str = topic if re.match(r"https?://", topic, re.IGNORECASE) else f"https://{topic}"
+
+    # Only process if it looks like a URL or domain
+    if not (_URL_RE.match(topic) or _DOMAIN_ONLY_RE.match(topic)):
+        return topic
+
+    try:
+        parsed = urlparse(url_str)
+        hostname = (parsed.hostname or "").lower().lstrip("www.")
+    except Exception:
+        return topic
+
+    # Check if it's a known music platform for a richer label
+    platform_label: str = ""
+    for domain, label in _MUSIC_PLATFORM_LABELS.items():
+        if hostname == domain or hostname.endswith("." + domain):
+            platform_label = label
+            break
+
+    # Extract a readable name from any path segments regardless of platform
+    # e.g. /track/some-great-song-title → "Some Great Song Title"
+    #      /artist/doja-cat/album/planet-her → "Planet Her"
+    #      /blog/my-new-single-drop → "My New Single Drop"
+    path_parts = [
+        p for p in parsed.path.split("/")
+        if p and not p.isdigit() and len(p) > 2
+        and p not in {"track", "artist", "album", "playlist",
+                      "watch", "embed", "user", "intl-en", "index.html",
+                      "index", "home", "en", "us"}
+    ]
+    name: str = ""
+    if path_parts:
+        raw = path_parts[-1]
+        raw = raw.split("?")[0].split("#")[0]  # drop trailing query/fragment
+        name = re.sub(r"[_-]", " ", raw).title().strip()
+
+    if name and platform_label:
+        resolved = f"{name} — {platform_label}"
+    elif name:
+        resolved = f"{name} — from {hostname}"
+    elif platform_label:
+        resolved = platform_label
+    else:
+        # Bare domain with no path — use hostname so agents always get something
+        resolved = hostname or topic
+
+    if resolved != topic:
+        _logger.warning(
+            "[generate-from-url] Crawl-blocked URL resolved: %r → %r", topic, resolved
+        )
+    return resolved
 
 
 @app.on_event("startup")
@@ -165,8 +266,9 @@ async def health():
 async def generate_script(req: ScriptGenerateRequest):
     start = time.time()
     platform = normalize_platform(req.platform)
+    idea = _resolve_topic_from_url(req.idea)
     result = script_agent.run(ScriptRequest(
-        idea=req.idea,
+        idea=idea,
         platform=platform,
         goal=req.goal,
         tone=req.tone,
@@ -223,9 +325,10 @@ async def generate_distribution(req: DistributionGenerateRequest):
 async def generate_content(req: ContentGenerateRequest):
     start = time.time()
     platform = normalize_platform(req.platform)
+    topic = _resolve_topic_from_url(req.topic)
 
     script_result = script_agent.run(ScriptRequest(
-        idea=req.topic,
+        idea=topic,
         platform=platform,
         goal=req.goal,
         tone=req.tone,
@@ -245,7 +348,7 @@ async def generate_content(req: ContentGenerateRequest):
     visual_spec = None
     if req.include_visual_spec:
         vs_result = visual_spec_agent.run(VisualSpecRequest(
-            idea=req.topic,
+            idea=topic,
             platform=platform,
             tone=req.tone,
         ))
@@ -278,6 +381,7 @@ async def generate_content(req: ContentGenerateRequest):
 async def generate_multi_platform(req: MultiPlatformRequest):
     start = time.time()
     generated_content = []
+    topic = _resolve_topic_from_url(req.topic)
 
     valid_platforms = [
         "tiktok", "instagram", "youtube", "facebook",
@@ -290,7 +394,7 @@ async def generate_multi_platform(req: MultiPlatformRequest):
             continue
 
         script_result = script_agent.run(ScriptRequest(
-            idea=req.topic,
+            idea=topic,
             platform=platform,
             goal=req.goal,
             tone=req.tone,
