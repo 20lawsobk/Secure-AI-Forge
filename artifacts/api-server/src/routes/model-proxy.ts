@@ -1,5 +1,9 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import { Agent, request as undiciRequest } from "undici";
+import {
+  contentAwarenessService,
+  type ContentGenerationMode,
+} from "../services/contentAwarenessService.js";
 
 const router: IRouter = Router();
 
@@ -88,6 +92,39 @@ function getCached(path: string): CacheEntry | null {
 function setCached(path: string, status: number, data: unknown): void {
   const ttl = CACHE_TTL_MS[path];
   if (ttl) _cache.set(path, { data, status, expiry: Date.now() + ttl });
+}
+
+// ─── Awareness Enrichment ───────────────────────────────────────────────────
+// Fetches live industry context and merges it into req.body.awareness before
+// proxying to the Python AI server. Always additive — never blocks generation.
+// A 3 s race guard prevents cold-cache RSS fetches from delaying responses.
+
+async function enrichWithAwareness(
+  req: Request,
+  mode: ContentGenerationMode,
+): Promise<void> {
+  try {
+    const ctx = await Promise.race([
+      contentAwarenessService.getContextForMode(mode),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 3_000)),
+    ]);
+    if (ctx && ctx.confidence > 0 && ctx.contextString) {
+      req.body = {
+        ...(req.body as Record<string, unknown>),
+        awareness: {
+          contextString: ctx.contextString,
+          confidence: ctx.confidence,
+          trendingGenres: ctx.trendingGenres,
+          trendingMoods: ctx.trendingMoods,
+          platformSignals: ctx.platformSignals,
+          generationHints: ctx.generationHints,
+          signalCount: ctx.signalCount,
+        },
+      };
+    }
+  } catch {
+    // Awareness enrichment is always additive — never block generation
+  }
 }
 
 // ─── Safe JSON parsing (handles non-JSON upstream error bodies) ─────────────
@@ -418,10 +455,12 @@ router.get("/platform/video/generate", async (req, res) => {
 });
 
 router.post("/platform/video/generate", async (req, res) => {
+  await enrichWithAwareness(req, "video_script");
   await proxyRequest(req, res, "/platform/video/generate");
 });
 
 router.post("/content/generate", async (req, res) => {
+  await enrichWithAwareness(req, "content");
   await proxyRequest(req, res, "/content/generate");
 });
 
@@ -480,18 +519,22 @@ router.post("/training/start-from-storage", async (req, res) => {
 // ─── Platform API Routes — Main Music Platform Integration ───────────────────
 
 router.post("/platform/social/generate", async (req, res) => {
+  await enrichWithAwareness(req, "social");
   await proxyRequest(req, res, "/platform/social/generate");
 });
 
 router.post("/platform/social/autopilot", async (req, res) => {
+  await enrichWithAwareness(req, "social");
   await proxyRequest(req, res, "/platform/social/autopilot");
 });
 
 router.post("/platform/daw/generate", async (req, res) => {
+  await enrichWithAwareness(req, "songwriting");
   await proxyRequest(req, res, "/platform/daw/generate");
 });
 
 router.post("/platform/distribution/plan", async (req, res) => {
+  await enrichWithAwareness(req, "content");
   await proxyRequest(req, res, "/platform/distribution/plan");
 });
 
@@ -510,14 +553,17 @@ router.post("/platform/ads/record", async (req, res) => {
 });
 
 router.post("/platform/ads/generate", async (req, res) => {
+  await enrichWithAwareness(req, "ad_copy");
   await proxyRequest(req, res, "/platform/ads/generate");
 });
 
 router.post("/platform/ads/autopilot", async (req, res) => {
+  await enrichWithAwareness(req, "ad_copy");
   await proxyRequest(req, res, "/platform/ads/autopilot");
 });
 
 router.post("/platform/ads/audience", async (req, res) => {
+  await enrichWithAwareness(req, "advertising");
   await proxyRequest(req, res, "/platform/ads/audience");
 });
 
@@ -531,6 +577,7 @@ router.get("/platform/ads/performance/:userId", async (req, res) => {
 });
 
 router.post("/platform/ads/optimize", async (req, res) => {
+  await enrichWithAwareness(req, "ad_copy");
   await proxyRequest(req, res, "/platform/ads/optimize");
 });
 
@@ -552,10 +599,12 @@ router.post("/watchdog/reset", async (req, res) => {
 // ─── Content Generation ────────────────────────────────────────────────────
 
 router.post("/generate/content", async (req, res) => {
+  await enrichWithAwareness(req, "content");
   await proxyRequest(req, res, "/api/generate/content");
 });
 
 router.post("/generate/text", async (req, res) => {
+  await enrichWithAwareness(req, "content");
   await proxyRequest(req, res, "/api/generate/text");
 });
 
@@ -590,18 +639,22 @@ router.post("/predict/engagement", async (req, res) => {
 // ─── Media Generation ──────────────────────────────────────────────────────
 
 router.post("/generate/image", async (req, res) => {
+  await enrichWithAwareness(req, "content");
   await proxyRequest(req, res, "/api/generate/image");
 });
 
 router.post("/generate/audio", async (req, res) => {
+  await enrichWithAwareness(req, "music");
   await proxyRequest(req, res, "/api/generate/audio");
 });
 
 router.post("/generate-video", async (req, res) => {
+  await enrichWithAwareness(req, "video_script");
   await proxyRequest(req, res, "/api/generate-video");
 });
 
 router.post("/video/generate-ai", async (req, res) => {
+  await enrichWithAwareness(req, "video_script");
   await proxyRequest(req, res, "/api/video/generate-ai");
 });
 
