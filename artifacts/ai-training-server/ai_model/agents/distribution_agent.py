@@ -21,6 +21,9 @@ class DistributionResponse:
     posting_time: str
 
 
+# ── Static dicts — dead code in normal operation (awareness is always active) ──
+# Kept as a true last resort for when awareness is completely absent.
+
 DEFAULT_HASHTAGS = {
     "tiktok":          ["#maxbooster", "#tiktokgrowth", "#fyp", "#viral"],
     "instagram":       ["#maxbooster", "#reels", "#newmusic", "#artist"],
@@ -44,13 +47,14 @@ BEST_POSTING_TIMES = {
 }
 
 
-# ── Awareness parsing ─────────────────────────────────────────────────────────
+# ── Awareness parsing ──────────────────────────────────────────────────────────
+# Both functions guarantee a non-empty result when `awareness` is non-empty.
 
 def _parse_hashtags_from_awareness(awareness: str, platform: str) -> List[str]:
     """
     Extract hashtags from the awareness context string.
-    Priority order: platform-specific signal tags → trending topics section → global tags.
-    Returns up to 8 unique hashtags.
+    When no hashtags are present in the text, synthesises them from signal
+    keywords so the result is always non-empty when awareness is non-empty.
     """
     if not awareness:
         return []
@@ -63,7 +67,6 @@ def _parse_hashtags_from_awareness(awareness: str, platform: str) -> List[str]:
     for line in awareness.splitlines():
         stripped = line.strip()
 
-        # Trending Topics section
         if "TRENDING TOPICS" in stripped:
             in_trending = True
             continue
@@ -71,11 +74,9 @@ def _parse_hashtags_from_awareness(awareness: str, platform: str) -> List[str]:
             if stripped.startswith("==="):
                 in_trending = False
             else:
-                tags = re.findall(r"#\w+", stripped)
-                general.extend(tags)
+                general.extend(re.findall(r"#\w+", stripped))
             continue
 
-        # Platform-relevant signal lines → higher priority
         tags_on_line = re.findall(r"#\w+", stripped)
         if not tags_on_line:
             continue
@@ -85,7 +86,6 @@ def _parse_hashtags_from_awareness(awareness: str, platform: str) -> List[str]:
         else:
             general.extend(tags_on_line)
 
-    # Deduplicate preserving order, priority first
     seen: set = set()
     result: List[str] = []
     for tag in priority + general:
@@ -93,7 +93,95 @@ def _parse_hashtags_from_awareness(awareness: str, platform: str) -> List[str]:
             seen.add(tag)
             result.append(tag)
 
+    # If no hashtags were embedded in the awareness text, synthesise from
+    # signal keywords — guarantees non-empty output.
+    if not result:
+        for line in awareness.splitlines():
+            m = re.match(r"\[(HIGH|MEDIUM|LOW)\]\s+(.+)", line.strip())
+            if m:
+                words = re.findall(r"[A-Za-z]{5,}", m.group(2))
+                for w in words[:3]:
+                    tag = f"#{w.lower()}"
+                    if tag not in seen:
+                        seen.add(tag)
+                        result.append(tag)
+            if len(result) >= 4:
+                break
+
+        # Always include a platform tag if we had to synthesise
+        plat_tag = f"#{plat_lower}"
+        if plat_tag not in seen:
+            result.insert(0, plat_tag)
+
     return result[:8]
+
+
+def _parse_timing_from_awareness(awareness: str, platform: str) -> str:
+    """
+    Extract posting time from the awareness context.
+    Falls back to broader time-pattern search, then to engagement-keyword
+    inference, so the result is always non-empty when awareness is non-empty.
+    """
+    if not awareness:
+        return ""
+
+    plat_lower = platform.lower()
+    today = datetime.date.today()
+
+    # 1. Dedicated PLATFORM TIMING section
+    in_timing = False
+    for line in awareness.splitlines():
+        stripped = line.strip()
+        if "PLATFORM TIMING" in stripped or "TIMING" in stripped:
+            in_timing = True
+            continue
+        if in_timing:
+            if stripped.startswith("==="):
+                break
+            if plat_lower in stripped.lower():
+                m = re.search(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)", stripped, re.IGNORECASE)
+                if m:
+                    hour = int(m.group(1))
+                    minute = int(m.group(2) or 0)
+                    meridiem = m.group(3).lower()
+                    if meridiem == "pm" and hour != 12:
+                        hour += 12
+                    elif meridiem == "am" and hour == 12:
+                        hour = 0
+                    return f"{today}T{hour:02d}:{minute:02d}:00Z"
+
+    # 2. Any time pattern on a line mentioning the platform
+    for line in awareness.splitlines():
+        if plat_lower in line.lower():
+            m = re.search(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)", line, re.IGNORECASE)
+            if m:
+                hour = int(m.group(1))
+                minute = int(m.group(2) or 0)
+                meridiem = m.group(3).lower()
+                if meridiem == "pm" and hour != 12:
+                    hour += 12
+                elif meridiem == "am" and hour == 12:
+                    hour = 0
+                return f"{today}T{hour:02d}:{minute:02d}:00Z"
+
+    # 3. Infer from engagement-time keywords anywhere in the awareness text
+    text_lower = awareness.lower()
+    if "peak evening" in text_lower or "evening engagement" in text_lower or "6pm" in text_lower or "7pm" in text_lower:
+        hour = 19
+    elif "morning" in text_lower or "9am" in text_lower:
+        hour = 9
+    elif "afternoon" in text_lower or "2pm" in text_lower or "3pm" in text_lower:
+        hour = 14
+    elif "lunch" in text_lower or "midday" in text_lower or "noon" in text_lower:
+        hour = 12
+    elif "night" in text_lower or "late" in text_lower:
+        hour = 21
+    else:
+        # Awareness is present but has no time signal — use 18:00 as the
+        # highest-engagement default across all major platforms.
+        hour = 18
+
+    return f"{today}T{hour:02d}:00:00Z"
 
 
 def _pdim_hashtags(platform: str) -> List[str]:
@@ -123,49 +211,12 @@ def _store_hashtags_to_pdim(platform: str, hashtags: List[str]) -> None:
         new_tags = [h for h in hashtags if h not in existing]
         if new_tags:
             store.lpush(key, *new_tags)
-            # Cap at 32 entries
             store.ltrim(key, 0, 31)
     except Exception:
         pass
 
 
-def _parse_timing_from_awareness(awareness: str, platform: str) -> Optional[str]:
-    """
-    Extract platform-specific posting hour from the awareness context.
-    Looks for time patterns (e.g. "6pm", "18:00") near platform mentions.
-    Returns an ISO-like posting time string, or None if not found.
-    """
-    if not awareness or not platform:
-        return None
-
-    plat_lower = platform.lower()
-    in_timing = False
-
-    for line in awareness.splitlines():
-        stripped = line.strip()
-        if "PLATFORM TIMING" in stripped or "TIMING" in stripped:
-            in_timing = True
-            continue
-        if in_timing:
-            if stripped.startswith("==="):
-                break
-            if plat_lower in stripped.lower():
-                m = re.search(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)", stripped, re.IGNORECASE)
-                if m:
-                    hour = int(m.group(1))
-                    minute = int(m.group(2) or 0)
-                    meridiem = m.group(3).lower()
-                    if meridiem == "pm" and hour != 12:
-                        hour += 12
-                    elif meridiem == "am" and hour == 12:
-                        hour = 0
-                    today = datetime.date.today()
-                    return f"{today}T{hour:02d}:{minute:02d}:00Z"
-
-    return None
-
-
-# ── Agent ─────────────────────────────────────────────────────────────────────
+# ── Agent ──────────────────────────────────────────────────────────────────────
 
 class DistributionAgent:
     def __init__(self, model: CreativeModel):
@@ -181,7 +232,7 @@ class DistributionAgent:
             f"Generate caption + hashtags + best posting time.\n"
         )
 
-        caption = None
+        caption: Optional[str] = None
         try:
             output = self.model.generate(prompt)
             if self._is_meaningful(output):
@@ -195,46 +246,32 @@ class DistributionAgent:
         platform_key = req.platform.lower().replace(" ", "_")
         awareness = req.awareness or ""
 
-        # ── Hashtag resolution (awareness → pdim → static) ──────────────────
-        hashtags: List[str] = []
+        if awareness:
+            # ── Awareness path (normal operation) ────────────────────────────
+            # Awareness parsers are guaranteed to return non-empty results.
+            hashtags = _parse_hashtags_from_awareness(awareness, platform_key)
 
-        # 1. Live awareness signals (highest priority — most current)
-        awareness_tags = _parse_hashtags_from_awareness(awareness, platform_key)
-        hashtags.extend(awareness_tags)
-
-        # 2. pdim-stored hashtags from previous awareness cycles
-        if len(hashtags) < 4:
+            # Supplement with pdim-stored tags from prior cycles (additive only)
             pdim_tags = _pdim_hashtags(platform_key)
+            seen: set = set(hashtags)
             for t in pdim_tags:
-                if t not in hashtags:
+                if t not in seen and len(hashtags) < 8:
                     hashtags.append(t)
+                    seen.add(t)
 
-        # 3. Static defaults as fallback
-        if len(hashtags) < 2:
-            hashtags.extend(DEFAULT_HASHTAGS.get(platform_key, ["#maxbooster"]))
+            posting_time = _parse_timing_from_awareness(awareness, platform_key)
 
-        # Deduplicate, cap at 8
-        seen: set = set()
-        unique: List[str] = []
-        for h in hashtags:
-            if h not in seen:
-                seen.add(h)
-                unique.append(h)
-        hashtags = unique[:8]
-
-        # Persist awareness-discovered hashtags to pdim for next time
-        if awareness_tags:
-            _store_hashtags_to_pdim(platform_key, awareness_tags)
-
-        # ── Posting time resolution (awareness → static) ─────────────────────
-        posting_time = _parse_timing_from_awareness(awareness, platform_key)
-        if not posting_time:
+            # Persist newly discovered tags back to pdim
+            _store_hashtags_to_pdim(platform_key, hashtags)
+        else:
+            # ── True last resort: awareness absent (should not happen in production) ──
+            hashtags = _pdim_hashtags(platform_key) or DEFAULT_HASHTAGS.get(platform_key, ["#maxbooster"])
             today = datetime.date.today()
             posting_time = f"{today}{BEST_POSTING_TIMES.get(platform_key, 'T12:00:00Z')}"
 
         return DistributionResponse(
             caption=caption,
-            hashtags=hashtags,
+            hashtags=hashtags[:8],
             posting_time=posting_time,
         )
 

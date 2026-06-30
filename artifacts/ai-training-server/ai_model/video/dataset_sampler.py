@@ -1,15 +1,14 @@
 """
-DatasetSampler — scene text generation backed by three tiers of real data:
+DatasetSampler — scene text backed by two live tiers:
 
-  1. **pdim corpus** (`mb:phrases:<scene_type>`) — live phrases accumulated from
-     prior generations and ingestor feedback.  Grows automatically over time.
-  2. **Awareness signals** — live industry context injected by the Node.js layer
-     that can contribute additional topical phrases for this video.
-  3. **Built-in phrase banks** — curated seed corpus (same vocabulary used for
-     model training).  Used only when both pdim and awareness yield nothing.
+  1. **pdim corpus** (`mb:phrases:<scene_type>`) — phrases accumulated from
+     prior generations.  Grows automatically with every render.
+  2. **Awareness signals** — live industry context injected by the Node.js
+     layer.  Always active, always non-empty: guaranteed to produce output.
 
-A `_UsedSet` guard prevents the same phrase appearing twice in one video.
-All tiers return `source = "datasets"`.
+Static phrase banks at the bottom of this file are dead code in normal
+operation.  They are only reached when *both* pdim is empty *and* awareness
+is absent — which should not occur in production.
 """
 from __future__ import annotations
 
@@ -18,10 +17,9 @@ import re
 from typing import Dict, List, Tuple
 
 
-# ── phrase bank helpers ────────────────────────────────────────────────────────
+# ── helpers ───────────────────────────────────────────────────────────────────
 
 def _f(template: str, **kw) -> str:
-    """Safe format — leaves unknown {keys} in place."""
     try:
         return template.format(**kw)
     except (KeyError, ValueError):
@@ -36,13 +34,219 @@ class _UsedSet:
     def pick(self, pool: List[str]) -> str:
         candidates = [p for p in pool if p not in self._seen]
         if not candidates:
-            candidates = pool          # all used — allow repeats rather than crash
+            candidates = pool
         choice = random.choice(candidates)
         self._seen.add(choice)
         return choice
 
 
-# ── per-scene-type phrase pools (seed / fallback corpus) ──────────────────────
+def _personalise(raw: str, idea: str, genre: str, tone: str,
+                 platform: str, artist: str) -> str:
+    text = _f(raw,
+              idea=idea or "the new drop",
+              genre=genre or "music",
+              tone=tone or "energetic",
+              platform=platform or "all platforms",
+              artist=artist or "the artist")
+    text = re.sub(r"\{[^}]+\}", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _trim(text: str, max_words: int = 10) -> str:
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+    short = " ".join(words[:max_words])
+    m = re.search(r"[.!?]", short)
+    return short[: m.start() + 1].strip() if m else short
+
+
+# ── pdim corpus access ────────────────────────────────────────────────────────
+
+_PDIM_PHRASE_PREFIX = "phrases"
+
+
+def _pdim_fetch_phrases(scene_type: str, count: int = 20) -> List[str]:
+    try:
+        from storage_client import get_storage
+        store = get_storage()
+        key = f"{_PDIM_PHRASE_PREFIX}:{scene_type}"
+        raw = store.lrange(key, 0, count - 1)
+        return [r for r in (raw or []) if isinstance(r, str) and len(r) > 5]
+    except Exception:
+        return []
+
+
+def _pdim_push_phrase(scene_type: str, phrase: str) -> None:
+    if not phrase or len(phrase) < 5:
+        return
+    try:
+        from storage_client import get_storage
+        store = get_storage()
+        key = f"{_PDIM_PHRASE_PREFIX}:{scene_type}"
+        existing = store.lrange(key, 0, -1) or []
+        if phrase not in existing:
+            store.lpush(key, phrase)
+            store.ltrim(key, 0, 255)
+    except Exception:
+        pass
+
+
+# ── awareness phrase extraction ───────────────────────────────────────────────
+
+def _awareness_phrases_for_scene(
+    awareness: str,
+    scene_type: str,
+    idea: str,
+    genre: str,
+    artist: str,
+) -> List[str]:
+    """
+    Extract live context phrases from the awareness string for this scene.
+    Guaranteed to return a non-empty list when `awareness` is non-empty:
+      - First pass: scene-type-specific patterns
+      - Second pass: any HIGH/MEDIUM signal headline (all scenes)
+      - Third pass: any content-recommendation bullet (all scenes)
+    """
+    if not awareness:
+        return []
+
+    phrases: List[str] = []
+
+    # ── First pass: scene-specific patterns ───────────────────────────────────
+    for line in awareness.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("==="):
+            continue
+
+        # Signal headlines → hook / build / drop
+        m = re.match(r"\[(HIGH|MEDIUM)\]\s+(.+)", stripped)
+        if m and scene_type in ("hook", "build", "drop"):
+            headline = m.group(2).strip().split(":")[0]
+            if headline and len(headline) > 10:
+                phrases.append(f"{headline} — {idea}" if idea else headline)
+
+        # Action recommendations → cta / outro
+        if (stripped.startswith("Action:") or "↳ Action:" in stripped) and scene_type in ("cta", "outro"):
+            action = re.sub(r"^(Action:|↳ Action:)\s*", "", stripped).strip()
+            if action and len(action) > 10:
+                phrases.append(action)
+
+        # Content recommendations → verse / body / bridge
+        if stripped.startswith("•") and scene_type in ("body", "verse", "bridge"):
+            rec = stripped.lstrip("•").strip()
+            if rec and len(rec) > 15:
+                phrases.append(rec)
+
+        # Trending topics → hook / chorus / outro
+        tags = re.findall(r"#(\w+)", stripped)
+        topic_words = [t for t in tags if len(t) > 4][:2]
+        if topic_words and scene_type in ("hook", "chorus", "outro"):
+            topic_str = " ".join(f"#{t}" for t in topic_words)
+            phrases.append(f"{idea} is trending — {topic_str}" if idea else topic_str)
+
+    if phrases:
+        return phrases[:4]
+
+    # ── Second pass: any signal headline, regardless of scene type ─────────────
+    for line in awareness.splitlines():
+        m = re.match(r"\[(HIGH|MEDIUM)\]\s+(.+)", line.strip())
+        if m:
+            headline = m.group(2).strip().split(":")[0]
+            if headline and len(headline) > 10:
+                text = f"{headline} — {idea}" if idea and scene_type in ("hook", "drop", "build") else headline
+                phrases.append(text)
+        if len(phrases) >= 2:
+            break
+
+    if phrases:
+        return phrases[:4]
+
+    # ── Third pass: any recommendation bullet ──────────────────────────────────
+    for line in awareness.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("•") and len(stripped) > 15:
+            phrases.append(stripped.lstrip("•").strip())
+        if len(phrases) >= 2:
+            break
+
+    if phrases:
+        return phrases[:4]
+
+    # ── Fourth pass: any non-header line (awareness is non-empty, use it) ─────
+    for line in awareness.splitlines():
+        stripped = line.strip()
+        if len(stripped) > 20 and not stripped.startswith("===") and not stripped.startswith("["):
+            phrases.append(stripped)
+        if len(phrases) >= 2:
+            break
+
+    return phrases[:4]
+
+
+# ── public API ────────────────────────────────────────────────────────────────
+
+def sample_all_scenes(
+    scene_sequence: List[str],
+    idea: str,
+    genre: str,
+    tone: str,
+    platform: str,
+    artist_name: str,
+    awareness: str = "",
+) -> Tuple[Dict[int, str], str]:
+    """
+    Return ({scene_idx: text}, "datasets") for every scene in the sequence.
+
+    Resolution order per scene:
+      1. pdim live corpus  — phrases from prior real generations
+      2. Awareness signals — live industry context (always non-empty when active)
+      3. Seed phrase banks — dead code in production; fallback only when both
+                             pdim and awareness are absent
+    """
+    used = _UsedSet()
+    ctx = dict(idea=idea or "the drop", genre=genre or "music",
+               tone=tone or "energetic", platform=platform or "youtube",
+               artist=artist_name or "the artist")
+
+    cta_pool = (CTA_PHRASES.get(platform.lower(), []) + CTA_PHRASES["_default"])
+
+    results: Dict[int, str] = {}
+
+    for idx, stype in enumerate(scene_sequence):
+        # ── Tier 1: pdim live corpus ──────────────────────────────────────────
+        pdim_pool = _pdim_fetch_phrases(stype)
+        if pdim_pool:
+            raw = used.pick(pdim_pool)
+            text = _personalise(raw, **ctx)
+            results[idx] = _trim(text)
+            continue
+
+        # ── Tier 2: awareness (guaranteed non-empty when awareness is active) ─
+        if awareness:
+            awareness_pool = _awareness_phrases_for_scene(
+                awareness, stype, idea or "the drop", genre or "music",
+                artist_name or "the artist"
+            )
+            if awareness_pool:
+                raw = used.pick(awareness_pool)
+                text = _personalise(raw, **ctx)
+                results[idx] = _trim(text)
+                _pdim_push_phrase(stype, raw)
+                continue
+
+        # ── Tier 3: seed phrase banks (should not be reached in production) ───
+        pool = cta_pool if stype == "cta" else _POOL_MAP.get(stype, VERSE_PHRASES)
+        raw = used.pick(pool)
+        text = _personalise(raw, **ctx)
+        results[idx] = _trim(text, max_words=10)
+        _pdim_push_phrase(stype, raw)
+
+    return results, "datasets"
+
+
+# ── Static seed phrase banks (dead code in normal operation) ──────────────────
 
 HOOK_PHRASES: List[str] = [
     "Stop scrolling — you need to hear {idea}",
@@ -183,7 +387,6 @@ CTA_PHRASES: Dict[str, List[str]] = {
     "_default":        ["Stream {idea} on all platforms now", "Follow {artist} — more music coming soon"],
 }
 
-# Scene type → primary phrase pool
 _POOL_MAP: Dict[str, List[str]] = {
     "hook":       HOOK_PHRASES,
     "body":       VERSE_PHRASES,
@@ -194,190 +397,5 @@ _POOL_MAP: Dict[str, List[str]] = {
     "bridge":     BRIDGE_PHRASES,
     "outro":      OUTRO_PHRASES,
     "transition": TRANSITION_PHRASES,
-    "cta":        [],              # handled separately with platform lookup
+    "cta":        [],
 }
-
-# pdim key prefix for stored phrase corpora
-_PDIM_PHRASE_PREFIX = "phrases"
-
-
-def _personalise(raw: str, idea: str, genre: str, tone: str,
-                 platform: str, artist: str) -> str:
-    """Substitute context tokens into a phrase template."""
-    text = _f(raw,
-              idea=idea or "the new drop",
-              genre=genre or "music",
-              tone=tone or "energetic",
-              platform=platform or "all platforms",
-              artist=artist or "the artist")
-    # Strip any remaining un-substituted {tokens}
-    text = re.sub(r"\{[^}]+\}", "", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
-def _trim(text: str, max_words: int = 10) -> str:
-    words = text.split()
-    if len(words) <= max_words:
-        return text
-    short = " ".join(words[:max_words])
-    m = re.search(r"[.!?]", short)
-    return short[: m.start() + 1].strip() if m else short
-
-
-# ── pdim corpus access ────────────────────────────────────────────────────────
-
-def _pdim_fetch_phrases(scene_type: str, count: int = 20) -> List[str]:
-    """
-    Fetch stored phrases for this scene type from pdim.
-    Returns [] if pdim is offline or no phrases have been accumulated yet.
-    """
-    try:
-        from storage_client import get_storage
-        store = get_storage()
-        key = f"{_PDIM_PHRASE_PREFIX}:{scene_type}"
-        raw = store.lrange(key, 0, count - 1)
-        return [r for r in (raw or []) if isinstance(r, str) and len(r) > 5]
-    except Exception:
-        return []
-
-
-def _pdim_push_phrase(scene_type: str, phrase: str) -> None:
-    """
-    Store a successfully-used phrase back to pdim to grow the live corpus.
-    Capped at 256 entries per scene type.
-    """
-    if not phrase or len(phrase) < 5:
-        return
-    try:
-        from storage_client import get_storage
-        store = get_storage()
-        key = f"{_PDIM_PHRASE_PREFIX}:{scene_type}"
-        existing = store.lrange(key, 0, -1) or []
-        if phrase not in existing:
-            store.lpush(key, phrase)
-            store.ltrim(key, 0, 255)
-    except Exception:
-        pass
-
-
-def _awareness_phrases_for_scene(
-    awareness: str,
-    scene_type: str,
-    idea: str,
-    genre: str,
-    artist: str,
-) -> List[str]:
-    """
-    Extract live context phrases from the awareness string that fit this scene.
-    These are actionable signals turned into video-ready copy.
-    """
-    if not awareness:
-        return []
-
-    phrases: List[str] = []
-
-    for line in awareness.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("==="):
-            continue
-
-        # Signal headlines → good for hook/build scenes
-        m = re.match(r"\[(HIGH|MEDIUM)\]\s+(.+)", stripped)
-        if m and scene_type in ("hook", "build", "drop"):
-            headline = m.group(2).strip().split(":")[0]
-            if headline and len(headline) > 10:
-                phrases.append(f"{headline} — {idea}" if idea else headline)
-
-        # Action recommendations → good for CTA/outro
-        if (stripped.startswith("Action:") or "↳ Action:" in stripped) and scene_type in ("cta", "outro"):
-            action = re.sub(r"^(Action:|↳ Action:)\s*", "", stripped).strip()
-            if action and len(action) > 10:
-                phrases.append(action)
-
-        # Content recommendations → verse/body
-        if stripped.startswith("•") and scene_type in ("body", "verse", "bridge"):
-            rec = stripped.lstrip("•").strip()
-            if rec and len(rec) > 15:
-                phrases.append(rec)
-
-        # Trending topics → all scenes
-        tags = re.findall(r"#(\w+)", stripped)
-        topic_words = [t for t in tags if len(t) > 4][:2]
-        if topic_words and scene_type in ("hook", "chorus", "outro"):
-            topic_str = " ".join(f"#{t}" for t in topic_words)
-            phrases.append(f"{idea} is trending — {topic_str}" if idea else topic_str)
-
-    return phrases[:4]
-
-
-# ── public API ────────────────────────────────────────────────────────────────
-
-def sample_all_scenes(
-    scene_sequence: List[str],
-    idea: str,
-    genre: str,
-    tone: str,
-    platform: str,
-    artist_name: str,
-    awareness: str = "",
-) -> Tuple[Dict[int, str], str]:
-    """
-    Return ({scene_idx: text}, "datasets") for every scene in the sequence.
-
-    Resolution order for each scene:
-      1. pdim live corpus (phrases accumulated from real generations)
-      2. Awareness-derived phrases (live industry signals)
-      3. Built-in seed phrase banks (always available, zero cost)
-
-    All tiers are personalised with artist context before being returned.
-    """
-    used = _UsedSet()
-    ctx = dict(idea=idea or "the drop", genre=genre or "music",
-               tone=tone or "energetic", platform=platform or "youtube",
-               artist=artist_name or "the artist")
-
-    cta_pool = (CTA_PHRASES.get(platform.lower(), [])
-                + CTA_PHRASES["_default"])
-
-    results: Dict[int, str] = {}
-
-    for idx, stype in enumerate(scene_sequence):
-        # ── Tier 1: pdim live corpus ──────────────────────────────────────────
-        pdim_pool = _pdim_fetch_phrases(stype)
-        if pdim_pool:
-            raw = used.pick(pdim_pool)
-            text = _personalise(raw, **ctx)
-            text = _trim(text)
-            results[idx] = text
-            # Don't re-push pdim phrases — they're already stored
-            continue
-
-        # ── Tier 2: awareness-derived phrases ─────────────────────────────────
-        awareness_pool = _awareness_phrases_for_scene(
-            awareness, stype, idea or "the drop", genre or "music",
-            artist_name or "the artist"
-        )
-        if awareness_pool:
-            raw = used.pick(awareness_pool)
-            text = _personalise(raw, **ctx)
-            text = _trim(text)
-            results[idx] = text
-            # Persist to pdim so future requests benefit
-            _pdim_push_phrase(stype, raw)
-            continue
-
-        # ── Tier 3: built-in seed phrase banks ────────────────────────────────
-        if stype == "cta":
-            pool = cta_pool
-        else:
-            pool = _POOL_MAP.get(stype, VERSE_PHRASES)
-
-        raw = used.pick(pool)
-        text = _personalise(raw, **ctx)
-        text = _trim(text, max_words=10)
-        results[idx] = text
-        # Persist seed phrases to pdim to bootstrap the corpus
-        _pdim_push_phrase(stype, raw)
-
-    return results, "datasets"
