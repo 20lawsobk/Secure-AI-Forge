@@ -274,6 +274,16 @@ async def generate_script(req: ScriptGenerateRequest):
         tone=req.tone,
         awareness=req.awareness or "",
     ))
+    if not any(f.strip() for f in [result.hook, result.body, result.cta]):
+        _logger.warning(
+            "[generate-from-url] empty generatedContent for idea %r (platform=%s) — "
+            "model may be cold-starting; client should retry",
+            idea, platform,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="empty generatedContent — model warming up, please retry",
+        )
     return ScriptGenerateResponse(
         success=True,
         hook=result.hook,
@@ -361,6 +371,21 @@ async def generate_content(req: ContentGenerateRequest):
     caption = dist_result.caption if dist_result else f"{script_result.hook}\n{script_result.body}\n{script_result.cta}"
     hashtags = dist_result.hashtags if dist_result else []
 
+    # Detect empty generation — model hasn't warmed up yet or topic produced no
+    # usable output.  Return 503 so the client-side retry loop fires instead of
+    # silently surfacing a blank result.
+    generated_fields = [script_result.hook, script_result.body, script_result.cta, caption]
+    if not any(f.strip() for f in generated_fields):
+        _logger.warning(
+            "[generate-from-url] empty generatedContent for topic %r (platform=%s) — "
+            "model may be cold-starting; client should retry",
+            topic, platform,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="empty generatedContent — model warming up, please retry",
+        )
+
     return ContentGenerateResponse(
         success=True,
         platform=platform,
@@ -432,6 +457,21 @@ async def generate_multi_platform(req: MultiPlatformRequest):
             entry["sourceUrl"] = req.url
 
         generated_content.append(entry)
+
+    # If every platform slot came back empty the model is cold — signal retry
+    if generated_content and not any(
+        any(f.strip() for f in [e.get("hook", ""), e.get("body", ""), e.get("cta", "")])
+        for e in generated_content
+    ):
+        _logger.warning(
+            "[generate-from-url] empty generatedContent for topic %r — "
+            "model may be cold-starting; client should retry",
+            topic,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="empty generatedContent — model warming up, please retry",
+        )
 
     return MultiPlatformResponse(
         success=True,
