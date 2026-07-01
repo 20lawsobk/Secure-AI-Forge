@@ -526,7 +526,7 @@ router.post("/platform/daw/generate", async (req, res) => {
 });
 
 router.post("/platform/distribution/plan", async (req, res) => {
-  await enrichWithAwareness(req, "content");
+  await enrichWithAwareness(req, "distribution");
   await proxyRequest(req, res, "/platform/distribution/plan");
 });
 
@@ -607,6 +607,7 @@ router.post("/content/score", async (req, res) => {
 // ─── Analysis ──────────────────────────────────────────────────────────────
 
 router.post("/analyze", async (req, res) => {
+  await enrichWithAwareness(req, "content");
   await proxyRequest(req, res, "/api/analyze");
 });
 
@@ -621,10 +622,12 @@ router.post("/analyze/audio", async (req, res) => {
 // ─── Advertising & Engagement ──────────────────────────────────────────────
 
 router.post("/optimize/ad", async (req, res) => {
+  await enrichWithAwareness(req, "ad_copy");
   await proxyRequest(req, res, "/api/optimize/ad");
 });
 
 router.post("/predict/engagement", async (req, res) => {
+  await enrichWithAwareness(req, "content");
   await proxyRequest(req, res, "/api/predict/engagement");
 });
 

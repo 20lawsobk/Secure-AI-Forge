@@ -351,12 +351,16 @@ export default function VideoStudio() {
     if (!jobId || !isPolling) return;
     if (pollRef.current) clearInterval(pollRef.current);
 
+    let consecutiveErrors = 0;
+    const MAX_POLL_ERRORS = 5;
+
     const poll = async () => {
       try {
         const res = await fetch(`${BASE}/video-job/${jobId}`, {
           headers: authHeaders(),
         });
         if (!res.ok) return;
+        consecutiveErrors = 0;
         const data: PollResponse = await res.json();
         if (data.status === "done" || data.status === "error") {
           clearInterval(pollRef.current!);
@@ -376,7 +380,17 @@ export default function VideoStudio() {
           }
         }
       } catch {
-        // network blip — keep polling
+        consecutiveErrors++;
+        if (consecutiveErrors >= MAX_POLL_ERRORS) {
+          clearInterval(pollRef.current!);
+          setIsPolling(false);
+          toast({
+            title: "Connection lost",
+            description:
+              "Polling stopped after repeated network errors. Retry when ready.",
+            variant: "destructive",
+          });
+        }
       }
     };
 

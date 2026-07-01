@@ -12,7 +12,7 @@ import {
   LogOut,
   ChevronRight,
 } from "lucide-react";
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "framer-motion";
 import { useAuth } from "@/hooks/use-auth";
@@ -54,6 +54,12 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const { adminKey, setAdminKey, clearAdminKey } = useAuth();
   const [isAuthDialogOpen, setIsAuthDialogOpen] = useState(!adminKey);
   const [keyInput, setKeyInput] = useState("");
+
+  useEffect(() => {
+    const handler = () => setIsAuthDialogOpen(true);
+    window.addEventListener("openAuthDialog", handler);
+    return () => window.removeEventListener("openAuthDialog", handler);
+  }, []);
 
   const { data: health } = useQuery({
     queryKey: ["health"],

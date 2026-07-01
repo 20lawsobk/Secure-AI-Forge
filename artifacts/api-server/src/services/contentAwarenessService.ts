@@ -40,7 +40,8 @@ export type ContentGenerationMode =
   | "music"
   | "songwriting"
   | "content"
-  | "advertising";
+  | "advertising"
+  | "distribution";
 
 export type SignalUrgency = "critical" | "high" | "medium" | "low";
 export type SignalSource =
@@ -1736,6 +1737,10 @@ class ContentGenerationContextBuilder {
       music: ctx.lyricThemes.slice(0, 3),
       melody: ctx.lyricThemes.slice(0, 3),
       content: ctx.ctaPatterns.slice(0, 2),
+      distribution: [
+        ...ctx.viralHookPatterns.slice(0, 1),
+        ...ctx.ctaPatterns.slice(0, 2),
+      ],
     };
     for (const action of modeActions[mode] ?? ctx.ctaPatterns.slice(0, 2)) {
       lines.push(`Action: ${action}`);
@@ -1777,6 +1782,28 @@ class ContentGenerationContextBuilder {
       lines.push("=== PLATFORM NOTES ===");
       for (const note of ctx.platformAlgorithmNotes.slice(0, 4)) {
         lines.push(`• ${note}`);
+      }
+    }
+
+    // Distribution-specific release window signals — scanned by Python timing parser
+    if (mode === "distribution") {
+      lines.push("=== DISTRIBUTION WINDOW ===");
+      lines.push("• Playlist pitch lead: 7+ days before release date");
+      lines.push("• Release window: Friday drops maximise chart eligibility");
+      lines.push("• Editorial submission: via distributor 7 days pre-release");
+      const streamingSignals = ctx.platformSignals.filter((s) =>
+        ["spotify", "apple music", "youtube", "tidal"].includes(
+          s.platform.toLowerCase(),
+        ),
+      );
+      for (const sig of streamingSignals.slice(0, 3)) {
+        lines.push(`• ${sig.platform}: ${sig.trend}`);
+      }
+      const peakTimes = ctx.platformAlgorithmNotes.filter((n) =>
+        /peak|morning|evening|afternoon|9am|6pm|7pm|noon/i.test(n),
+      );
+      for (const t of peakTimes.slice(0, 2)) {
+        lines.push(`• Timing signal: ${t}`);
       }
     }
 

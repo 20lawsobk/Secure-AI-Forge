@@ -1,3 +1,4 @@
+import { Link } from "wouter";
 import {
   useGetGpuStatus,
   useGetHyperGpuStatus,
@@ -218,9 +219,12 @@ export default function GpuStatus() {
 
                 <div className="pt-2 border-t border-white/5 flex items-center justify-between text-xs text-muted-foreground">
                   <span>Engine: {hyper?.engine}</span>
-                  <span className="flex items-center gap-1 text-primary-foreground cursor-pointer hover:text-primary transition-colors">
+                  <Link
+                    to="/model"
+                    className="flex items-center gap-1 text-primary-foreground hover:text-primary transition-colors"
+                  >
                     View Architecture <ArrowUpRight className="w-3 h-3" />
-                  </span>
+                  </Link>
                 </div>
               </>
             )}

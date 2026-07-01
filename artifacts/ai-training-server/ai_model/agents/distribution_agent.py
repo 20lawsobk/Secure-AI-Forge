@@ -126,7 +126,7 @@ def _parse_timing_from_awareness(awareness: str, platform: str) -> str:
         return ""
 
     plat_lower = platform.lower()
-    today = datetime.date.today()
+    today = datetime.datetime.now(datetime.timezone.utc).date()
 
     # 1. Dedicated PLATFORM TIMING section
     in_timing = False

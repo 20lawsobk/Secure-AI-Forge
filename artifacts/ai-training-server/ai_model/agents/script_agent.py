@@ -48,11 +48,12 @@ class ScriptResponse:
 
 
 def _clean_text(text: str) -> str:
-    text = re.sub(r"<[A-Z_]+>", "", text)
-    text = re.sub(r"<UNK>", "", text)
-    text = re.sub(r"<PAD>", "", text)
-    text = re.sub(r"<BOS>", "", text)
-    text = re.sub(r"<EOS>", "", text)
+    # Remove any XML-style control tokens — upper-case, lower-case, or mixed
+    # e.g. <UNK>, <pad>, <|endoftext|>, <extra_id_0>
+    text = re.sub(r"<[A-Za-z_|][A-Za-z0-9_|/]*>", "", text)
+    # Remove numeric special tokens like [UNK], [PAD], [CLS], [SEP], [MASK]
+    text = re.sub(r"\[(?:UNK|PAD|CLS|SEP|MASK|BOS|EOS)\]", "", text, flags=re.IGNORECASE)
+    # Collapse whitespace left by removed tokens
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
