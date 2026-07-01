@@ -544,6 +544,41 @@ def verify_admin(x_admin_key: str = Header(None)):
             _release(conn, error=True)
         raise HTTPException(status_code=500, detail=f"Auth error: {e}")
 
+# ─── Admin content flywheel ───────────────────────────────────────────────────
+
+_flywheel_ingestor: Any = None
+_flywheel_init_lock = threading.Lock()
+
+
+def _get_flywheel() -> Any:
+    global _flywheel_ingestor
+    if _flywheel_ingestor is not None:
+        return _flywheel_ingestor
+    with _flywheel_init_lock:
+        if _flywheel_ingestor is None:
+            try:
+                from workers.admin_flywheel import FlywheelIngestor  # noqa: PLC0415
+                _flywheel_ingestor = FlywheelIngestor()
+            except Exception:
+                pass
+    return _flywheel_ingestor
+
+
+def _fw_ingest(key: dict, content_type: str, payload: dict, meta: dict) -> None:
+    """
+    Fire-and-forget admin flywheel ingestion.
+    Only stores if the request comes from an admin key. Never raises.
+    """
+    if "admin" not in (key.get("scopes") or []):
+        return
+    fw = _get_flywheel()
+    if fw is None:
+        return
+    try:
+        fw.ingest(content_type, payload, meta, str(key.get("id", "admin")))
+    except Exception:
+        pass
+
 # ─── Pydantic Schemas ────────────────────────────────────────────────────────
 
 class CreateApiKeyRequest(BaseModel):
@@ -1812,7 +1847,7 @@ async def generate_content(req: ContentRequest, _key = Depends(require_scope("ge
                 detail="empty generatedContent — model warming up, please retry",
             )
 
-        return {
+        _result = {
             "success": True,
             "platform": platform,
             "caption": dist_result.caption,
@@ -1823,6 +1858,11 @@ async def generate_content(req: ContentRequest, _key = Depends(require_scope("ge
             "source": getattr(script_result, "source", "template"),
             "processing_time_ms": (time.time() - start) * 1000,
         }
+        _fw_ingest(_key, "scripts", _result, {
+            "topic": topic, "platform": platform,
+            "tone": req.tone, "awareness": req.awareness,
+        })
+        return _result
     except HTTPException:
         raise
     except asyncio.TimeoutError:
@@ -2169,7 +2209,7 @@ async def platform_social_generate(req: PlatformSocialRequest, _key = Depends(re
         variant["variant"] = i + 1
         variants.append(variant)
 
-    return {
+    _result = {
         "success": True,
         "user_id": req.user_id,
         "platform": platform,
@@ -2179,6 +2219,11 @@ async def platform_social_generate(req: PlatformSocialRequest, _key = Depends(re
         "model_ready": _model_ready,
         "processing_time_ms": round((time.time() - start) * 1000, 1),
     }
+    _fw_ingest(_key, "social", _result, {
+        "topic": req.topic, "platform": platform,
+        "tone": personalized_tone, "awareness": req.awareness,
+    })
+    return _result
 
 
 @app.post("/platform/social/autopilot")
@@ -2325,7 +2370,7 @@ async def platform_daw_generate(req: PlatformDAWRequest, _key = Depends(require_
             idea=topic, platform="youtube", tone=tone, awareness=req.awareness,
         )))
 
-        return {
+        _result = {
             "success": True,
             "user_id": req.user_id,
             "mode": req.mode,
@@ -2344,6 +2389,12 @@ async def platform_daw_generate(req: PlatformDAWRequest, _key = Depends(require_
             "source": getattr(script, "source", "model"),
             "processing_time_ms": round((time.time() - start) * 1000, 1),
         }
+        _fw_ingest(_key, "daw", _result, {
+            "genre": req.genre, "mood": req.mood, "mode": req.mode,
+            "bpm": req.bpm, "key": req.key, "awareness": req.awareness,
+            "context_prompt": context_prompt,
+        })
+        return _result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2371,7 +2422,7 @@ async def platform_distribution_plan(req: PlatformDistributionRequest, _key = De
             platform="spotify", goal="streams",
             awareness=req.awareness,
         )))
-        return {
+        _result = {
             "success": True,
             "user_id": req.user_id,
             "track": req.track_title,
@@ -2395,6 +2446,12 @@ async def platform_distribution_plan(req: PlatformDistributionRequest, _key = De
             "source": getattr(dist, "source", "model"),
             "processing_time_ms": round((time.time() - start) * 1000, 1),
         }
+        _fw_ingest(_key, "distribution", _result, {
+            "track": req.track_title, "genre": req.genre,
+            "target_platforms": req.target_platforms,
+            "awareness": req.awareness,
+        })
+        return _result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2515,7 +2572,7 @@ async def platform_video_generate(req: PlatformVideoRequest, _key = Depends(requ
             or f"Bold '{req.topic.upper()}' text over {req.style} background with {personalized_tone} color grading"
         )
 
-        return {
+        _result = {
             "success": True,
             "user_id": req.user_id,
             "title": f"{req.topic} — {req.style.capitalize()} Video",
@@ -2536,6 +2593,12 @@ async def platform_video_generate(req: PlatformVideoRequest, _key = Depends(requ
             "source": getattr(script_result, "source", "model"),
             "processing_time_ms": round((time.time() - start) * 1000, 1),
         }
+        _fw_ingest(_key, "video", _result, {
+            "topic": req.topic, "platform": platform, "style": req.style,
+            "tone": personalized_tone, "awareness": req.awareness,
+            "duration_seconds": req.duration_seconds,
+        })
+        return _result
     except asyncio.TimeoutError:
         raise HTTPException(
             status_code=503,
