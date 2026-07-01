@@ -562,6 +562,7 @@ class ContentRequest(BaseModel):
     tone: str = "energetic"
     goal: str = "growth"
     include_hashtags: bool = True
+    awareness: str = ""
 
 # ─── Startup ─────────────────────────────────────────────────────────────────
 
@@ -1707,10 +1708,12 @@ async def generate_content(req: ContentRequest, _key = Depends(require_scope("ge
         from ai_model.agents.distribution_agent import DistributionRequest
         script_result = await _in_thread(lambda: _script_agent.run(ScriptRequest(
             idea=topic, platform=platform, goal=req.goal, tone=req.tone,
+            awareness=req.awareness,
         )))
         full_script = f"{script_result.hook}\n{script_result.body}\n{script_result.cta}"
         dist_result = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
             script=full_script, platform=platform, goal=req.goal,
+            awareness=req.awareness,
         )))
         return script_result, dist_result
 
@@ -1964,6 +1967,7 @@ class PlatformSocialRequest(BaseModel):
     style_tags: List[str] = []
     include_hashtags: bool = True
     num_variants: int = Field(1, ge=1, le=5)
+    awareness: str = ""
 
 
 class PlatformDAWRequest(BaseModel):
@@ -1975,6 +1979,7 @@ class PlatformDAWRequest(BaseModel):
     key: Optional[str] = None
     reference_track: Optional[str] = None
     context: Optional[str] = None
+    awareness: str = ""
 
 
 class PlatformAutopilotRequest(BaseModel):
@@ -1982,6 +1987,7 @@ class PlatformAutopilotRequest(BaseModel):
     platform: str = "instagram"
     recent_posts: List[dict] = []
     target_metric: str = "engagement"   # engagement | reach | conversions
+    awareness: str = ""
 
 
 class PlatformDistributionRequest(BaseModel):
@@ -1991,6 +1997,7 @@ class PlatformDistributionRequest(BaseModel):
     release_date: Optional[str] = None
     target_platforms: List[str] = ["spotify", "apple_music", "tidal"]
     bio: Optional[str] = None
+    awareness: str = ""
 
 
 class PlatformVideoRequest(BaseModel):
@@ -2003,6 +2010,7 @@ class PlatformVideoRequest(BaseModel):
     duration_seconds: int = Field(30, ge=5, le=300)
     aspect_ratio: str = "16:9"          # 16:9 | 9:16 | 1:1 | 4:5
     include_captions: bool = True
+    awareness: str = ""
 
 
 def _build_personalized_tone(user_id: str, platform: str, base_tone: str) -> str:
@@ -2037,60 +2045,53 @@ async def platform_social_generate(req: PlatformSocialRequest, _key = Depends(re
 
     variants = []
     variant: dict[str, Any]
+    if not _model_ready or _script_agent is None:
+        raise HTTPException(
+            status_code=503,
+            detail="empty generatedContent — model warming up, please retry",
+        )
+
     for i in range(req.num_variants):
-        if not _model_ready or _script_agent is None:
-            variant = {
-                "hook": f"🎵 {req.topic} — take {i + 1}",
-                "body": f"Your audience wants {req.topic}. Give it to them.",
-                "cta": "Drop a comment below 👇",
-                "caption": f"{req.topic} #{platform}",
-                "hashtags": [f"#{req.topic.replace(' ', '')}", f"#{platform}", "#MaxBooster"],
-                "source": "template",
+        try:
+            from ai_model.agents.script_agent import ScriptRequest
+            from ai_model.agents.distribution_agent import DistributionRequest
+
+            async def _run_variant():
+                s = await _in_thread(lambda: _script_agent.run(ScriptRequest(
+                    idea=req.topic, platform=platform,
+                    goal=req.goal, tone=personalized_tone,
+                    awareness=req.awareness,
+                )))
+                d = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
+                    script=f"{s.hook}\n{s.body}\n{s.cta}",
+                    platform=platform, goal=req.goal,
+                    awareness=req.awareness,
+                )))
+                return s, d
+
+            script, dist = await asyncio.wait_for(_run_variant(), timeout=20.0)
+            if not any([script.hook.strip(), script.body.strip(), script.cta.strip()]):
+                raise HTTPException(
+                    status_code=503,
+                    detail="empty generatedContent — model warming up, please retry",
+                )
+            variant: dict[str, Any] = {
+                "hook": script.hook,
+                "body": script.body,
+                "cta": script.cta,
+                "caption": dist.caption,
+                "hashtags": dist.hashtags if req.include_hashtags else [],
+                "source": getattr(script, "source", "model"),
             }
-        else:
-            try:
-                from ai_model.agents.script_agent import ScriptRequest
-                from ai_model.agents.distribution_agent import DistributionRequest
-
-                async def _run_variant():
-                    s = await _in_thread(lambda: _script_agent.run(ScriptRequest(
-                        idea=req.topic, platform=platform,
-                        goal=req.goal, tone=personalized_tone,
-                    )))
-                    d = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
-                        script=f"{s.hook}\n{s.body}\n{s.cta}",
-                        platform=platform, goal=req.goal,
-                    )))
-                    return s, d
-
-                script, dist = await asyncio.wait_for(_run_variant(), timeout=20.0)
-                variant = {
-                    "hook": script.hook,
-                    "body": script.body,
-                    "cta": script.cta,
-                    "caption": dist.caption,
-                    "hashtags": dist.hashtags if req.include_hashtags else [],
-                    "source": getattr(script, "source", "model"),
-                }
-            except asyncio.TimeoutError:
-                variant = {
-                    "hook": f"🎵 {req.topic} — take {i + 1}",
-                    "body": f"Your audience wants {req.topic}. Give it to them.",
-                    "cta": "Drop a comment below 👇",
-                    "caption": f"{req.topic} #{platform}",
-                    "hashtags": [f"#{req.topic.replace(' ', '')}", f"#{platform}", "#MaxBooster"],
-                    "source": "template_timeout",
-                }
-            except Exception as e:
-                variant = {
-                    "hook": f"🎵 {req.topic}",
-                    "body": req.topic,
-                    "cta": "Follow for more",
-                    "caption": req.topic,
-                    "hashtags": [],
-                    "source": "fallback",
-                    "error": str(e),
-                }
+        except HTTPException:
+            raise
+        except asyncio.TimeoutError:
+            raise HTTPException(
+                status_code=503,
+                detail="empty generatedContent — generation timed out, please retry",
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
         variant["variant"] = i + 1
         variants.append(variant)
 
@@ -2139,36 +2140,40 @@ async def platform_social_autopilot(req: PlatformAutopilotRequest, _key = Depend
     dominant_tags = list(dict.fromkeys(top_tags))[:3]
     dominant_type = max(set(top_types), key=top_types.count) if top_types else "post"
 
-    # Use the model to suggest next actions
-    next_topics = []
-    if _model_ready and _script_agent:
-        try:
-            from ai_model.agents.script_agent import ScriptRequest
-            for tag in (dominant_tags or ["music", "artist", "studio"])[:2]:
-                s = await _in_thread(lambda t=tag: _script_agent.run(ScriptRequest(
-                    idea=t, platform=platform, goal=req.target_metric, tone="authentic",
-                )))
-                next_topics.append({
-                    "topic": tag,
-                    "hook": s.hook,
-                    "cta": s.cta,
-                    "source": "model",
-                })
-        except Exception:
-            next_topics = [{"topic": t, "hook": f"Post about {t}", "cta": "Engage now", "source": "template"}
-                           for t in (dominant_tags or ["music"])]
-    else:
-        next_topics = [{"topic": t, "hook": f"Post about {t}", "cta": "Engage now", "source": "template"}
-                       for t in (dominant_tags or ["music", "studio"])]
+    # Use the model to suggest next actions — 503 if model not ready
+    if not _model_ready or _script_agent is None:
+        raise HTTPException(
+            status_code=503,
+            detail="empty generatedContent — model warming up, please retry",
+        )
 
-    # Post schedule recommendation
-    schedule = {
-        "instagram": ["9am", "12pm", "7pm"],
-        "tiktok": ["7am", "1pm", "9pm"],
-        "twitter": ["8am", "12pm", "5pm", "9pm"],
-        "youtube": ["12pm", "3pm"],
-        "facebook": ["9am", "3pm"],
-    }.get(platform, ["9am", "3pm", "7pm"])
+    next_topics = []
+    schedule: list[str] = []
+    try:
+        from ai_model.agents.script_agent import ScriptRequest
+        from ai_model.agents.distribution_agent import DistributionRequest
+        for tag in (dominant_tags or ["music", "artist", "studio"])[:2]:
+            s = await _in_thread(lambda t=tag: _script_agent.run(ScriptRequest(
+                idea=t, platform=platform, goal=req.target_metric, tone="authentic",
+                awareness=req.awareness,
+            )))
+            next_topics.append({
+                "topic": tag,
+                "hook": s.hook,
+                "cta": s.cta,
+                "source": getattr(s, "source", "model"),
+            })
+        # Get posting time from distribution agent instead of static dict
+        d = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
+            script=next_topics[0]["hook"] if next_topics else platform,
+            platform=platform, goal=req.target_metric,
+            awareness=req.awareness,
+        )))
+        schedule = [d.posting_time] if d.posting_time else []
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
     return {
         "success": True,
@@ -2229,21 +2234,10 @@ async def platform_daw_generate(req: PlatformDAWRequest, _key = Depends(require_
         tone = req.mood
 
     if not _model_ready or _script_agent is None:
-        return {
-            "success": True,
-            "user_id": req.user_id,
-            "mode": req.mode,
-            "genre": req.genre,
-            "mood": req.mood,
-            "output": {
-                "main": f"[{req.mode.upper()}] {context_prompt}",
-                "verse": f"Verse: Building the foundation of {req.genre}...",
-                "chorus": f"Hook: Feel the {req.mood} energy rise...",
-                "bridge": "Bridge: The turn that makes them stay...",
-            },
-            "source": "template",
-            "processing_time_ms": round((time.time() - start) * 1000, 1),
-        }
+        raise HTTPException(
+            status_code=503,
+            detail="empty generatedContent — model warming up, please retry",
+        )
 
     try:
         from ai_model.agents.script_agent import ScriptRequest
@@ -2251,6 +2245,7 @@ async def platform_daw_generate(req: PlatformDAWRequest, _key = Depends(require_
 
         script = await _in_thread(lambda: _script_agent.run(ScriptRequest(
             idea=topic, platform="youtube", goal=goal, tone=tone,
+            awareness=req.awareness,
         )))
         visual = await _in_thread(lambda: _visual_spec_agent.run(VisualSpecRequest(
             idea=topic, platform="youtube", tone=tone,
@@ -2289,29 +2284,10 @@ async def platform_distribution_plan(req: PlatformDistributionRequest, _key = De
     start = time.time()
 
     if not _model_ready or _distribution_agent is None:
-        # Template response
-        return {
-            "success": True,
-            "user_id": req.user_id,
-            "track": req.track_title,
-            "plan": {
-                "pitch": f"'{req.track_title}' — a fresh {req.genre} release ready for streaming.",
-                "target_platforms": req.target_platforms,
-                "release_window": "Friday release recommended (global streaming peak)",
-                "pre_release_steps": [
-                    "Submit to DistroKid/TuneCore 7 days before release",
-                    "Pitch to Spotify editorial 7 days prior",
-                    "Post 3 teaser clips on TikTok the week before",
-                    "Create Instagram countdown story",
-                ],
-                "post_release": [
-                    "Pin release post on all platforms",
-                    "Share behind-the-scenes studio content",
-                    "Engage with first 50 comments within 1 hour",
-                ],
-            },
-            "source": "template",
-        }
+        raise HTTPException(
+            status_code=503,
+            detail="empty generatedContent — model warming up, please retry",
+        )
 
     try:
         from ai_model.agents.distribution_agent import DistributionRequest
@@ -2319,6 +2295,7 @@ async def platform_distribution_plan(req: PlatformDistributionRequest, _key = De
         dist = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
             script=f"New {req.genre} track: '{req.track_title}'. Artist: {bio_context}.",
             platform="spotify", goal="streams",
+            awareness=req.awareness,
         )))
         return {
             "success": True,
@@ -2404,40 +2381,10 @@ async def platform_video_generate(req: PlatformVideoRequest, _key = Depends(requ
     scene_count = max(3, req.duration_seconds // 10)
 
     if not _model_ready or _script_agent is None:
-        scenes = [
-            {
-                "scene": i + 1,
-                "duration_seconds": req.duration_seconds // scene_count,
-                "description": f"Scene {i + 1} — {req.topic}",
-                "visual_direction": f"{req.style.capitalize()} shot of {req.topic}",
-                "narration": f"Part {i + 1} of your {req.topic} story.",
-            }
-            for i in range(scene_count)
-        ]
-        caption_blocks = [
-            {
-                "start_sec": i * (req.duration_seconds // scene_count),
-                "end_sec": (i + 1) * (req.duration_seconds // scene_count),
-                "text": f"Scene {i + 1}: {req.topic}",
-            }
-            for i in range(scene_count)
-        ] if req.include_captions else []
-        return {
-            "success": True,
-            "user_id": req.user_id,
-            "title": f"{req.topic} — {req.style.capitalize()} Video",
-            "hook": f"You won't believe what {req.topic} can do.",
-            "script": f"Welcome to this {req.style} video about {req.topic}. " * 3,
-            "scenes": scenes,
-            "captions": caption_blocks,
-            "hashtags": [f"#{req.topic.replace(' ', '')}", f"#{platform}", "#video"],
-            "thumbnail_concept": f"Bold '{req.topic.upper()}' text over a {req.style} background",
-            "distribution": {"platform": platform, "goal": req.goal, "recommended_post_time": "peak hours"},
-            "duration_seconds": req.duration_seconds,
-            "aspect_ratio": req.aspect_ratio,
-            "source": "template",
-            "processing_time_ms": round((time.time() - start) * 1000, 1),
-        }
+        raise HTTPException(
+            status_code=503,
+            detail="empty generatedContent — model warming up, please retry",
+        )
 
     async def _run_model_inference():
         from ai_model.agents.script_agent import ScriptRequest
@@ -2446,6 +2393,7 @@ async def platform_video_generate(req: PlatformVideoRequest, _key = Depends(requ
 
         script_result = await _in_thread(lambda: _script_agent.run(ScriptRequest(
             idea=req.topic, platform=platform, goal=req.goal, tone=personalized_tone,
+            awareness=req.awareness,
         )))
         full_script = f"{script_result.hook}\n{script_result.body}\n{script_result.cta}"
 
@@ -2455,44 +2403,9 @@ async def platform_video_generate(req: PlatformVideoRequest, _key = Depends(requ
 
         dist_result = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
             script=full_script, platform=platform, goal=req.goal,
+            awareness=req.awareness,
         )))
         return script_result, full_script, visual_result, dist_result
-
-    def _build_template_response(source="template"):
-        scenes = [
-            {
-                "scene": i + 1,
-                "duration_seconds": req.duration_seconds // scene_count,
-                "description": f"Scene {i + 1} — {req.topic}",
-                "visual_direction": f"{req.style.capitalize()} shot of {req.topic}",
-                "narration": f"Part {i + 1} of your {req.topic} story.",
-            }
-            for i in range(scene_count)
-        ]
-        caption_blocks = [
-            {
-                "start_sec": i * (req.duration_seconds // scene_count),
-                "end_sec": (i + 1) * (req.duration_seconds // scene_count),
-                "text": f"Scene {i + 1}: {req.topic}",
-            }
-            for i in range(scene_count)
-        ] if req.include_captions else []
-        return {
-            "success": True,
-            "user_id": req.user_id,
-            "title": f"{req.topic} — {req.style.capitalize()} Video",
-            "hook": f"You won't believe what {req.topic} can do.",
-            "script": f"Welcome to this {req.style} video about {req.topic}. " * 3,
-            "scenes": scenes,
-            "captions": caption_blocks,
-            "hashtags": [f"#{req.topic.replace(' ', '')}", f"#{platform}", "#video"],
-            "thumbnail_concept": f"Bold '{req.topic.upper()}' text over a {req.style} background",
-            "distribution": {"platform": platform, "goal": req.goal, "recommended_post_time": "peak hours"},
-            "duration_seconds": req.duration_seconds,
-            "aspect_ratio": req.aspect_ratio,
-            "source": source,
-            "processing_time_ms": round((time.time() - start) * 1000, 1),
-        }
 
     try:
         script_result, full_script, visual_result, dist_result = await asyncio.wait_for(
