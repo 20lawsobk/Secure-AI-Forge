@@ -15,7 +15,10 @@ const MODEL_API_BASE = `http://localhost:${MODEL_API_PORT}`;
 // trusted gateway, so injecting the env key here is safe. External
 // callers never reach this server directly in dev.
 const _SERVER_FALLBACK_KEY =
-  process.env.AI_TRAINING_KEY_PROD || process.env.ADMIN_KEY || "";
+  process.env.AI_SERVER_KEY ||
+  process.env.AI_TRAINING_KEY_PROD ||
+  process.env.ADMIN_KEY ||
+  "";
 
 // ─── Keep-alive connection pool ─────────────────────────────────────────────
 // Reuse TCP connections to the Python server instead of opening a new socket

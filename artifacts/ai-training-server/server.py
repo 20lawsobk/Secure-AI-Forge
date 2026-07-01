@@ -448,8 +448,9 @@ def _init_ai_model():
 
 ADMIN_KEY_ENV          = os.environ.get("ADMIN_KEY")
 AI_TRAINING_KEY_PROD   = os.environ.get("AI_TRAINING_KEY_PROD")
+AI_SERVER_KEY          = os.environ.get("AI_SERVER_KEY")
 
-_ENV_BYPASS_KEYS: set = {k for k in [ADMIN_KEY_ENV, AI_TRAINING_KEY_PROD] if k}
+_ENV_BYPASS_KEYS: set = {k for k in [ADMIN_KEY_ENV, AI_TRAINING_KEY_PROD, AI_SERVER_KEY] if k}
 
 def verify_api_key(x_api_key: str = Header(None), x_admin_key: str = Header(None)):
     """Verify API key from X-Api-Key or X-Admin-Key header."""
