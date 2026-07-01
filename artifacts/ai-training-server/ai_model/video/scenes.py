@@ -111,6 +111,7 @@ class SceneConfig:
     progress_color: str = "0xe94560"
     retrieval_conditioned: bool = True
     brand: str = ""
+    diffusion_meta: Optional[dict] = None
 
 
 def _build_text_filter(te: TextElement, scene_dur: float) -> List[str]:
@@ -222,29 +223,57 @@ def _np_plasma(c1: tuple, c2: tuple, w: int, h: int, style: str = "plasma"):
 def _pil_bg_frame(scene: SceneConfig, width: int, height: int) -> str:
     """
     Generate a static background PNG using PIL + NumPy.
-    Fast (<0.2 s) — no ffmpeg geq per-frame computation needed.
-    Film grain is baked into the PNG via NumPy noise so there is no overhead
-    at encode time.
+
+    Pipeline (each step is additive / non-breaking):
+      1. Try MaxCore Diffusion (awareness-conditioned latent DiT) — opt-in via
+         scene.diffusion_meta.  Falls through silently on any error.
+      2. Procedural gradient / plasma / aurora background (always available).
+      3. RCGS retrieval conditioning — grounds frame in real assets.
+      4. Film grain baked in via NumPy.
     """
     import numpy as np
     from PIL import Image
     os.makedirs(TEMP_DIR, exist_ok=True)
     bg_path = os.path.join(TEMP_DIR, f"bg_{uuid.uuid4().hex[:8]}.png")
 
-    try:
-        c1 = _parse_hex_color(scene.bg_color1)
-        c2 = _parse_hex_color(scene.bg_color2)
-    except Exception:
-        c1, c2 = (26, 26, 46), (22, 33, 62)
+    arr: Optional[np.ndarray] = None
 
-    bg_type = getattr(scene, "bg_type", "gradient")
-    if bg_type == "radial":
-        arr = _np_radial(c1, c2, width, height)
-    elif bg_type in ("plasma", "aurora"):
-        arr = _np_plasma(c1, c2, width, height, bg_type)
-    else:
-        arr = _np_gradient(c1, c2, width, height)
+    # ── Step 1: MaxCore Neural Diffusion background ────────────────────────────
+    dmeta = getattr(scene, "diffusion_meta", None)
+    if dmeta is not None:
+        try:
+            from .diffusion.maxcore_diffusion import get_diffusion_frame
+            diff_frame = get_diffusion_frame(
+                idea=dmeta.get("idea", ""),
+                platform=dmeta.get("platform", "tiktok"),
+                tone=dmeta.get("tone", "hype"),
+                awareness=dmeta.get("awareness", ""),
+                width=width,
+                height=height,
+                context=dmeta,
+            )
+            if diff_frame is not None and diff_frame.shape == (height, width, 3):
+                arr = diff_frame
+        except Exception:
+            pass
 
+    # ── Step 2: Procedural fallback ────────────────────────────────────────────
+    if arr is None:
+        try:
+            c1 = _parse_hex_color(scene.bg_color1)
+            c2 = _parse_hex_color(scene.bg_color2)
+        except Exception:
+            c1, c2 = (26, 26, 46), (22, 33, 62)
+
+        bg_type = getattr(scene, "bg_type", "gradient")
+        if bg_type == "radial":
+            arr = _np_radial(c1, c2, width, height)
+        elif bg_type in ("plasma", "aurora"):
+            arr = _np_plasma(c1, c2, width, height, bg_type)
+        else:
+            arr = _np_gradient(c1, c2, width, height)
+
+    # ── Step 3: RCGS retrieval conditioning ───────────────────────────────────
     if getattr(scene, "retrieval_conditioned", True):
         try:
             from ai_model.retrieval.rcgs import condition_background
