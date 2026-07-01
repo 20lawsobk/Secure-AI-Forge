@@ -92,12 +92,35 @@ class StorageClient:
             try:
                 ok = self.ping()
                 if ok != self._available:
+                    prev = self._available
                     self._available = ok
                     status = "ONLINE" if ok else "OFFLINE"
                     logger.info(f"[Storage] Server is now {status}")
+                    if ok and not prev:
+                        self._flush_fallback_to_storage()
             except Exception:
                 self._available = False
             time.sleep(30)
+
+    def _flush_fallback_to_storage(self) -> None:
+        """Re-sync in-memory fallback data to storage after reconnect."""
+        with self._lock:
+            snapshot = dict(self._fallback)
+        if not snapshot:
+            return
+        flushed = 0
+        for ns_key, value in snapshot.items():
+            try:
+                serialized = json.dumps(value) if not isinstance(value, str) else value
+                result = self._exec("SET", ns_key, serialized)
+                if result is not None:
+                    with self._lock:
+                        self._fallback.pop(ns_key, None)
+                    flushed += 1
+            except Exception as e:
+                logger.debug(f"[Storage] flush error for {ns_key}: {e}")
+        if flushed:
+            logger.info(f"[Storage] Re-synced {flushed}/{len(snapshot)} fallback entries to storage")
 
     @property
     def is_available(self) -> bool:

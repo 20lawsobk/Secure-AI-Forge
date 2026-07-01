@@ -42,6 +42,9 @@ export default function Training() {
   const qc = useQueryClient();
   const logContainerRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
+  const [epochs, setEpochs] = useState(10);
+  const [batchSize, setBatchSize] = useState(8);
+  const [learningRate, setLearningRate] = useState(0.0005);
 
   const headers = {
     "Content-Type": "application/json",
@@ -86,9 +89,9 @@ export default function Training() {
         method: "POST",
         headers,
         body: JSON.stringify({
-          epochs: 10,
-          batch_size: 8,
-          learning_rate: 0.0005,
+          epochs,
+          batch_size: batchSize,
+          learning_rate: learningRate,
         }),
       }),
     onSuccess: () => {
@@ -184,34 +187,81 @@ export default function Training() {
             Monitor and control transformer curriculum training.
           </p>
         </div>
-        <div className="flex gap-3">
-          <Button
-            disabled={isRunning(status?.state) || startMut.isPending}
-            onClick={() => startMut.mutate()}
-            className="bg-primary hover:bg-primary/90 text-white shadow-lg shadow-primary/20"
-          >
-            {startMut.isPending ? (
-              "Starting..."
-            ) : (
-              <>
-                <Play className="w-4 h-4 mr-2" /> Start Run
-              </>
-            )}
-          </Button>
-          <Button
-            variant="destructive"
-            disabled={!isRunning(status?.state) || stopMut.isPending}
-            onClick={() => stopMut.mutate()}
-            className="shadow-lg shadow-destructive/20"
-          >
-            {stopMut.isPending ? (
-              "Stopping..."
-            ) : (
-              <>
-                <Square className="w-4 h-4 mr-2" /> Stop
-              </>
-            )}
-          </Button>
+        <div className="flex flex-col items-end gap-2">
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <label className="flex items-center gap-1">
+              Epochs
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={epochs}
+                disabled={isRunning(status?.state)}
+                onChange={(e) =>
+                  setEpochs(Math.max(1, parseInt(e.target.value) || 1))
+                }
+                className="w-14 ml-1 px-2 py-0.5 rounded bg-white/5 border border-white/10 text-white text-xs text-center disabled:opacity-40 focus:outline-none focus:border-primary"
+              />
+            </label>
+            <label className="flex items-center gap-1">
+              Batch
+              <input
+                type="number"
+                min={1}
+                max={256}
+                value={batchSize}
+                disabled={isRunning(status?.state)}
+                onChange={(e) =>
+                  setBatchSize(Math.max(1, parseInt(e.target.value) || 1))
+                }
+                className="w-14 ml-1 px-2 py-0.5 rounded bg-white/5 border border-white/10 text-white text-xs text-center disabled:opacity-40 focus:outline-none focus:border-primary"
+              />
+            </label>
+            <label className="flex items-center gap-1">
+              LR
+              <input
+                type="number"
+                min={0.00001}
+                max={0.1}
+                step={0.0001}
+                value={learningRate}
+                disabled={isRunning(status?.state)}
+                onChange={(e) =>
+                  setLearningRate(parseFloat(e.target.value) || 0.0005)
+                }
+                className="w-20 ml-1 px-2 py-0.5 rounded bg-white/5 border border-white/10 text-white text-xs text-center disabled:opacity-40 focus:outline-none focus:border-primary"
+              />
+            </label>
+          </div>
+          <div className="flex gap-3">
+            <Button
+              disabled={isRunning(status?.state) || startMut.isPending}
+              onClick={() => startMut.mutate()}
+              className="bg-primary hover:bg-primary/90 text-white shadow-lg shadow-primary/20"
+            >
+              {startMut.isPending ? (
+                "Starting..."
+              ) : (
+                <>
+                  <Play className="w-4 h-4 mr-2" /> Start Run
+                </>
+              )}
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={!isRunning(status?.state) || stopMut.isPending}
+              onClick={() => stopMut.mutate()}
+              className="shadow-lg shadow-destructive/20"
+            >
+              {stopMut.isPending ? (
+                "Stopping..."
+              ) : (
+                <>
+                  <Square className="w-4 h-4 mr-2" /> Stop
+                </>
+              )}
+            </Button>
+          </div>
         </div>
       </div>
 

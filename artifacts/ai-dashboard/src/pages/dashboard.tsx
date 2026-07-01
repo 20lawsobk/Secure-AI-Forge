@@ -318,9 +318,14 @@ export default function Dashboard() {
             )}
             {!storageStatus && (
               <div className="flex items-center justify-center h-[72px] bg-black/20 rounded-xl border border-white/5 border-dashed">
-                <p className="text-xs text-muted-foreground">
-                  Requires admin key
-                </p>
+                <button
+                  onClick={() =>
+                    window.dispatchEvent(new Event("openAuthDialog"))
+                  }
+                  className="text-xs text-primary hover:text-primary/80 transition-colors underline underline-offset-2 cursor-pointer"
+                >
+                  Enter admin key
+                </button>
               </div>
             )}
           </div>
@@ -387,9 +392,14 @@ export default function Dashboard() {
                 )}
               </div>
             ) : (
-              <p className="text-xs text-muted-foreground">
-                Requires admin key
-              </p>
+              <button
+                onClick={() =>
+                  window.dispatchEvent(new Event("openAuthDialog"))
+                }
+                className="text-xs text-primary hover:text-primary/80 transition-colors underline underline-offset-2 cursor-pointer"
+              >
+                Enter admin key
+              </button>
             )}
           </div>
         </div>

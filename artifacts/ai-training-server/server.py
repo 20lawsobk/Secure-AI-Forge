@@ -53,6 +53,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
+_srv_logger = logging.getLogger(__name__)
+
 # ─── DB Setup ────────────────────────────────────────────────────────────────
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -85,8 +87,8 @@ def _release(conn, error: bool = False):
         if error:
             conn.rollback()
         _get_db_pool().putconn(conn)
-    except Exception:
-        pass
+    except Exception as e:
+        _srv_logger.debug(f"[DB] pool release error: {e}")
 
 def get_db():
     conn = _acquire()
@@ -559,8 +561,8 @@ def _get_flywheel() -> Any:
             try:
                 from workers.admin_flywheel import FlywheelIngestor  # noqa: PLC0415
                 _flywheel_ingestor = FlywheelIngestor()
-            except Exception:
-                pass
+            except Exception as e:
+                _srv_logger.warning(f"[Flywheel] init error: {e}")
     return _flywheel_ingestor
 
 
@@ -576,8 +578,8 @@ def _fw_ingest(key: dict, content_type: str, payload: dict, meta: dict) -> None:
         return
     try:
         fw.ingest(content_type, payload, meta, str(key.get("id", "admin")))
-    except Exception:
-        pass
+    except Exception as e:
+        _srv_logger.debug(f"[Flywheel] ingest error ({content_type}): {e}")
 
 # ─── Pydantic Schemas ────────────────────────────────────────────────────────
 
