@@ -295,10 +295,14 @@ def build_scenes(
     total_duration: float,
     width: int,
     height: int,
+    awareness: str = "",
 ) -> List[SceneConfig]:
     """
     Build a list of SceneConfig objects from content DNA.
     scenes_data: [{"type": "hook"|"build"|"body"|"drop"|"cta"|"outro", "text": str}, ...]
+
+    When `awareness` is provided, each SceneConfig gets a `diffusion_meta` dict
+    that enables the MaxCore neural diffusion background pipeline in _pil_bg_frame.
     """
     if not scenes_data:
         return []
@@ -455,6 +459,20 @@ def build_scenes(
         if dna.energy > 0.75:
             effects.append("breathing")
 
+        _diffusion_meta: Dict = {
+            "idea": idea,
+            "platform": platform,
+            "tone": tone,
+            "awareness": awareness,
+            "brand": artist_name or "",
+            "dna": {
+                "energy": dna.energy,
+                "darkness": dna.darkness,
+                "warmth": dna.warmth,
+                "saturation": dna.saturation,
+            },
+        } if awareness else {}
+
         cfg = SceneConfig(
             duration=dur,
             bg_type=sc_bg_type,
@@ -472,6 +490,7 @@ def build_scenes(
             show_progress=show_progress and idx == len(scenes_data) - 2,
             progress_color=palette.accent,
             brand=artist_name or "",
+            diffusion_meta=_diffusion_meta if awareness else None,
         )
         configs.append(cfg)
 

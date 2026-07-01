@@ -350,6 +350,7 @@ class VideoAgent:
             total_duration=prod.total_duration,
             width=width,
             height=height,
+            awareness=req.awareness,
         )
 
     def render(self, req: VideoAgentRequest) -> CinematicResult:
