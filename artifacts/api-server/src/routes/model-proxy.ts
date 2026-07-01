@@ -111,15 +111,7 @@ async function enrichWithAwareness(
     if (ctx && ctx.confidence > 0 && ctx.contextString) {
       req.body = {
         ...(req.body as Record<string, unknown>),
-        awareness: {
-          contextString: ctx.contextString,
-          confidence: ctx.confidence,
-          trendingGenres: ctx.trendingGenres,
-          trendingMoods: ctx.trendingMoods,
-          platformSignals: ctx.platformSignals,
-          generationHints: ctx.generationHints,
-          signalCount: ctx.signalCount,
-        },
+        awareness: ctx.contextString,
       };
     }
   } catch {

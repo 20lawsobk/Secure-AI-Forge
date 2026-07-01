@@ -1708,212 +1708,88 @@ class ContentGenerationContextBuilder {
       return { ...ctx, contextString: "" };
     }
 
-    const parts: string[] = [];
+    // strength → signal priority tag understood by Python parsers
+    const tag = (s: string) =>
+      s === "strong" ? "[HIGH]" : s === "moderate" ? "[MEDIUM]" : "[LOW]";
 
-    switch (mode) {
-      case "social":
-        parts.push("[Content Awareness: Social]");
-        if (ctx.trendingGenres.length)
-          parts.push(`Genre: ${ctx.trendingGenres.slice(0, 2).join(", ")}`);
-        if (ctx.platformSignals.length) {
-          const top = ctx.platformSignals
-            .slice(0, 3)
-            .map(
-              (s) =>
-                `${s.platform}: ${s.trend}${s.contentFormat ? ` (${s.contentFormat})` : ""}`,
-            )
-            .join("; ");
-          parts.push(`Platform: ${top}`);
-        }
-        if (ctx.viralHookPatterns.length)
-          parts.push(`Hooks: ${ctx.viralHookPatterns.slice(0, 2).join(", ")}`);
-        if (ctx.emotionalTriggers.length)
-          parts.push(
-            `Triggers: ${ctx.emotionalTriggers.slice(0, 2).join(", ")}`,
-          );
-        if (ctx.ctaPatterns.length)
-          parts.push(`CTAs: ${ctx.ctaPatterns.slice(0, 2).join(", ")}`);
-        if (ctx.generationHints.hashtagContext)
-          parts.push(`Hashtags: ${ctx.generationHints.hashtagContext}`);
-        break;
+    const lines: string[] = ["=== LIVE INDUSTRY SIGNALS ==="];
 
-      case "ad_copy":
-      case "advertising":
-        parts.push("[Content Awareness: Ad Copy]");
-        if (ctx.emotionalTriggers.length)
-          parts.push(
-            `Emotional triggers: ${ctx.emotionalTriggers.slice(0, 3).join(", ")}`,
-          );
-        if (ctx.ctaPatterns.length)
-          parts.push(
-            `High-performing CTAs: ${ctx.ctaPatterns.slice(0, 3).join(", ")}`,
-          );
-        if (ctx.trendingTopics.length)
-          parts.push(
-            `Trending angles: ${ctx.trendingTopics.slice(0, 2).join(", ")}`,
-          );
-        if (ctx.platformSignals.length) {
-          const top = ctx.platformSignals
-            .slice(0, 2)
-            .map((s) => `${s.platform}: ${s.trend}`)
-            .join("; ");
-          parts.push(`Platform context: ${top}`);
-        }
-        if (ctx.audiencePsychology.length) {
-          const psych = ctx.audiencePsychology
-            .slice(0, 2)
-            .map((a) => a.trigger)
-            .join(", ");
-          parts.push(`Audience psychology: ${psych}`);
-        }
-        break;
-
-      case "video_script":
-        parts.push("[Content Awareness: Video Script]");
-        if (ctx.contentFormats.length) {
-          const top = ctx.contentFormats
-            .slice(0, 3)
-            .map((f) => `${f.format} on ${f.platform}`)
-            .join(", ");
-          parts.push(`Rising formats: ${top}`);
-        }
-        if (ctx.viralHookPatterns.length)
-          parts.push(
-            `Hook styles: ${ctx.viralHookPatterns.slice(0, 3).join(", ")}`,
-          );
-        if (ctx.platformAlgorithmNotes.length)
-          parts.push(
-            `Algo notes: ${ctx.platformAlgorithmNotes.slice(0, 2).join("; ")}`,
-          );
-        if (ctx.trendingMoods.length)
-          parts.push(
-            `Emotional tone: ${ctx.trendingMoods.slice(0, 2).join(", ")}`,
-          );
-        if (ctx.trendingTopics.length)
-          parts.push(
-            `Topic opportunities: ${ctx.trendingTopics.slice(0, 2).join(", ")}`,
-          );
-        break;
-
-      case "email":
-        parts.push("[Content Awareness: Email Campaign]");
-        if (ctx.emotionalTriggers.length)
-          parts.push(
-            `Subject line triggers: ${ctx.emotionalTriggers.slice(0, 3).join(", ")}`,
-          );
-        if (ctx.ctaPatterns.length)
-          parts.push(`CTA options: ${ctx.ctaPatterns.slice(0, 3).join(", ")}`);
-        if (ctx.lyricThemes.length)
-          parts.push(`Body themes: ${ctx.lyricThemes.slice(0, 2).join(", ")}`);
-        if (ctx.trendingTopics.length)
-          parts.push(
-            `Timely angles: ${ctx.trendingTopics.slice(0, 2).join(", ")}`,
-          );
-        break;
-
-      case "press_release":
-        parts.push("[Content Awareness: Press Release]");
-        if (ctx.trendingTopics.length)
-          parts.push(
-            `Newsworthiness: ${ctx.trendingTopics.slice(0, 3).join(", ")}`,
-          );
-        if (ctx.trendingGenres.length)
-          parts.push(
-            `Genre context: ${ctx.trendingGenres.slice(0, 2).join(", ")}`,
-          );
-        if (ctx.platformSignals.filter((s) => s.strength === "strong").length) {
-          const top = ctx.platformSignals
-            .filter((s) => s.strength === "strong")
-            .slice(0, 2)
-            .map((s) => s.trend)
-            .join(", ");
-          parts.push(`Industry momentum: ${top}`);
-        }
-        break;
-
-      case "blog":
-        parts.push("[Content Awareness: Blog / Article]");
-        if (ctx.trendingTopics.length)
-          parts.push(
-            `SEO angles: ${ctx.trendingTopics.slice(0, 3).join(", ")}`,
-          );
-        if (ctx.viralHookPatterns.length)
-          parts.push(
-            `Headline styles: ${ctx.viralHookPatterns.slice(0, 2).join(", ")}`,
-          );
-        if (ctx.trendingGenres.length)
-          parts.push(
-            `Industry trends: ${ctx.trendingGenres.slice(0, 2).join(", ")}`,
-          );
-        if (ctx.lyricThemes.length)
-          parts.push(
-            `Resonant themes: ${ctx.lyricThemes.slice(0, 2).join(", ")}`,
-          );
-        break;
-
-      case "melody":
-      case "music":
-        parts.push("[Content Awareness: Music / Melody]");
-        if (ctx.trendingGenres.length)
-          parts.push(
-            `Trending genres: ${ctx.trendingGenres.slice(0, 3).join(", ")}`,
-          );
-        if (ctx.trendingMoods.length)
-          parts.push(
-            `Resonant moods: ${ctx.trendingMoods.slice(0, 3).join(", ")}`,
-          );
-        if (ctx.productionStyles.length)
-          parts.push(
-            `Production: ${ctx.productionStyles.slice(0, 2).join(", ")}`,
-          );
-        if (ctx.generationHints.tempoBias !== "neutral")
-          parts.push(`Tempo bias: ${ctx.generationHints.tempoBias}`);
-        break;
-
-      case "songwriting":
-        parts.push("[Content Awareness: Songwriting]");
-        if (ctx.lyricThemes.length)
-          parts.push(
-            `Resonant themes: ${ctx.lyricThemes.slice(0, 3).join(", ")}`,
-          );
-        if (ctx.trendingGenres.length)
-          parts.push(
-            `Trending genres: ${ctx.trendingGenres.slice(0, 3).join(", ")}`,
-          );
-        if (ctx.viralHookPatterns.length)
-          parts.push(
-            `Hook patterns: ${ctx.viralHookPatterns.slice(0, 2).join(", ")}`,
-          );
-        if (ctx.trendingMoods.length)
-          parts.push(
-            `Audience mood: ${ctx.trendingMoods.slice(0, 2).join(", ")}`,
-          );
-        if (ctx.emotionalTriggers.length)
-          parts.push(
-            `Emotional pull: ${ctx.emotionalTriggers.slice(0, 2).join(", ")}`,
-          );
-        break;
-
-      case "content":
-      default:
-        parts.push("[Content Awareness: General]");
-        if (ctx.trendingGenres.length)
-          parts.push(`Trending: ${ctx.trendingGenres.slice(0, 3).join(", ")}`);
-        if (ctx.platformSignals.length) {
-          const top = ctx.platformSignals
-            .slice(0, 3)
-            .map((s) => `${s.platform}: ${s.trend}`)
-            .join("; ");
-          parts.push(`Platform: ${top}`);
-        }
-        if (ctx.viralHookPatterns.length)
-          parts.push(`Hooks: ${ctx.viralHookPatterns.slice(0, 2).join(", ")}`);
-        if (ctx.ctaPatterns.length)
-          parts.push(`CTAs: ${ctx.ctaPatterns.slice(0, 2).join(", ")}`);
-        break;
+    // Platform signals as [HIGH/MEDIUM/LOW] tagged lines
+    for (const sig of ctx.platformSignals.slice(0, 6)) {
+      const fmt = sig.contentFormat ? ` (${sig.contentFormat})` : "";
+      lines.push(`${tag(sig.strength)} ${sig.platform}: ${sig.trend}${fmt}`);
     }
 
-    return { ...ctx, contextString: parts.join(" | ") };
+    // Mode-specific Action lines — drive hook/CTA parsing in Python agents
+    const modeActions: Partial<Record<ContentGenerationMode, string[]>> = {
+      social:       ctx.ctaPatterns.slice(0, 3),
+      ad_copy:      ctx.ctaPatterns.slice(0, 3),
+      advertising:  ctx.ctaPatterns.slice(0, 3),
+      video_script: [...ctx.viralHookPatterns.slice(0, 2), ...ctx.ctaPatterns.slice(0, 1)],
+      songwriting:  [...ctx.lyricThemes.slice(0, 2), ...ctx.ctaPatterns.slice(0, 1)],
+      music:        ctx.lyricThemes.slice(0, 3),
+      melody:       ctx.lyricThemes.slice(0, 3),
+      content:      ctx.ctaPatterns.slice(0, 2),
+    };
+    for (const action of (modeActions[mode] ?? ctx.ctaPatterns.slice(0, 2))) {
+      lines.push(`Action: ${action}`);
+    }
+
+    // Hook patterns and emotional triggers as bullet points
+    for (const hook of ctx.viralHookPatterns.slice(0, 3)) {
+      lines.push(`• Hook pattern: ${hook}`);
+    }
+    for (const trigger of ctx.emotionalTriggers.slice(0, 3)) {
+      lines.push(`• Emotional pull: ${trigger}`);
+    }
+    for (const angle of ctx.contentAngles.slice(0, 2)) {
+      lines.push(`• Content angle: ${angle}`);
+    }
+
+    // Trending topics section — drives #hashtag extraction in Python parsers
+    const hashtagSet = new Set<string>();
+    for (const raw of (ctx.generationHints.hashtagContext ?? "").split(/\s+/)) {
+      if (raw.startsWith("#") && raw.length > 1) hashtagSet.add(raw);
+    }
+    for (const genre of ctx.trendingGenres.slice(0, 5)) {
+      hashtagSet.add(`#${genre.toLowerCase().replace(/[\s\-/]+/g, "")}`);
+    }
+    for (const mood of ctx.trendingMoods.slice(0, 3)) {
+      hashtagSet.add(`#${mood.toLowerCase().replace(/[\s\-/]+/g, "")}`);
+    }
+    for (const topic of ctx.trendingTopics.slice(0, 3)) {
+      const w = topic.split(/\s+/)[0];
+      if (w) hashtagSet.add(`#${w.toLowerCase().replace(/\W/g, "")}`);
+    }
+    if (hashtagSet.size) {
+      lines.push("=== TRENDING TOPICS ===");
+      lines.push([...hashtagSet].slice(0, 12).join(" "));
+    }
+
+    // Platform algorithm notes (may include timing cues Python timing parser scans)
+    if (ctx.platformAlgorithmNotes.length) {
+      lines.push("=== PLATFORM NOTES ===");
+      for (const note of ctx.platformAlgorithmNotes.slice(0, 4)) {
+        lines.push(`• ${note}`);
+      }
+    }
+
+    // Rich trailing context block — all modes benefit from this
+    lines.push("=== TRENDING CONTEXT ===");
+    if (ctx.trendingGenres.length)
+      lines.push(`Trending genres: ${ctx.trendingGenres.slice(0, 5).join(", ")}`);
+    if (ctx.trendingMoods.length)
+      lines.push(`Trending moods: ${ctx.trendingMoods.slice(0, 4).join(", ")}`);
+    if (ctx.lyricThemes.length)
+      lines.push(`Lyric themes: ${ctx.lyricThemes.slice(0, 4).join(", ")}`);
+    if (ctx.productionStyles.length)
+      lines.push(`Production styles: ${ctx.productionStyles.slice(0, 3).join(", ")}`);
+    if (ctx.trendingTopics.length)
+      lines.push(`Trending topics: ${ctx.trendingTopics.slice(0, 4).join(", ")}`);
+    if (ctx.generationHints.tempoBias !== "neutral")
+      lines.push(`Tempo bias: ${ctx.generationHints.tempoBias}`);
+
+    return { ...ctx, contextString: lines.join("\n") };
   }
 
   private buildHints(
