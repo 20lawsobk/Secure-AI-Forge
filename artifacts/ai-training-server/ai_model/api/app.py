@@ -348,6 +348,7 @@ async def generate_visual_spec(req: VisualSpecGenerateRequest):
         idea=req.idea,
         platform=platform,
         tone=req.tone,
+        awareness=req.awareness,
     ))
     return VisualSpecGenerateResponse(
         success=True,
@@ -407,6 +408,7 @@ async def generate_content(req: ContentGenerateRequest):
             idea=topic,
             platform=platform,
             tone=req.tone,
+            awareness=req.awareness,
         ))
         visual_spec = {
             "thumbnail_prompt": vs_result.thumbnail_prompt,

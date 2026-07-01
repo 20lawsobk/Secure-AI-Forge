@@ -51,7 +51,7 @@ from fastapi import FastAPI, HTTPException, Depends, Header, Request, Background
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # ─── DB Setup ────────────────────────────────────────────────────────────────
 
@@ -558,13 +558,29 @@ class StartTrainingRequest(BaseModel):
     use_synthetic: bool = True
     synthetic_count: int = 1000
 
-class ContentRequest(BaseModel):
+class _AwarenessMixin(BaseModel):
+    """Normalises ``awareness`` whether Node.js sends it as a plain string or as
+    the structured object ``{contextString, trendingGenres, ...}`` that
+    ``enrichWithAwareness`` injects.  Extracts ``contextString`` from the dict so
+    the Python parsers always receive the pre-formatted multi-line text."""
+
+    awareness: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalise_awareness(cls, data: Any) -> Any:
+        if isinstance(data, dict) and isinstance(data.get("awareness"), dict):
+            data = dict(data)
+            data["awareness"] = data["awareness"].get("contextString", "") or ""
+        return data
+
+
+class ContentRequest(_AwarenessMixin):
     platform: str = "tiktok"
     topic: str
     tone: str = "energetic"
     goal: str = "growth"
     include_hashtags: bool = True
-    awareness: str = ""
 
 # ─── Startup ─────────────────────────────────────────────────────────────────
 
@@ -2022,7 +2038,7 @@ async def list_checkpoints(_admin = Depends(verify_admin)):
 # (DAW, beat marketplace, social media management, music distribution).
 # They run on top of the model trained from the 7TB storage dataset.
 
-class PlatformSocialRequest(BaseModel):
+class PlatformSocialRequest(_AwarenessMixin):
     user_id: str
     platform: str = "instagram"
     topic: str
@@ -2031,10 +2047,9 @@ class PlatformSocialRequest(BaseModel):
     style_tags: List[str] = []
     include_hashtags: bool = True
     num_variants: int = Field(1, ge=1, le=5)
-    awareness: str = ""
 
 
-class PlatformDAWRequest(BaseModel):
+class PlatformDAWRequest(_AwarenessMixin):
     user_id: str
     mode: str = "lyrics"        # lyrics | hook | beat_description | track_concept
     genre: str = "hip-hop"
@@ -2043,28 +2058,25 @@ class PlatformDAWRequest(BaseModel):
     key: Optional[str] = None
     reference_track: Optional[str] = None
     context: Optional[str] = None
-    awareness: str = ""
 
 
-class PlatformAutopilotRequest(BaseModel):
+class PlatformAutopilotRequest(_AwarenessMixin):
     user_id: str
     platform: str = "instagram"
     recent_posts: List[dict] = []
     target_metric: str = "engagement"   # engagement | reach | conversions
-    awareness: str = ""
 
 
-class PlatformDistributionRequest(BaseModel):
+class PlatformDistributionRequest(_AwarenessMixin):
     user_id: str
     track_title: str
     genre: str = "hip-hop"
     release_date: Optional[str] = None
     target_platforms: List[str] = ["spotify", "apple_music", "tidal"]
     bio: Optional[str] = None
-    awareness: str = ""
 
 
-class PlatformVideoRequest(BaseModel):
+class PlatformVideoRequest(_AwarenessMixin):
     user_id: str
     topic: str
     platform: str = "youtube"           # youtube | tiktok | instagram | general
@@ -2074,7 +2086,6 @@ class PlatformVideoRequest(BaseModel):
     duration_seconds: int = Field(30, ge=5, le=300)
     aspect_ratio: str = "16:9"          # 16:9 | 9:16 | 1:1 | 4:5
     include_captions: bool = True
-    awareness: str = ""
 
 
 def _build_personalized_tone(user_id: str, platform: str, base_tone: str) -> str:
@@ -2311,7 +2322,7 @@ async def platform_daw_generate(req: PlatformDAWRequest, _key = Depends(require_
             awareness=req.awareness,
         )))
         visual = await _in_thread(lambda: _visual_spec_agent.run(VisualSpecRequest(
-            idea=topic, platform="youtube", tone=tone,
+            idea=topic, platform="youtube", tone=tone, awareness=req.awareness,
         )))
 
         return {
@@ -2461,7 +2472,7 @@ async def platform_video_generate(req: PlatformVideoRequest, _key = Depends(requ
         full_script = f"{script_result.hook}\n{script_result.body}\n{script_result.cta}"
 
         visual_result = await _in_thread(lambda: _visual_spec_agent.run(VisualSpecRequest(
-            idea=req.topic, platform=platform, tone=personalized_tone,
+            idea=req.topic, platform=platform, tone=personalized_tone, awareness=req.awareness,
         ))) if _visual_spec_agent else None
 
         dist_result = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
@@ -2849,6 +2860,7 @@ async def maxcore_generate_image(req: MaxcoreMediaRequest, _key = Depends(requir
                     idea=topic,
                     platform=normalize_platform(platform),
                     tone=style_tags[0] if style_tags else "cinematic",
+                    awareness=getattr(req, "awareness", ""),
                 )))
                 concept = getattr(vis, "thumbnail_concept", concept) or concept
             except Exception:
@@ -4778,6 +4790,7 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
                     idea=brief.augmented_idea,
                     platform=normalize_platform(platform),
                     tone=style_tags[0] if style_tags else brief.tone,
+                    awareness=getattr(req, "awareness", ""),
                 )))
                 layout       = vis.layout or layout
                 color_scheme = vis.color_scheme or color_scheme

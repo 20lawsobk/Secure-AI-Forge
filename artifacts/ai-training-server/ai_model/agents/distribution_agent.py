@@ -226,8 +226,28 @@ class DistributionAgent:
         platform_token = f"<PLATFORM_{req.platform.upper()}>"
         goal_token = f"<GOAL_{req.goal.upper()}>"
 
+        # Inject live awareness signals directly into the caption prompt so the
+        # model generates captions conditioned on what is actually trending.
+        awareness_line = ""
+        awareness = req.awareness or ""
+        if awareness:
+            high_signals = [
+                line.strip() for line in awareness.splitlines()
+                if re.match(r"\[(HIGH|MEDIUM)\]", line.strip())
+            ]
+            if high_signals:
+                snippet = "; ".join(
+                    s.split("]", 1)[-1].strip()[:60] for s in high_signals[:2]
+                )
+                awareness_line = f"Trending now: {snippet}\n"
+            else:
+                trending_tags = re.findall(r"#(\w+)", awareness)
+                if trending_tags:
+                    awareness_line = f"Trending: {', '.join(trending_tags[:4])}\n"
+
         prompt = (
             f"{platform_token} {goal_token} <STAGE_CTA>\n"
+            f"{awareness_line}"
             f"Script: {req.script}\n"
             f"Generate caption + hashtags + best posting time.\n"
         )

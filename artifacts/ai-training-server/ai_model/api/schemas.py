@@ -1,5 +1,5 @@
 from __future__ import annotations
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import List, Optional, Dict, Any
 from enum import Enum
 
@@ -33,12 +33,27 @@ class ToneEnum(str, Enum):
     default = "default"
 
 
-class ScriptGenerateRequest(BaseModel):
+class _AwarenessMixin(BaseModel):
+    """Normalises ``awareness`` whether Node.js sends it as a plain string or as
+    the structured object ``{contextString, trendingGenres, ...}`` injected by
+    ``enrichWithAwareness``.  Always extracts ``contextString`` from the dict."""
+
+    awareness: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalise_awareness(cls, data: Any) -> Any:
+        if isinstance(data, dict) and isinstance(data.get("awareness"), dict):
+            data = dict(data)
+            data["awareness"] = data["awareness"].get("contextString", "") or ""
+        return data
+
+
+class ScriptGenerateRequest(_AwarenessMixin):
     idea: str
     platform: str = "tiktok"
     goal: str = "growth"
     tone: str = "energetic"
-    awareness: Optional[str] = None
 
 
 class ScriptGenerateResponse(BaseModel):
@@ -51,7 +66,7 @@ class ScriptGenerateResponse(BaseModel):
     processing_time_ms: float
 
 
-class VisualSpecGenerateRequest(BaseModel):
+class VisualSpecGenerateRequest(_AwarenessMixin):
     idea: str
     platform: str = "tiktok"
     tone: str = "playful"
@@ -65,11 +80,10 @@ class VisualSpecGenerateResponse(BaseModel):
     platform: str
 
 
-class DistributionGenerateRequest(BaseModel):
+class DistributionGenerateRequest(_AwarenessMixin):
     script: str
     platform: str = "tiktok"
     goal: str = "growth"
-    awareness: Optional[str] = None
 
 
 class DistributionGenerateResponse(BaseModel):
@@ -81,7 +95,7 @@ class DistributionGenerateResponse(BaseModel):
     platform: str
 
 
-class ContentGenerateRequest(BaseModel):
+class ContentGenerateRequest(_AwarenessMixin):
     platform: str = "tiktok"
     topic: str = "new music"
     tone: str = "energetic"
@@ -89,7 +103,6 @@ class ContentGenerateRequest(BaseModel):
     include_hashtags: bool = True
     include_visual_spec: bool = False
     include_distribution: bool = True
-    awareness: Optional[str] = None
 
 
 class ContentGenerateResponse(BaseModel):
@@ -107,7 +120,7 @@ class ContentGenerateResponse(BaseModel):
     processing_time_ms: float
 
 
-class MultiPlatformRequest(BaseModel):
+class MultiPlatformRequest(_AwarenessMixin):
     platforms: List[str] = ["tiktok", "instagram"]
     topic: str = "new music"
     tone: str = "energetic"
@@ -116,7 +129,6 @@ class MultiPlatformRequest(BaseModel):
     target_audience: Optional[str] = None
     format: str = "text"
     url: Optional[str] = None
-    awareness: Optional[str] = None
 
 
 class MultiPlatformResponse(BaseModel):
@@ -208,7 +220,6 @@ class VideoGenerateRequest(BaseModel):
     goal: str = "growth"
     tone: str = "energetic"
     quality: str = "cinematic"
-    awareness: Optional[str] = None
 
 
 class VideoGenerateResponse(BaseModel):
