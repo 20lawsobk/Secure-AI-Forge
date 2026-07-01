@@ -21,9 +21,12 @@ import uuid
 import json
 import asyncio
 import threading
+import re
+import logging
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Optional, List
+from urllib.parse import urlparse
 
 # ── Size BLAS/OpenMP thread pools to the real host BEFORE numpy is imported ───
 # Derived from os.cpu_count() at runtime — 2 on the dev box, 16 on the prod
@@ -1606,31 +1609,104 @@ PLATFORM_NORMALIZE = {
 def normalize_platform(p: str) -> str:
     return PLATFORM_NORMALIZE.get(p.lower(), p.lower())
 
+
+_srv_logger = logging.getLogger(__name__)
+
+_MUSIC_PLATFORM_LABELS: dict[str, str] = {
+    "spotify.com":       "music release on Spotify",
+    "open.spotify.com":  "music release on Spotify",
+    "youtube.com":       "music video on YouTube",
+    "youtu.be":          "music video on YouTube",
+    "music.youtube.com": "music video on YouTube",
+    "soundcloud.com":    "track on SoundCloud",
+    "music.apple.com":   "music release on Apple Music",
+    "tidal.com":         "music release on Tidal",
+    "deezer.com":        "music release on Deezer",
+    "bandcamp.com":      "music release on Bandcamp",
+    "audiomack.com":     "track on Audiomack",
+    "distrokid.com":     "release via DistroKid",
+}
+
+_URL_RE = re.compile(r"^(https?://|www\.)\S+", re.IGNORECASE)
+_DOMAIN_ONLY_RE = re.compile(r"^([\w-]+\.)+[\w-]{2,}(/[\w.~%-]*)?$", re.IGNORECASE)
+
+
+def _resolve_topic_from_url(raw_topic: str) -> str:
+    """Convert any URL/domain topic into a human-readable idea string."""
+    topic = raw_topic.strip()
+    if not topic:
+        return topic
+
+    url_str = topic if re.match(r"https?://", topic, re.IGNORECASE) else f"https://{topic}"
+
+    if not (_URL_RE.match(topic) or _DOMAIN_ONLY_RE.match(topic)):
+        return topic
+
+    try:
+        parsed = urlparse(url_str)
+        hostname = (parsed.hostname or "").lower().lstrip("www.")
+    except Exception:
+        return topic
+
+    platform_label: str = ""
+    for domain, label in _MUSIC_PLATFORM_LABELS.items():
+        if hostname == domain or hostname.endswith("." + domain):
+            platform_label = label
+            break
+
+    path_parts = [
+        p for p in parsed.path.split("/")
+        if p and not p.isdigit() and len(p) > 2
+        and p not in {"track", "artist", "album", "playlist",
+                      "watch", "embed", "user", "intl-en", "index.html",
+                      "index", "home", "en", "us"}
+    ]
+    name: str = ""
+    if path_parts:
+        raw = path_parts[-1].split("?")[0].split("#")[0]
+        name = re.sub(r"[_-]", " ", raw).title().strip()
+
+    if name and platform_label:
+        resolved = f"{name} — {platform_label}"
+    elif name:
+        resolved = f"{name} — from {hostname}"
+    elif platform_label:
+        resolved = platform_label
+    else:
+        resolved = hostname or topic
+
+    if resolved != topic:
+        _srv_logger.warning(
+            "[generate-from-url] Crawl-blocked URL resolved: %r → %r", topic, resolved
+        )
+    return resolved
+
+
 @app.post("/content/generate")
 async def generate_content(req: ContentRequest, _key = Depends(require_scope("generate"))):
     import asyncio
     start = time.time()
     platform = normalize_platform(req.platform)
+    topic = _resolve_topic_from_url(req.topic)
 
     if not _model_ready or _script_agent is None:
-        # Fallback templates when model not ready
-        return {
-            "success": True,
-            "platform": platform,
-            "caption": f"Check out this {req.topic} content!",
-            "hook": f"🔥 {req.topic} is going viral!",
-            "body": f"Here's everything you need to know about {req.topic}.",
-            "cta": "Follow for more!",
-            "hashtags": ["#content", f"#{req.topic.replace(' ', '')}"],
-            "source": "template",
-            "processing_time_ms": (time.time() - start) * 1000,
-        }
+        # Model not ready yet — signal the client to retry rather than returning
+        # a template built around a bare domain/URL slug.
+        _srv_logger.warning(
+            "[generate-from-url] empty generatedContent for topic %r — "
+            "model not ready; client should retry",
+            topic,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="empty generatedContent — model warming up, please retry",
+        )
 
     async def _run_content_inference():
         from ai_model.agents.script_agent import ScriptRequest
         from ai_model.agents.distribution_agent import DistributionRequest
         script_result = await _in_thread(lambda: _script_agent.run(ScriptRequest(
-            idea=req.topic, platform=platform, goal=req.goal, tone=req.tone,
+            idea=topic, platform=platform, goal=req.goal, tone=req.tone,
         )))
         full_script = f"{script_result.hook}\n{script_result.body}\n{script_result.cta}"
         dist_result = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
@@ -1640,6 +1716,19 @@ async def generate_content(req: ContentRequest, _key = Depends(require_scope("ge
 
     try:
         script_result, dist_result = await asyncio.wait_for(_run_content_inference(), timeout=20.0)
+
+        # Empty output = model still warming — let the client retry
+        if not any([script_result.hook.strip(), script_result.body.strip(), script_result.cta.strip()]):
+            _srv_logger.warning(
+                "[generate-from-url] empty generatedContent for topic %r (platform=%s) — "
+                "model may be cold-starting; client should retry",
+                topic, platform,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="empty generatedContent — model warming up, please retry",
+            )
+
         return {
             "success": True,
             "platform": platform,
@@ -1651,18 +1740,17 @@ async def generate_content(req: ContentRequest, _key = Depends(require_scope("ge
             "source": getattr(script_result, "source", "template"),
             "processing_time_ms": (time.time() - start) * 1000,
         }
+    except HTTPException:
+        raise
     except asyncio.TimeoutError:
-        return {
-            "success": True,
-            "platform": platform,
-            "caption": f"Check out this {req.topic} content!",
-            "hook": f"🔥 {req.topic} is going viral!",
-            "body": f"Here's everything you need to know about {req.topic}.",
-            "cta": "Follow for more!",
-            "hashtags": ["#content", f"#{req.topic.replace(' ', '')}"],
-            "source": "template_timeout",
-            "processing_time_ms": (time.time() - start) * 1000,
-        }
+        _srv_logger.warning(
+            "[generate-from-url] empty generatedContent for topic %r — timeout; client should retry",
+            topic,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="empty generatedContent — generation timed out, please retry",
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
