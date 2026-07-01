@@ -5,6 +5,8 @@ import logging
 import re
 import torch
 from urllib.parse import urlparse
+import html as _html
+import urllib.request as _urllib_request
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -105,25 +107,69 @@ _DOMAIN_ONLY_RE = re.compile(
 )
 
 
-def _resolve_topic_from_url(raw_topic: str) -> str:
-    """
-    Detect when `raw_topic` is a crawl-blocked URL or bare domain and return
-    a descriptive idea string the agents can use.  Returns the original string
-    unchanged when it is already a real topic (not a URL/domain).
+_URL_TITLE_SUFFIXES = re.compile(
+    r"\s*[\|–—\-]\s*(?:Spotify|YouTube|SoundCloud|Apple Music|Tidal|Deezer"
+    r"|Bandcamp|Audiomack|DistroKid|Instagram|TikTok|Twitter|X\.com|Facebook"
+    r"|LinkedIn|Pinterest|Reddit|Twitch|Snapchat|BeReal|Substack"
+    r"|SoundOn|Triller|Clapper|Lemon8|Threads)\s*$",
+    re.IGNORECASE,
+)
 
-    Extraction order:
-      1. URL path segments  → track / artist / album slug from the path
-      2. Platform label     → "music release on Spotify" etc.
-      3. Bare domain        → hostname used as-is (never empty)
+
+def _fetch_page_title(url_str: str) -> str:
+    """Try to fetch a URL and return the best available title string (never raises)."""
+    try:
+        req = _urllib_request.Request(
+            url_str,
+            headers={
+                "User-Agent": "MaxCore/1.0 (+https://maxbooster.ai/bot)",
+                "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+            },
+        )
+        with _urllib_request.urlopen(req, timeout=3) as resp:
+            content_type = resp.headers.get("content-type", "")
+            if "text/html" not in content_type:
+                return ""
+            body = resp.read(32768).decode("utf-8", errors="replace")
+
+        # og:title is richest — try both attribute orderings
+        og = re.search(
+            r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\'<>]+)["\']',
+            body, re.IGNORECASE,
+        ) or re.search(
+            r'<meta[^>]+content=["\']([^"\'<>]+)["\'][^>]+property=["\']og:title["\']',
+            body, re.IGNORECASE,
+        )
+        if og:
+            title = _html.unescape(og.group(1)).strip()
+            return _URL_TITLE_SUFFIXES.sub("", title).strip()
+
+        # Fall back to <title> tag
+        title_m = re.search(r"<title[^>]*>([^<]{3,})</title>", body, re.IGNORECASE)
+        if title_m:
+            title = _html.unescape(title_m.group(1)).strip()
+            return _URL_TITLE_SUFFIXES.sub("", title).strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _resolve_topic_from_url(raw_topic: str) -> str:
+    """Convert any URL/domain topic into a human-readable idea string.
+
+    Resolution order (first non-empty wins):
+      1. HTTP fetch → og:title / <title> tag (works for any public URL)
+      2. URL path slug → readable name from the last meaningful path segment
+      3. Known platform label → e.g. "music release on Spotify"
+      4. Bare hostname → used as-is (never empty for a valid URL)
     """
     topic = raw_topic.strip()
     if not topic:
         return topic
 
-    # Normalise — add scheme so urlparse can parse bare domains too
     url_str = topic if re.match(r"https?://", topic, re.IGNORECASE) else f"https://{topic}"
 
-    # Only process if it looks like a URL or domain
     if not (_URL_RE.match(topic) or _DOMAIN_ONLY_RE.match(topic)):
         return topic
 
@@ -133,30 +179,31 @@ def _resolve_topic_from_url(raw_topic: str) -> str:
     except Exception:
         return topic
 
-    # Check if it's a known music platform for a richer label
+    # Known music platform label (used as context suffix even when we get a title)
     platform_label: str = ""
     for domain, label in _MUSIC_PLATFORM_LABELS.items():
         if hostname == domain or hostname.endswith("." + domain):
             platform_label = label
             break
 
-    # Extract a readable name from any path segments regardless of platform
-    # e.g. /track/some-great-song-title → "Some Great Song Title"
-    #      /artist/doja-cat/album/planet-her → "Planet Her"
-    #      /blog/my-new-single-drop → "My New Single Drop"
+    # Path slug fallback — e.g. /track/my-new-song → "My New Song"
     path_parts = [
         p for p in parsed.path.split("/")
         if p and not p.isdigit() and len(p) > 2
-        and p not in {"track", "artist", "album", "playlist",
-                      "watch", "embed", "user", "intl-en", "index.html",
-                      "index", "home", "en", "us"}
+        and p not in {"track", "artist", "album", "playlist", "watch",
+                      "embed", "user", "intl-en", "index.html", "index",
+                      "home", "en", "us", "post", "video", "reel", "shorts",
+                      "status", "p", "s"}
     ]
-    name: str = ""
+    slug_name: str = ""
     if path_parts:
-        raw = path_parts[-1]
-        raw = raw.split("?")[0].split("#")[0]  # drop trailing query/fragment
-        name = re.sub(r"[_-]", " ", raw).title().strip()
+        raw = path_parts[-1].split("?")[0].split("#")[0]
+        slug_name = re.sub(r"[_-]", " ", raw).title().strip()
 
+    # Attempt a real HTTP fetch — works for any public web page
+    fetched_name = _fetch_page_title(url_str)
+
+    name = fetched_name or slug_name
     if name and platform_label:
         resolved = f"{name} — {platform_label}"
     elif name:
@@ -164,12 +211,11 @@ def _resolve_topic_from_url(raw_topic: str) -> str:
     elif platform_label:
         resolved = platform_label
     else:
-        # Bare domain with no path — use hostname so agents always get something
         resolved = hostname or topic
 
     if resolved != topic:
         _logger.warning(
-            "[generate-from-url] Crawl-blocked URL resolved: %r → %r", topic, resolved
+            "[generate-from-url] URL resolved: %r → %r", topic, resolved
         )
     return resolved
 
