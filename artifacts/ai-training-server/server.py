@@ -27,6 +27,8 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Optional, List
 from urllib.parse import urlparse
+import html as _html
+import urllib.request as _urllib_request
 
 # ── Size BLAS/OpenMP thread pools to the real host BEFORE numpy is imported ───
 # Derived from os.cpu_count() at runtime — 2 on the dev box, 16 on the prod
@@ -1632,8 +1634,63 @@ _URL_RE = re.compile(r"^(https?://|www\.)\S+", re.IGNORECASE)
 _DOMAIN_ONLY_RE = re.compile(r"^([\w-]+\.)+[\w-]{2,}(/[\w.~%-]*)?$", re.IGNORECASE)
 
 
+_URL_TITLE_SUFFIXES = re.compile(
+    r"\s*[\|–—\-]\s*(?:Spotify|YouTube|SoundCloud|Apple Music|Tidal|Deezer"
+    r"|Bandcamp|Audiomack|DistroKid|Instagram|TikTok|Twitter|X\.com|Facebook"
+    r"|LinkedIn|Pinterest|Reddit|Twitch|Snapchat|BeReal|Substack"
+    r"|SoundOn|Triller|Clapper|Lemon8|Threads)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _fetch_page_title(url_str: str) -> str:
+    """Try to fetch a URL and return the best available title string (never raises)."""
+    try:
+        req = _urllib_request.Request(
+            url_str,
+            headers={
+                "User-Agent": "MaxCore/1.0 (+https://maxbooster.ai/bot)",
+                "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+            },
+        )
+        with _urllib_request.urlopen(req, timeout=3) as resp:
+            content_type = resp.headers.get("content-type", "")
+            if "text/html" not in content_type:
+                return ""
+            body = resp.read(32768).decode("utf-8", errors="replace")
+
+        # og:title is richest — try both attribute orderings
+        og = re.search(
+            r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\'<>]+)["\']',
+            body, re.IGNORECASE,
+        ) or re.search(
+            r'<meta[^>]+content=["\']([^"\'<>]+)["\'][^>]+property=["\']og:title["\']',
+            body, re.IGNORECASE,
+        )
+        if og:
+            title = _html.unescape(og.group(1)).strip()
+            return _URL_TITLE_SUFFIXES.sub("", title).strip()
+
+        # Fall back to <title> tag
+        title_m = re.search(r"<title[^>]*>([^<]{3,})</title>", body, re.IGNORECASE)
+        if title_m:
+            title = _html.unescape(title_m.group(1)).strip()
+            return _URL_TITLE_SUFFIXES.sub("", title).strip()
+    except Exception:
+        pass
+    return ""
+
+
 def _resolve_topic_from_url(raw_topic: str) -> str:
-    """Convert any URL/domain topic into a human-readable idea string."""
+    """Convert any URL/domain topic into a human-readable idea string.
+
+    Resolution order (first non-empty wins):
+      1. HTTP fetch → og:title / <title> tag (works for any public URL)
+      2. URL path slug → readable name from the last meaningful path segment
+      3. Known platform label → e.g. "music release on Spotify"
+      4. Bare hostname → used as-is (never empty for a valid URL)
+    """
     topic = raw_topic.strip()
     if not topic:
         return topic
@@ -1649,24 +1706,31 @@ def _resolve_topic_from_url(raw_topic: str) -> str:
     except Exception:
         return topic
 
+    # Known music platform label (used as context suffix even when we get a title)
     platform_label: str = ""
     for domain, label in _MUSIC_PLATFORM_LABELS.items():
         if hostname == domain or hostname.endswith("." + domain):
             platform_label = label
             break
 
+    # Path slug fallback — e.g. /track/my-new-song → "My New Song"
     path_parts = [
         p for p in parsed.path.split("/")
         if p and not p.isdigit() and len(p) > 2
-        and p not in {"track", "artist", "album", "playlist",
-                      "watch", "embed", "user", "intl-en", "index.html",
-                      "index", "home", "en", "us"}
+        and p not in {"track", "artist", "album", "playlist", "watch",
+                      "embed", "user", "intl-en", "index.html", "index",
+                      "home", "en", "us", "post", "video", "reel", "shorts",
+                      "status", "p", "s"}
     ]
-    name: str = ""
+    slug_name: str = ""
     if path_parts:
         raw = path_parts[-1].split("?")[0].split("#")[0]
-        name = re.sub(r"[_-]", " ", raw).title().strip()
+        slug_name = re.sub(r"[_-]", " ", raw).title().strip()
 
+    # Attempt a real HTTP fetch — works for any public web page
+    fetched_name = _fetch_page_title(url_str)
+
+    name = fetched_name or slug_name
     if name and platform_label:
         resolved = f"{name} — {platform_label}"
     elif name:
@@ -1678,7 +1742,7 @@ def _resolve_topic_from_url(raw_topic: str) -> str:
 
     if resolved != topic:
         _srv_logger.warning(
-            "[generate-from-url] Crawl-blocked URL resolved: %r → %r", topic, resolved
+            "[generate-from-url] URL resolved: %r → %r", topic, resolved
         )
     return resolved
 
@@ -2044,7 +2108,6 @@ async def platform_social_generate(req: PlatformSocialRequest, _key = Depends(re
     personalized_tone = _build_personalized_tone(req.user_id, platform, req.tone)
 
     variants = []
-    variant: dict[str, Any]
     if not _model_ready or _script_agent is None:
         raise HTTPException(
             status_code=503,
@@ -2463,7 +2526,10 @@ async def platform_video_generate(req: PlatformVideoRequest, _key = Depends(requ
             "processing_time_ms": round((time.time() - start) * 1000, 1),
         }
     except asyncio.TimeoutError:
-        return _build_template_response(source="template_timeout")
+        raise HTTPException(
+            status_code=503,
+            detail="empty generatedContent — generation timed out, please retry",
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
