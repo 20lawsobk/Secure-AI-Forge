@@ -1722,16 +1722,22 @@ class ContentGenerationContextBuilder {
 
     // Mode-specific Action lines — drive hook/CTA parsing in Python agents
     const modeActions: Partial<Record<ContentGenerationMode, string[]>> = {
-      social:       ctx.ctaPatterns.slice(0, 3),
-      ad_copy:      ctx.ctaPatterns.slice(0, 3),
-      advertising:  ctx.ctaPatterns.slice(0, 3),
-      video_script: [...ctx.viralHookPatterns.slice(0, 2), ...ctx.ctaPatterns.slice(0, 1)],
-      songwriting:  [...ctx.lyricThemes.slice(0, 2), ...ctx.ctaPatterns.slice(0, 1)],
-      music:        ctx.lyricThemes.slice(0, 3),
-      melody:       ctx.lyricThemes.slice(0, 3),
-      content:      ctx.ctaPatterns.slice(0, 2),
+      social: ctx.ctaPatterns.slice(0, 3),
+      ad_copy: ctx.ctaPatterns.slice(0, 3),
+      advertising: ctx.ctaPatterns.slice(0, 3),
+      video_script: [
+        ...ctx.viralHookPatterns.slice(0, 2),
+        ...ctx.ctaPatterns.slice(0, 1),
+      ],
+      songwriting: [
+        ...ctx.lyricThemes.slice(0, 2),
+        ...ctx.ctaPatterns.slice(0, 1),
+      ],
+      music: ctx.lyricThemes.slice(0, 3),
+      melody: ctx.lyricThemes.slice(0, 3),
+      content: ctx.ctaPatterns.slice(0, 2),
     };
-    for (const action of (modeActions[mode] ?? ctx.ctaPatterns.slice(0, 2))) {
+    for (const action of modeActions[mode] ?? ctx.ctaPatterns.slice(0, 2)) {
       lines.push(`Action: ${action}`);
     }
 
@@ -1777,15 +1783,21 @@ class ContentGenerationContextBuilder {
     // Rich trailing context block — all modes benefit from this
     lines.push("=== TRENDING CONTEXT ===");
     if (ctx.trendingGenres.length)
-      lines.push(`Trending genres: ${ctx.trendingGenres.slice(0, 5).join(", ")}`);
+      lines.push(
+        `Trending genres: ${ctx.trendingGenres.slice(0, 5).join(", ")}`,
+      );
     if (ctx.trendingMoods.length)
       lines.push(`Trending moods: ${ctx.trendingMoods.slice(0, 4).join(", ")}`);
     if (ctx.lyricThemes.length)
       lines.push(`Lyric themes: ${ctx.lyricThemes.slice(0, 4).join(", ")}`);
     if (ctx.productionStyles.length)
-      lines.push(`Production styles: ${ctx.productionStyles.slice(0, 3).join(", ")}`);
+      lines.push(
+        `Production styles: ${ctx.productionStyles.slice(0, 3).join(", ")}`,
+      );
     if (ctx.trendingTopics.length)
-      lines.push(`Trending topics: ${ctx.trendingTopics.slice(0, 4).join(", ")}`);
+      lines.push(
+        `Trending topics: ${ctx.trendingTopics.slice(0, 4).join(", ")}`,
+      );
     if (ctx.generationHints.tempoBias !== "neutral")
       lines.push(`Tempo bias: ${ctx.generationHints.tempoBias}`);
 
