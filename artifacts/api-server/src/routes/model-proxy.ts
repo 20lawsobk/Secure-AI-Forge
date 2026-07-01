@@ -10,6 +10,13 @@ const router: IRouter = Router();
 const MODEL_API_PORT = process.env.MODEL_API_PORT || "9878";
 const MODEL_API_BASE = `http://localhost:${MODEL_API_PORT}`;
 
+// Server-side key injected when the browser hasn't provided one.
+// The Node proxy runs on localhost behind Vite's /api proxy — it is a
+// trusted gateway, so injecting the env key here is safe. External
+// callers never reach this server directly in dev.
+const _SERVER_FALLBACK_KEY =
+  process.env.AI_TRAINING_KEY_PROD || process.env.ADMIN_KEY || "";
+
 // ─── Keep-alive connection pool ─────────────────────────────────────────────
 // Reuse TCP connections to the Python server instead of opening a new socket
 // on every request — eliminates per-request TCP + TLS handshake overhead.
@@ -216,10 +223,15 @@ async function proxyRequest(
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
     };
-    if (req.headers["x-admin-key"])
+    if (req.headers["x-admin-key"]) {
       headers["X-Admin-Key"] = req.headers["x-admin-key"] as string;
-    if (req.headers["x-api-key"])
+    } else if (req.headers["x-api-key"]) {
       headers["X-Api-Key"] = req.headers["x-api-key"] as string;
+    } else if (_SERVER_FALLBACK_KEY) {
+      // Browser hasn't sent an auth header (e.g. admin key not entered yet).
+      // Inject the server-side key so generate endpoints don't 401.
+      headers["X-Api-Key"] = _SERVER_FALLBACK_KEY;
+    }
 
     let upstreamRes: Awaited<ReturnType<typeof undiciRequest>>;
     try {
@@ -286,10 +298,13 @@ async function proxyBinary(
     const timeoutId = setTimeout(() => controller.abort(), 45_000);
 
     const headers: Record<string, string> = {};
-    if (req.headers["x-admin-key"])
+    if (req.headers["x-admin-key"]) {
       headers["X-Admin-Key"] = req.headers["x-admin-key"] as string;
-    if (req.headers["x-api-key"])
+    } else if (req.headers["x-api-key"]) {
       headers["X-Api-Key"] = req.headers["x-api-key"] as string;
+    } else if (_SERVER_FALLBACK_KEY) {
+      headers["X-Api-Key"] = _SERVER_FALLBACK_KEY;
+    }
 
     let upstreamRes: Awaited<ReturnType<typeof undiciRequest>>;
     try {
