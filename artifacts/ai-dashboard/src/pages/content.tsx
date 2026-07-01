@@ -83,16 +83,30 @@ export default function ContentGenerator() {
         "Content-Type": "application/json",
       };
       if (adminKey) headers["X-Admin-Key"] = adminKey;
-      const res = await fetch(`${BASE}/content/generate`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || `Request failed: ${res.status}`);
+
+      const MAX_RETRIES = 2;
+      let lastErr: Error | null = null;
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        if (attempt > 0) {
+          await new Promise((r) => setTimeout(r, attempt * 2000));
+        }
+        const res = await fetch(`${BASE}/content/generate`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+        });
+        if (res.status === 503) {
+          const err = await res.json().catch(() => ({}));
+          lastErr = new Error(err.detail || "Model warming up");
+          continue;
+        }
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail || `Request failed: ${res.status}`);
+        }
+        return res.json();
       }
-      return res.json();
+      throw lastErr ?? new Error("Generation failed after retries");
     },
     onSuccess: (data) => {
       setHistory((prev) => [data, ...prev].slice(0, 10));

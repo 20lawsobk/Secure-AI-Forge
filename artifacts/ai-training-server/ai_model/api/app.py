@@ -460,7 +460,7 @@ async def generate_multi_platform(req: MultiPlatformRequest):
 
     # If every platform slot came back empty the model is cold — signal retry
     if generated_content and not any(
-        any(f.strip() for f in [e.get("hook", ""), e.get("body", ""), e.get("cta", "")])
+        str(e.get("hook", "")).strip() or str(e.get("body", "")).strip() or str(e.get("cta", "")).strip()
         for e in generated_content
     ):
         _logger.warning(
