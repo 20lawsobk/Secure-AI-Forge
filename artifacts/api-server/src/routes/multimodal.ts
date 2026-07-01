@@ -485,7 +485,9 @@ const textWorker = {
       mode: "content",
       step,
       inputs,
-      ...(awareness?.contextString ? { awareness } : {}),
+      ...(awareness?.contextString
+        ? { awareness: awareness.contextString }
+        : {}),
     })) as {
       outputs: Array<{
         text: string;
@@ -515,7 +517,9 @@ const imageWorker = {
     const result = (await maxcorePost("/generate/image", {
       step,
       inputs,
-      ...(awareness?.contextString ? { awareness } : {}),
+      ...(awareness?.contextString
+        ? { awareness: awareness.contextString }
+        : {}),
     })) as {
       outputs: Array<{
         url: string;
@@ -545,7 +549,9 @@ const audioWorker = {
     const result = (await maxcorePost("/generate/audio", {
       step,
       inputs,
-      ...(awareness?.contextString ? { awareness } : {}),
+      ...(awareness?.contextString
+        ? { awareness: awareness.contextString }
+        : {}),
     })) as {
       outputs: Array<{
         url: string;
@@ -575,7 +581,9 @@ const videoWorker = {
     const result = (await maxcorePost("/generate/video", {
       step,
       inputs,
-      ...(awareness?.contextString ? { awareness } : {}),
+      ...(awareness?.contextString
+        ? { awareness: awareness.contextString }
+        : {}),
     })) as {
       outputs: Array<{
         url: string;
@@ -724,6 +732,70 @@ async function handleGeneration(
   };
 }
 
+// ─── pdim helpers ─────────────────────────────────────────────────────────────
+
+async function fetchCurriculumStyleTags(
+  userId: string,
+  platforms: Platform[],
+): Promise<string[]> {
+  try {
+    const res = await undiciFetch(
+      `${MAXCORE_URL}/storage/curriculum/${encodeURIComponent(userId)}`,
+      {
+        headers: { "X-Api-Key": MAXCORE_API_KEY },
+        dispatcher: _modelPool,
+      },
+    );
+    if (!res.ok) return [];
+    const data = (await res.json()) as {
+      top_performers?: Array<{ style_tags?: string[]; platform?: string }>;
+    };
+    const topPerformers = data.top_performers ?? [];
+    const platformSet = new Set(platforms as string[]);
+    const relevant = topPerformers.filter(
+      (p) => !p.platform || platformSet.has(p.platform),
+    );
+    const tags = (relevant.length > 0 ? relevant : topPerformers)
+      .flatMap((p) => p.style_tags ?? [])
+      .filter(Boolean);
+    return [...new Set(tags)].slice(0, 8);
+  } catch {
+    return [];
+  }
+}
+
+function recordGenerationToFlywheel(
+  pkg: MultimodalPackage,
+  req: GenerationRequest,
+): void {
+  const seen = new Set<string>();
+  for (const asset of pkg.assets) {
+    if (!asset.platform) continue;
+    const key = `${asset.platform}:${asset.modality}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    undiciFetch(`${MAXCORE_URL}/storage/feedback`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Api-Key": MAXCORE_API_KEY,
+      },
+      body: JSON.stringify({
+        user_id: req.userId,
+        platform: asset.platform,
+        engagement_rate: 0.5,
+        content_type: asset.modality,
+        style_tags: [
+          ...(req.constraints?.styleTags ?? []),
+          req.intent ?? "engagement",
+          asset.modality,
+        ].filter(Boolean),
+      }),
+      dispatcher: _modelPool,
+    }).catch(() => {});
+  }
+}
+
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
 router.get("/multimodal/packs", (_req: Request, res: Response) => {
@@ -760,6 +832,11 @@ router.post("/multimodal/generate", async (req: Request, res: Response) => {
     return;
   }
 
+  const curriculumTags = await fetchCurriculumStyleTags(
+    body.userId,
+    body.platforms,
+  );
+
   const genReq: GenerationRequest = {
     id: body.id,
     userId: body.userId,
@@ -772,11 +849,17 @@ router.post("/multimodal/generate", async (req: Request, res: Response) => {
     platforms: body.platforms,
     packId: body.packId,
     intent: body.intent,
-    constraints: body.constraints,
+    constraints: {
+      ...body.constraints,
+      styleTags: [
+        ...new Set([...(body.constraints?.styleTags ?? []), ...curriculumTags]),
+      ],
+    },
   };
 
   try {
     const pkg = await handleGeneration(genReq);
+    recordGenerationToFlywheel(pkg, genReq);
     res.json(pkg);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
