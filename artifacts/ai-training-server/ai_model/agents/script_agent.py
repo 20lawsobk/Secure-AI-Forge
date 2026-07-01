@@ -195,6 +195,7 @@ def _parse_cta_from_awareness(awareness: str, platform: str) -> str:
 def _build_awareness_body(awareness: str, platform: str, idea: str, tone: str) -> str:
     """
     Build a body paragraph from live industry context.
+    Uses actual signal headlines rather than tone-keyed template strings.
     Guaranteed to return a non-empty string when awareness is non-empty.
     """
     if not awareness:
@@ -203,14 +204,23 @@ def _build_awareness_body(awareness: str, platform: str, idea: str, tone: str) -
     signals = _parse_signals_for_platform(awareness, platform)
     trending_tags = re.findall(r"#(\w+)", awareness)
     topic_words = [t for t in trending_tags if len(t) > 4][:3]
-    context_phrase = f" ({', '.join('#' + t for t in topic_words)} is trending)" if topic_words else ""
+    context_phrase = f" ({', '.join('#' + t for t in topic_words)} trending)" if topic_words else ""
 
+    if len(signals) >= 2:
+        s1 = signals[0].split(":")[0].rstrip(",.").strip()[:100]
+        s2 = signals[1].split(":")[0].rstrip(",.").strip()[:100]
+        return f"{idea}{context_phrase}. {s1}. {s2}."
+    elif signals:
+        s1 = signals[0].split(":")[0].rstrip(",.").strip()[:120]
+        return f"{idea}{context_phrase}. {s1}."
+
+    # No signals parsed — tone-aware synthesis from hashtag/keyword context
+    if topic_words:
+        tag_str = ", ".join("#" + t for t in topic_words)
+        return f"{idea} — riding the wave of {tag_str} that's dominating right now."
     if tone == "energetic":
         return f"{idea} is exactly what the moment needs{context_phrase}. The energy is undeniable."
     elif tone == "professional":
-        body_signal = signals[0].split(":")[0] if signals else ""
-        if body_signal:
-            return f"{idea} arrives at the right time{context_phrase}. {body_signal}."
         return f"Presenting {idea}{context_phrase} — crafted for today's landscape."
     elif tone == "casual":
         return f"So {idea} just dropped{context_phrase} — and yeah, it's that good."
@@ -231,7 +241,20 @@ class ScriptAgent:
         goal_token = f"<GOAL_{req.goal.upper()}>"
         tone_token = f"<TONE_{req.tone.upper()}>"
 
-        prompt = f"{platform_token} {goal_token} {tone_token} <STAGE_HOOK>"
+        # Always inject live awareness signals into the primary LLM prompt so the
+        # model conditions on them even when it generates successfully.
+        awareness_prefix = ""
+        if req.awareness:
+            signals = _parse_signals_for_platform(req.awareness, req.platform)
+            if signals:
+                awareness_prefix = f"Industry context: {signals[0][:120]}\n"
+                if len(signals) > 1:
+                    awareness_prefix += f"Trend: {signals[1][:80]}\n"
+            trending_tags = re.findall(r"#(\w+)", req.awareness)
+            if trending_tags:
+                awareness_prefix += f"Trending: {', '.join(trending_tags[:4])}\n"
+
+        prompt = f"{awareness_prefix}{platform_token} {goal_token} {tone_token} <STAGE_HOOK>"
 
         try:
             output = self.model.generate(prompt, max_new_tokens=80, temperature=0.8, top_p=0.92)
