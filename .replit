@@ -139,12 +139,12 @@ waitForPort = 5000
 name = "smoke-load-test"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "pnpm --filter @workspace/scripts run smoke-load-test"
-
 [workflows.workflow.metadata]
 outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/scripts run smoke-load-test --concurrency=90 --waves=5 --timeout=60000"
 
 [agent]
 stack = "BEST_EFFORT_FALLBACK"
