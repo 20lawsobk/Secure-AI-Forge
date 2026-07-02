@@ -5329,8 +5329,14 @@ async def api_generate_video(req: ApiGenerateVideoRequest, _key=Depends(require_
             from ai_model.video import ai_scene_builder
 
             agent     = VideoAgent(_creative_model, _script_agent, _visual_spec_agent)
+            # `idea` is templated raw into scene phrases (e.g. "Stream {idea}
+            # now") — it must stay a clean topic string. The richer
+            # intent/audience/theme context from `brief.augmented_idea` is
+            # routed through `awareness` instead (bullet-formatted so the
+            # scene sampler's awareness parser picks it up per scene type),
+            # not concatenated into `idea` where it would corrupt templates.
             agent_req = VideoAgentRequest(
-                idea=f"{req.idea} | {brief.augmented_idea}" if req.idea else brief.augmented_idea,
+                idea=req.idea or brief.augmented_idea,
                 platform=req.platform,
                 goal=req.goal,
                 tone=req.tone or brief.tone,
@@ -5338,6 +5344,7 @@ async def api_generate_video(req: ApiGenerateVideoRequest, _key=Depends(require_
                 artist_name=req.artist_name or "",
                 duration=float(req.duration or 0),
                 artist_context={"audio_path": req.user_audio_path} if req.user_audio_path else {},
+                awareness="\n".join(f"• {d}" for d in brief.directives),
             )
 
             production = agent.plan(agent_req)
@@ -5453,8 +5460,11 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
     )
 
     from ai_model.video.video_agent import VideoAgentRequest
+    # `idea` is templated raw into scene phrases — keep it clean and route
+    # the richer intent/audience/theme context through `awareness` instead
+    # (see /api/generate-video for the same fix and rationale).
     req = VideoAgentRequest(
-        idea=f"{idea} | {brief.augmented_idea}",
+        idea=idea,
         platform=platform,
         goal=goal,
         tone=tone or brief.tone,
@@ -5462,6 +5472,7 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
         artist_name=artist_name,
         duration=duration,
         artist_context=artist_ctx,
+        awareness="\n".join(f"• {d}" for d in brief.directives),
     )
 
     job_id = str(uuid.uuid4())

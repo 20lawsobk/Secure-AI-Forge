@@ -14,7 +14,12 @@ from __future__ import annotations
 
 import random
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
+
+try:
+    from ai_model.request_intelligence import rank_scene_phrases
+except Exception:  # pragma: no cover - defensive import, keeps sampler standalone
+    rank_scene_phrases = None  # type: ignore[assignment]
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -27,14 +32,32 @@ def _f(template: str, **kw) -> str:
 
 
 class _UsedSet:
-    """Prevent duplicate phrases within one video."""
+    """Prevent duplicate phrases within one video, biased toward the
+    highest-scoring available candidate rather than pure random choice.
+
+    Uses `rank_scene_phrases` (brief-aware hook/CTA/keyword heuristics) to
+    rank the unused pool, then samples from the top tier so quality rises
+    without every video reusing the exact same #1 phrase.
+    """
     def __init__(self):
         self._seen: set[str] = set()
 
-    def pick(self, pool: List[str]) -> str:
+    def pick(self, pool: List[str], scene_type: str = "", keywords: Optional[List[str]] = None) -> str:
         candidates = [p for p in pool if p not in self._seen]
         if not candidates:
             candidates = pool
+
+        if rank_scene_phrases is not None and scene_type:
+            try:
+                ranked = rank_scene_phrases(candidates, scene_type, keywords)
+                if ranked:
+                    top_n = max(1, len(ranked) // 3)
+                    choice = random.choice([p for p, _ in ranked[:top_n]])
+                    self._seen.add(choice)
+                    return choice
+            except Exception:
+                pass
+
         choice = random.choice(candidates)
         self._seen.add(choice)
         return choice
@@ -195,6 +218,7 @@ def sample_all_scenes(
     platform: str,
     artist_name: str,
     awareness: str = "",
+    keywords: Optional[List[str]] = None,
 ) -> Tuple[Dict[int, str], str]:
     """
     Return ({scene_idx: text}, "datasets") for every scene in the sequence.
@@ -204,6 +228,10 @@ def sample_all_scenes(
       2. Awareness signals — live industry context (always non-empty when active)
       3. Seed phrase banks — dead code in production; fallback only when both
                              pdim and awareness are absent
+
+    Within each tier, the candidate pool is ranked (hook/CTA/keyword fit per
+    scene type) rather than picked purely at random, so the phrase that best
+    matches the scene's role and the request's keywords is favoured.
     """
     used = _UsedSet()
     ctx = dict(idea=idea or "the drop", genre=genre or "music",
@@ -218,7 +246,7 @@ def sample_all_scenes(
         # ── Tier 1: pdim live corpus ──────────────────────────────────────────
         pdim_pool = _pdim_fetch_phrases(stype)
         if pdim_pool:
-            raw = used.pick(pdim_pool)
+            raw = used.pick(pdim_pool, stype, keywords)
             text = _personalise(raw, **ctx)
             results[idx] = _trim(text)
             continue
@@ -230,7 +258,7 @@ def sample_all_scenes(
                 artist_name or "the artist"
             )
             if awareness_pool:
-                raw = used.pick(awareness_pool)
+                raw = used.pick(awareness_pool, stype, keywords)
                 text = _personalise(raw, **ctx)
                 results[idx] = _trim(text)
                 _pdim_push_phrase(stype, raw)
@@ -238,7 +266,7 @@ def sample_all_scenes(
 
         # ── Tier 3: seed phrase banks (should not be reached in production) ───
         pool = cta_pool if stype == "cta" else _POOL_MAP.get(stype, VERSE_PHRASES)
-        raw = used.pick(pool)
+        raw = used.pick(pool, stype, keywords)
         text = _personalise(raw, **ctx)
         results[idx] = _trim(text, max_words=10)
         _pdim_push_phrase(stype, raw)
