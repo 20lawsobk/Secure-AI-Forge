@@ -24,6 +24,8 @@ const FE_BASE    = `http://localhost:${FE_PORT}`;
 
 const ADMIN_KEY  =
   process.env.ADMIN_KEY ??
+  process.env.AI_SERVER_KEY ??
+  process.env.AI_TRAINING_KEY_PROD ??
   "mbs_8a3edbac97ff333dda5068410227267e6d85b14a4c9caee279fbb18ddfb47edc";
 
 const args        = process.argv.slice(2);
