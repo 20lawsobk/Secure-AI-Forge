@@ -7,31 +7,34 @@
  *            and reports P50 / P95 / P99 latencies + error rates.
  *
  * Usage:
- *   ADMIN_KEY=mbs_xxx tsx ./src/smoke-load-test.ts [--concurrency=10] [--waves=5] [--timeout=15000]
+ *   ADMIN_KEY=mbs_xxx tsx ./src/smoke-load-test.ts [--concurrency=10] [--waves=5] [--timeout=15000] [--url=https://myapp.replit.app]
  *
  * Exits 0 = all smoke checks passed, 1 = one or more failures.
  */
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
+const args        = process.argv.slice(2);
+const CONCURRENCY = parseInt(args.find(a => a.startsWith("--concurrency="))?.split("=")[1] ?? "10");
+const WAVES       = parseInt(args.find(a => a.startsWith("--waves="))?.split("=")[1] ?? "5");
+const TIMEOUT_MS  = parseInt(args.find(a => a.startsWith("--timeout="))?.split("=")[1] ?? "15000");
+
+// --url=https://myapp.replit.app  →  target the deployed public URL instead of localhost
+const EXTERNAL_URL = (args.find(a => a.startsWith("--url="))?.split("=").slice(1).join("=") ?? "").replace(/\/$/, "");
+
 const API_PORT   = process.env.API_PORT   ?? "8080";
 const MODEL_PORT = process.env.MODEL_PORT ?? "9878";
 const FE_PORT    = process.env.FE_PORT    ?? "5000";
 
-const API_BASE   = `http://localhost:${API_PORT}`;
-const MODEL_BASE = `http://localhost:${MODEL_PORT}`;
-const FE_BASE    = `http://localhost:${FE_PORT}`;
+const API_BASE   = EXTERNAL_URL || `http://localhost:${API_PORT}`;
+const MODEL_BASE = EXTERNAL_URL ? `${EXTERNAL_URL}/api` : `http://localhost:${MODEL_PORT}`;
+const FE_BASE    = EXTERNAL_URL || `http://localhost:${FE_PORT}`;
 
 const ADMIN_KEY  =
   process.env.ADMIN_KEY ??
   process.env.AI_SERVER_KEY ??
   process.env.AI_TRAINING_KEY_PROD ??
   "mbs_8a3edbac97ff333dda5068410227267e6d85b14a4c9caee279fbb18ddfb47edc";
-
-const args        = process.argv.slice(2);
-const CONCURRENCY = parseInt(args.find(a => a.startsWith("--concurrency="))?.split("=")[1] ?? "10");
-const WAVES       = parseInt(args.find(a => a.startsWith("--waves="))?.split("=")[1] ?? "5");
-const TIMEOUT_MS  = parseInt(args.find(a => a.startsWith("--timeout="))?.split("=")[1] ?? "15000");
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -486,7 +489,12 @@ async function runLoadBurst(targets: Endpoint[]): Promise<void> {
 
 async function main(): Promise<void> {
   console.log(BOLD("\n  MaxBooster Smoke + Load Test"));
-  console.log(DIM(`  Targets: Frontend:${FE_PORT}  API:${API_PORT}  Python:${MODEL_PORT}`));
+  if (EXTERNAL_URL) {
+    console.log(DIM(`  Target: ${EXTERNAL_URL}  (deployed)`));
+    console.log(DIM(`  Python AI tier routed via ${EXTERNAL_URL}/api/*`));
+  } else {
+    console.log(DIM(`  Targets: Frontend:${FE_PORT}  API:${API_PORT}  Python:${MODEL_PORT}`));
+  }
   console.log(DIM(`  Admin key prefix: ${ADMIN_KEY.slice(0, 12)}...`));
   console.log(DIM(`  Timeout: ${TIMEOUT_MS}ms  |  Load: concurrency=${CONCURRENCY} waves=${WAVES}\n`));
 
