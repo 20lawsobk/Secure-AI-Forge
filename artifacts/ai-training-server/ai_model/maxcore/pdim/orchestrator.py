@@ -141,16 +141,26 @@ class PDIMOrchestrator:
                     METRICS.incr("pdim.compute")
                     with METRICS.timer("pdim.compute_ms"):
                         result = compute_fn(request)
-                    # Write result onto slot BEFORE _release() signals followers
-                    # so they receive it directly — no storage round-trip needed.
-                    # dedup.put() persists to pdim for cross-node fleet dedup.
+                    # Write result onto slot BEFORE signalling followers so
+                    # they receive it directly — no storage round-trip needed.
                     if isinstance(result, dict):
                         slot.result = result
-                    self.dedup.put(key, result)
+                    # Persist to pdim + release the slot in a background thread.
+                    # The slot stays in _inflight during the entire write (~85ms),
+                    # so any new request for this key that arrives during that
+                    # window becomes a follower and receives slot.result directly
+                    # rather than recomputing — closing the post-release/pre-pdim
+                    # race window that caused violations under heavy parallel load.
+                    threading.Thread(
+                        target=self._put_and_release,
+                        args=(key, slot, result),
+                        daemon=True,
+                    ).start()
                     return {"result": result, "source": "compute"}
-                finally:
-                    # Runs after return — slot.result is already set above.
+                except Exception:
+                    # compute_fn raised or thread start failed; release immediately.
                     self._release(key, slot)
+                    raise
 
             # Follower: wait for the leader then read its result off the slot.
             # slot.result is set before ev.set(), so no storage race is possible.
@@ -170,6 +180,21 @@ class PDIMOrchestrator:
         with self._lock:
             self._inflight.pop(key, None)
         slot.event.set()
+
+    def _put_and_release(self, key: str, slot: _Slot, result: Any) -> None:
+        """Persist result to the dedup cache then release the single-flight slot.
+
+        Runs in a daemon thread so the leader's ``compute()`` call returns to its
+        caller immediately after the result is computed.  The slot stays in
+        ``_inflight`` for the entire duration of the pdim write (~85 ms WAN), so
+        any concurrent request for the same key that arrives during that window
+        still finds the slot, becomes a follower, and reads ``slot.result``
+        directly — no recompute, no race window between _release and pdim commit.
+        """
+        try:
+            self.dedup.put(key, result)
+        finally:
+            self._release(key, slot)
 
     # ── durable async: submit / poll / drain ──────────────────────────────────
     def submit(self, request: Any = None, *, queue: str = "default", model_id: str = "model",

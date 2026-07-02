@@ -216,6 +216,12 @@ class StorageClient:
             else:
                 result = self._exec("SET", ns_key, serialized)
             if result is not None:
+                # Write-through: mirror to fallback even on pdim success so that
+                # a transient GET failure on a subsequent request (common under
+                # heavy concurrent load) can still be served from the local dict
+                # rather than falling through to a cache miss and recompute.
+                with self._lock:
+                    self._fallback[ns_key] = value
                 return True
         with self._lock:
             self._fallback[ns_key] = value
