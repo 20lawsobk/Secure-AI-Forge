@@ -29,9 +29,12 @@ STORAGE_INSTANCE = os.getenv("STORAGE_INSTANCE", "max-booster-training")
 KEY_PREFIX = "mb:"
 
 # ─── Connection pool ──────────────────────────────────────────────────────────
-# urllib3 PoolManager reuses TCP connections across requests, eliminating the
-# per-request TCP handshake overhead (~1-2 ms each).  10 connections per host
-# is enough to saturate any single pdim instance from one Python process.
+# urllib3 HTTP/1.1 with a large pool is the right choice for high-throughput
+# server-to-server K/V lookups.  HTTP/2 multiplexing funnels all threads onto
+# one connection; the remote server then serialises streams on it, which is
+# slower than 64 truly-independent HTTP/1.1 connections that the server handles
+# in parallel.  maxsize=64 means up to 64 concurrent requests are in-flight
+# simultaneously with zero queuing at the pool level.
 _pool_manager: Any = None
 _pool_lock = threading.Lock()
 
@@ -43,7 +46,7 @@ def _get_pool() -> Any:
             if _pool_manager is None:
                 _pool_manager = urllib3.PoolManager(
                     num_pools=1,
-                    maxsize=10,
+                    maxsize=64,
                     timeout=urllib3.Timeout(connect=3, read=8),
                     retries=urllib3.Retry(total=0),
                     headers={"Content-Type": "application/json"},
@@ -79,17 +82,15 @@ class StorageClient:
             payload["args"] = [str(a) for a in args]
 
         data = json.dumps(payload).encode("utf-8")
-        auth_header = {"Authorization": f"Bearer {self._token}",
-                       "Content-Type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Content-Type": "application/json",
+        }
 
         pool = _get_pool()
         if pool is not None:
             try:
-                resp = pool.request(
-                    "POST", self._url,
-                    body=data,
-                    headers=auth_header,
-                )
+                resp = pool.request("POST", self._url, body=data, headers=headers)
                 body = resp.data.decode("utf-8").strip()
                 if not body:
                     return None
@@ -103,27 +104,24 @@ class StorageClient:
             except Exception as e:
                 logger.debug(f"[Storage] exec {cmd} failed: {e}")
                 return None
-        else:
-            from urllib.request import urlopen, Request as _Req
-            req = _Req(
-                self._url, data=data,
-                headers=auth_header, method="POST",
-            )
-            try:
-                with urlopen(req, timeout=8) as resp:
-                    body = resp.read().decode("utf-8").strip()
-                    if not body:
+
+        from urllib.request import urlopen, Request as _Req
+        req = _Req(self._url, data=data, headers=headers, method="POST")
+        try:
+            with urlopen(req, timeout=8) as resp:
+                body = resp.read().decode("utf-8").strip()
+                if not body:
+                    return None
+                parsed = json.loads(body)
+                if isinstance(parsed, dict):
+                    if "error" in parsed:
+                        logger.debug(f"[Storage] {cmd} error: {parsed['error']}")
                         return None
-                    parsed = json.loads(body)
-                    if isinstance(parsed, dict):
-                        if "error" in parsed:
-                            logger.debug(f"[Storage] {cmd} error: {parsed['error']}")
-                            return None
-                        return parsed.get("result")
-                    return parsed
-            except (URLError, HTTPError, Exception) as e:
-                logger.debug(f"[Storage] exec {cmd} failed: {e}")
-                return None
+                    return parsed.get("result")
+                return parsed
+        except (URLError, HTTPError, Exception) as e:
+            logger.debug(f"[Storage] exec {cmd} failed: {e}")
+            return None
 
     def mget(self, *keys: str) -> list:
         """
