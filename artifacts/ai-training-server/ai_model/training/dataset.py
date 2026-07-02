@@ -1,10 +1,94 @@
 from __future__ import annotations
 import json
 import os
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 import torch
 from torch.utils.data import Dataset
+
+from ai_model.model.tokenizer import CONTROL_TOKENS
+
+# Map metadata fields present in training JSON (platform/goal/genre/tone) onto
+# the reserved <CATEGORY_VALUE> control tokens, so the model actually sees
+# conditioning signal during training instead of it being dropped on the
+# floor. Without this, CONTROL_TOKENS exist in the vocab but are never used
+# as training input, so the model can't learn to condition generation on
+# platform/goal/genre/tone at inference time.
+_FIELD_TO_CATEGORY = {
+    "platform": "PLATFORM",
+    "goal": "GOAL",
+    "genre": "GENRE",
+    "tone": "TONE",
+}
+
+
+def _normalize(value: str) -> str:
+    return "".join(ch for ch in value.upper() if ch.isalnum())
+
+
+def _build_category_lookup() -> Dict[str, Dict[str, str]]:
+    lookup: Dict[str, Dict[str, str]] = {}
+    for tok in CONTROL_TOKENS:
+        inner = tok.strip("<>")
+        if "_" not in inner:
+            continue
+        category, _, value = inner.partition("_")
+        lookup.setdefault(category, {})[_normalize(value)] = tok
+    return lookup
+
+
+_CATEGORY_LOOKUP = _build_category_lookup()
+
+
+def _control_token_for(field: str, value: Any) -> Optional[str]:
+    if not isinstance(value, str) or not value:
+        return None
+    category = _FIELD_TO_CATEGORY.get(field)
+    if not category:
+        return None
+    return _CATEGORY_LOOKUP.get(category, {}).get(_normalize(value))
+
+
+def extract_text_from_item(item: Any) -> str:
+    """Turn one raw training-JSON item into a training text string, prefixed
+    with any control tokens its metadata maps to. Standalone (not tied to a
+    tokenizer) so it can be reused to build a corpus before a tokenizer
+    exists — e.g. training the BPE vocab itself.
+    """
+    if isinstance(item, str):
+        return item
+
+    if not isinstance(item, dict):
+        return str(item)
+
+    control_tokens: List[str] = []
+    for field in ("platform", "goal", "genre", "tone"):
+        tok = _control_token_for(field, item.get(field))
+        if tok and tok not in control_tokens:
+            control_tokens.append(tok)
+    if not control_tokens and isinstance(item.get("platforms"), list):
+        for p in item["platforms"]:
+            tok = _control_token_for("platform", p)
+            if tok and tok not in control_tokens:
+                control_tokens.append(tok)
+
+    parts = []
+    priority = ["text", "content", "script", "caption", "hook", "body", "cta",
+                "headline", "description", "output", "generated", "prompt", "response"]
+
+    for key in priority:
+        if key in item and item[key]:
+            parts.append(str(item[key]))
+
+    if not parts:
+        for v in item.values():
+            if isinstance(v, str) and len(v) > 5:
+                parts.append(v)
+
+    body = " ".join(parts)
+    if control_tokens:
+        return " ".join(control_tokens) + " " + body
+    return body
 
 
 class CreativeDataset(Dataset):
@@ -35,26 +119,7 @@ class CreativeDataset(Dataset):
                 self.samples.append(text.strip())
 
     def _extract_text(self, item: Any) -> str:
-        if isinstance(item, str):
-            return item
-
-        if not isinstance(item, dict):
-            return str(item)
-
-        parts = []
-        priority = ["text", "content", "script", "caption", "hook", "body", "cta",
-                    "headline", "description", "output", "generated", "prompt", "response"]
-
-        for key in priority:
-            if key in item and item[key]:
-                parts.append(str(item[key]))
-
-        if not parts:
-            for v in item.values():
-                if isinstance(v, str) and len(v) > 5:
-                    parts.append(v)
-
-        return " ".join(parts)
+        return extract_text_from_item(item)
 
     def _pre_encode(self):
         bos_id = self.tokenizer.token_to_id("<BOS>")

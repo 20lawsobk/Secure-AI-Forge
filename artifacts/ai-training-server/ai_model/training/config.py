@@ -17,7 +17,10 @@ class TrainConfig:
 
         self.lr: float = train_cfg.get("lr", 3e-4)
         self.batch_size: int = train_cfg.get("batch_size", 8)
-        self.epochs: int = train_cfg.get("epochs", 3)
+        # Data-constrained regime (real+synthetic corpus is small relative to
+        # model capacity per Chinchilla scaling), so the lever is more epochs
+        # over higher-quality/more-diverse data rather than a bigger model.
+        self.epochs: int = train_cfg.get("epochs", 6)
         self.data_path: str = train_cfg.get("data_path", "training/boostsheet_samples.json")
 
         self.weight_decay: float = 0.01

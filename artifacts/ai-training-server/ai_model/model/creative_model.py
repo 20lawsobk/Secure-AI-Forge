@@ -3,7 +3,8 @@ import gc
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .tokenizer import SimpleTokenizer
+from typing import Union
+from .tokenizer import SimpleTokenizer, BPETokenizer
 
 
 class CreativeModel:
@@ -15,7 +16,7 @@ class CreativeModel:
     - Repetition penalty (vectorized)
     """
 
-    def __init__(self, model: nn.Module, tokenizer: SimpleTokenizer, device="cpu"):
+    def __init__(self, model: nn.Module, tokenizer: Union[SimpleTokenizer, BPETokenizer], device="cpu"):
         self.model = model.to(device)
         self.tokenizer = tokenizer
         self.device = device
