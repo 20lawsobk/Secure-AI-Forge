@@ -18,11 +18,15 @@ if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
 
-// Cap at 2 workers.  4 Node workers + 1 Python model (~1.7 GB) leaves only
-// ~1 GB headroom for PIL render threads and ffmpeg.  2 Node workers saves
-// ~300 MB, giving the renderer enough room to run without OOM-killing the
-// Python server mid-render.
-const NUM_WORKERS = Math.min(os.cpus().length, 2);
+// Default to min(cpus, 4) Node workers.  Each worker is ~150-200 MB;
+// 4 workers + the Python model (~1.7 GB) leaves ~4 GB headroom on an 8 GB
+// host for PIL render threads and ffmpeg.  Override via NODE_CLUSTER_WORKERS
+// env var if you need to dial back on a memory-constrained host.
+const _envWorkers = parseInt(process.env["NODE_CLUSTER_WORKERS"] ?? "", 10);
+const NUM_WORKERS = Math.min(
+  os.cpus().length,
+  Number.isFinite(_envWorkers) && _envWorkers > 0 ? _envWorkers : 4,
+);
 
 if (cluster.isPrimary) {
   console.log(

@@ -12,8 +12,13 @@ import time
 import logging
 import threading
 from typing import Any, Optional
-from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
+
+try:
+    import urllib3
+    _HAS_URLLIB3 = True
+except ImportError:
+    _HAS_URLLIB3 = False
 
 logger = logging.getLogger("storage_client")
 
@@ -22,6 +27,28 @@ STORAGE_BEARER_TOKEN = os.getenv("STORAGE_BEARER_TOKEN", "")
 STORAGE_INSTANCE = os.getenv("STORAGE_INSTANCE", "max-booster-training")
 
 KEY_PREFIX = "mb:"
+
+# ─── Connection pool ──────────────────────────────────────────────────────────
+# urllib3 PoolManager reuses TCP connections across requests, eliminating the
+# per-request TCP handshake overhead (~1-2 ms each).  10 connections per host
+# is enough to saturate any single pdim instance from one Python process.
+_pool_manager: Any = None
+_pool_lock = threading.Lock()
+
+
+def _get_pool() -> Any:
+    global _pool_manager
+    if _pool_manager is None and _HAS_URLLIB3:
+        with _pool_lock:
+            if _pool_manager is None:
+                _pool_manager = urllib3.PoolManager(
+                    num_pools=1,
+                    maxsize=10,
+                    timeout=urllib3.Timeout(connect=3, read=8),
+                    retries=urllib3.Retry(total=0),
+                    headers={"Content-Type": "application/json"},
+                )
+    return _pool_manager
 
 
 class StorageClient:
@@ -52,18 +79,18 @@ class StorageClient:
             payload["args"] = [str(a) for a in args]
 
         data = json.dumps(payload).encode("utf-8")
-        req = Request(
-            self._url,
-            data=data,
-            headers={
-                "Authorization": f"Bearer {self._token}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        try:
-            with urlopen(req, timeout=8) as resp:
-                body = resp.read().decode("utf-8").strip()
+        auth_header = {"Authorization": f"Bearer {self._token}",
+                       "Content-Type": "application/json"}
+
+        pool = _get_pool()
+        if pool is not None:
+            try:
+                resp = pool.request(
+                    "POST", self._url,
+                    body=data,
+                    headers=auth_header,
+                )
+                body = resp.data.decode("utf-8").strip()
                 if not body:
                     return None
                 parsed = json.loads(body)
@@ -73,9 +100,63 @@ class StorageClient:
                         return None
                     return parsed.get("result")
                 return parsed
-        except (URLError, HTTPError, Exception) as e:
-            logger.debug(f"[Storage] exec {cmd} failed: {e}")
-            return None
+            except Exception as e:
+                logger.debug(f"[Storage] exec {cmd} failed: {e}")
+                return None
+        else:
+            from urllib.request import urlopen, Request as _Req
+            req = _Req(
+                self._url, data=data,
+                headers=auth_header, method="POST",
+            )
+            try:
+                with urlopen(req, timeout=8) as resp:
+                    body = resp.read().decode("utf-8").strip()
+                    if not body:
+                        return None
+                    parsed = json.loads(body)
+                    if isinstance(parsed, dict):
+                        if "error" in parsed:
+                            logger.debug(f"[Storage] {cmd} error: {parsed['error']}")
+                            return None
+                        return parsed.get("result")
+                    return parsed
+            except (URLError, HTTPError, Exception) as e:
+                logger.debug(f"[Storage] exec {cmd} failed: {e}")
+                return None
+
+    def mget(self, *keys: str) -> list:
+        """
+        Fetch multiple keys in parallel threads, returning values in order.
+        Falls back to sequential GETs if the storage server is unavailable.
+        For batches ≤ 3 keys the overhead of threading is not worth it;
+        those go sequential automatically.
+        """
+        if not keys:
+            return []
+        ns_keys = [self._ns(k) for k in keys]
+        if not self.is_available or len(keys) <= 3:
+            return [self.get(k) for k in keys]
+
+        results: list = [None] * len(ns_keys)
+
+        def _fetch(idx: int, ns_key: str) -> None:
+            raw = self._exec("GET", ns_key)
+            if raw is not None:
+                try:
+                    results[idx] = json.loads(raw) if isinstance(raw, str) else raw
+                except (json.JSONDecodeError, TypeError):
+                    results[idx] = raw
+
+        threads = [
+            threading.Thread(target=_fetch, args=(i, k), daemon=True)
+            for i, k in enumerate(ns_keys)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        return results
 
     def _ns(self, key: str) -> str:
         """Namespace a key under mb:"""
