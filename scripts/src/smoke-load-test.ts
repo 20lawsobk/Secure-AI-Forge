@@ -1,3 +1,4 @@
+export {};
 /**
  * MaxBooster Smoke + Load Test
  *

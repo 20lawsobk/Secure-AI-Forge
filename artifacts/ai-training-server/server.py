@@ -1835,32 +1835,42 @@ async def generate_content(req: ContentRequest, _key = Depends(require_scope("ge
         )))
         return script_result, dist_result
 
-    try:
-        script_result, dist_result = await asyncio.wait_for(_run_content_inference(), timeout=20.0)
-
-        # Empty output = model still warming — let the client retry
-        if not any([script_result.hook.strip(), script_result.body.strip(), script_result.cta.strip()]):
-            _srv_logger.warning(
-                "[generate-from-url] empty generatedContent for topic %r (platform=%s) — "
-                "model may be cold-starting; client should retry",
-                topic, platform,
-            )
-            raise HTTPException(
-                status_code=503,
-                detail="empty generatedContent — model warming up, please retry",
-            )
-
-        _result = {
+    def _build_result(_request=None):
+        from ai_model.agents.script_agent import ScriptRequest
+        from ai_model.agents.distribution_agent import DistributionRequest
+        sr = _script_agent.run(ScriptRequest(
+            idea=topic, platform=platform, goal=req.goal,
+            tone=req.tone, awareness=req.awareness,
+        ))
+        full_script = f"{sr.hook}\n{sr.body}\n{sr.cta}"
+        dr = _distribution_agent.run(DistributionRequest(
+            script=full_script, platform=platform,
+            goal=req.goal, awareness=req.awareness,
+        ))
+        if not any([sr.hook.strip(), sr.body.strip(), sr.cta.strip()]):
+            raise ValueError("empty generatedContent — model warming up, please retry")
+        return {
             "success": True,
             "platform": platform,
-            "caption": dist_result.caption,
-            "hook": script_result.hook,
-            "body": script_result.body,
-            "cta": script_result.cta,
-            "hashtags": dist_result.hashtags if req.include_hashtags else [],
-            "source": getattr(script_result, "source", "template"),
-            "processing_time_ms": (time.time() - start) * 1000,
+            "caption": dr.caption,
+            "hook": sr.hook,
+            "body": sr.body,
+            "cta": sr.cta,
+            "hashtags": dr.hashtags if req.include_hashtags else [],
+            "source": getattr(sr, "source", "template"),
         }
+
+    try:
+        # ── Dedup + single-flight via PDIM orchestrator ───────────────────────
+        # Identical concurrent requests collapse to one compute; all share result.
+        _orch = _get_pdim_orchestrator()
+        _cache_key = {"platform": platform, "topic": topic, "tone": req.tone,
+                      "goal": req.goal, "awareness": req.awareness}
+        _out = await _in_thread(lambda: _orch.compute(_cache_key, _build_result, namespace="api_content"))
+        _result = dict(_out["result"])
+        if _out.get("source") in ("cache", "coalesced"):
+            _result["cached"] = True
+        _result["processing_time_ms"] = round((time.time() - start) * 1000, 1)
         _fw_ingest(_key, "scripts", _result, {
             "topic": topic, "platform": platform,
             "tone": req.tone, "awareness": req.awareness,
@@ -1868,15 +1878,9 @@ async def generate_content(req: ContentRequest, _key = Depends(require_scope("ge
         return _result
     except HTTPException:
         raise
-    except asyncio.TimeoutError:
-        _srv_logger.warning(
-            "[generate-from-url] empty generatedContent for topic %r — timeout; client should retry",
-            topic,
-        )
-        raise HTTPException(
-            status_code=503,
-            detail="empty generatedContent — generation timed out, please retry",
-        )
+    except ValueError as e:
+        _srv_logger.warning("[generate-from-url] %s topic=%r platform=%s", e, topic, platform)
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
