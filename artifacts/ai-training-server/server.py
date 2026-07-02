@@ -336,7 +336,7 @@ def _init_ai_model():
 
     try:
         sys.path.insert(0, str(Path(__file__).parent))
-        from ai_model.model.tokenizer import SimpleTokenizer
+        from ai_model.model.tokenizer import BPETokenizer
         from ai_model.model.transformer import TransformerLM
         from ai_model.model.creative_model import CreativeModel
         from ai_model.agents.script_agent import ScriptAgent
@@ -349,7 +349,7 @@ def _init_ai_model():
         import torch
 
         print("[AI Model] Initializing MaxBooster AI Content Model...")
-        _tokenizer = SimpleTokenizer()
+        _tokenizer = BPETokenizer()
 
         DEVICE = "cpu"
         dim = int(os.environ.get("AI_MODEL_DIM", "512"))
@@ -366,7 +366,10 @@ def _init_ai_model():
             if isinstance(checkpoint, dict) and "vocab" in checkpoint:
                 _tokenizer.vocab = checkpoint["vocab"]
                 _tokenizer.inv_vocab = checkpoint["inv_vocab"]
-                _tokenizer.next_id = checkpoint["next_id"]
+                merges = checkpoint.get("merges", [])
+                _tokenizer.merges = [tuple(p) for p in merges]
+                _tokenizer._merge_ranks = {tuple(p): i for i, p in enumerate(_tokenizer.merges)}
+                _tokenizer.freeze()
                 state_dict = checkpoint["model_state_dict"]
                 if "config" in checkpoint:
                     cfg = checkpoint["config"]
@@ -597,6 +600,17 @@ class StartTrainingRequest(BaseModel):
     batch_size: int = 8
     use_synthetic: bool = True
     synthetic_count: int = 1000
+
+class BPEScaleUpRequest(BaseModel):
+    epochs: int = 6
+    synthetic_count: int = 4000
+    vocab_size: int = 4000
+    dim: int = 512
+    layers: int = 8
+    heads: int = 8
+    max_len: int = 1024
+    batch_size: int = 8
+    learning_rate: float = 3e-4
 
 class _AwarenessMixin(BaseModel):
     """Normalises ``awareness`` whether Node.js sends it as a plain string or as
@@ -879,7 +893,7 @@ def _training_bridge(texts: list, epochs: int, phase_label: str,
         "model_state_dict": _creative_model.model.state_dict(),
         "vocab": _tokenizer.vocab,
         "inv_vocab": _tokenizer.inv_vocab,
-        "next_id": _tokenizer.next_id,
+        "merges": _tokenizer.merges,
         "config": _model_config,
     }, str(weights_dir / "model.pt"))
     np_weights = {k: v.cpu().numpy() for k, v in _creative_model.model.state_dict().items()}
@@ -1243,7 +1257,7 @@ def _run_training(req: StartTrainingRequest, job_id: str):
             "model_state_dict": _creative_model.model.state_dict(),
             "vocab": _tokenizer.vocab,
             "inv_vocab": _tokenizer.inv_vocab,
-            "next_id": _tokenizer.next_id,
+            "merges": _tokenizer.merges,
             "config": _model_config,
         }, str(weights_path))
 
@@ -1256,6 +1270,185 @@ def _run_training(req: StartTrainingRequest, job_id: str):
 
     except Exception as e:
         log_training(f"Training job {job_id} failed: {e}", level="error", job_id=job_id)
+        with _training_lock:
+            _training_state["state"] = "error"
+        import traceback
+        traceback.print_exc()
+
+@app.post("/admin/train-bpe-scaleup")
+async def train_bpe_scaleup(req: BPEScaleUpRequest, background_tasks: BackgroundTasks,
+                             _key = Depends(require_scope("train"))):
+    """One-shot pipeline: build combined real+synthetic corpus, train a fresh
+    BPE tokenizer on it, train a TransformerLM from scratch on that vocab, and
+    hot-swap the live global model/tokenizer in this process when done.
+    Runs as a background task inside this persistent server process (not a
+    bash-spawned subprocess) so it survives independent of the calling shell."""
+    job_id = str(uuid.uuid4())[:8]
+    with _training_lock:
+        if _training_state["state"] in ("running", "starting"):
+            return {"success": False, "message": "Training already in progress",
+                    "job_id": _training_state.get("job_id")}
+        _training_state["state"] = "starting"
+        _training_state["job_id"] = job_id
+        _training_state["epoch"] = 0
+        _training_state["total_epochs"] = req.epochs
+        _training_state["started_at"] = time.time()
+        _training_state["stop_requested"] = False
+        _training_state["loss"] = None
+        _training_state["perplexity"] = None
+        _training_state["eta_seconds"] = None
+        _training_state["first_loss"] = None
+        _training_state["elapsed_seconds"] = 0
+
+    background_tasks.add_task(_run_bpe_scaleup, req, job_id)
+    return {"success": True, "message": f"BPE scale-up training job {job_id} started", "job_id": job_id}
+
+def _run_bpe_scaleup(req: BPEScaleUpRequest, job_id: str):
+    """Background task: full corpus build + BPE train + model train from scratch."""
+    global _tokenizer, _creative_model, _model_config
+    import math
+    with _training_lock:
+        _training_state["state"] = "running"
+    log_training(f"BPE scale-up job {job_id} started", job_id=job_id)
+
+    try:
+        sys.path.insert(0, str(Path(__file__).parent))
+        from ai_model.training.synthetic import generate_synthetic_samples
+        from ai_model.training.dataset import CreativeDataset, extract_text_from_item
+        from ai_model.training.trainer import train as run_train, evaluate
+        from ai_model.training.config import TrainConfig
+        from ai_model.model.tokenizer import BPETokenizer
+        from ai_model.model.transformer import TransformerLM
+        from ai_model.model.creative_model import CreativeModel
+        import torch
+
+        root = Path(__file__).parent
+        workspace_root = root.parent.parent
+        real_data_files = [
+            workspace_root / "training" / "boostsheet_samples.json",
+            root.parent / "api-server" / "training" / "curriculum_phase_1_social.json",
+        ]
+
+        items = []
+        for f in real_data_files:
+            if f.exists():
+                with open(f, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                if not isinstance(data, list):
+                    data = [data]
+                items.extend(data)
+                log_training(f"Loaded {len(data)} items from {f}", job_id=job_id)
+
+        synth_path = root / "training" / "synthetic_generated.json"
+        os.makedirs(root / "training", exist_ok=True)
+        log_training(f"Generating {req.synthetic_count} synthetic samples...", job_id=job_id)
+        synth_items = generate_synthetic_samples(str(synth_path), n=req.synthetic_count)
+        items.extend(synth_items)
+
+        combined_path = root / "training" / "combined_training_data.json"
+        with open(combined_path, "w", encoding="utf-8") as fh:
+            json.dump(items, fh)
+        log_training(f"Combined corpus: {len(items)} items -> {combined_path}", job_id=job_id)
+
+        texts = [extract_text_from_item(it) for it in items]
+        texts = [t for t in texts if t and t.strip()]
+        log_training(f"Training BPE tokenizer on {len(texts)} texts (target vocab_size={req.vocab_size})...",
+                     job_id=job_id)
+        new_tokenizer = BPETokenizer()
+        new_tokenizer.train(texts, vocab_size=req.vocab_size, min_freq=2)
+        log_training(f"Tokenizer trained: {new_tokenizer.vocab_size} tokens, {len(new_tokenizer.merges)} merges",
+                     job_id=job_id)
+
+        dataset = CreativeDataset(str(combined_path), new_tokenizer, max_len=req.max_len)
+        log_training(f"Dataset ready: {len(dataset)} encoded samples", job_id=job_id)
+        if len(dataset) == 0:
+            raise ValueError("Empty dataset after BPE encoding")
+
+        # Free the old model/tokenizer before allocating the new one — CPU-only,
+        # no swap, so holding both resident simultaneously risks OOM-kill.
+        import gc
+        if _creative_model is not None:
+            del _creative_model.model
+            _creative_model = None
+        gc.collect()
+
+        new_model = TransformerLM(
+            vocab_size=new_tokenizer.vocab_size,
+            dim=req.dim, n_layers=req.layers, n_heads=req.heads, max_len=req.max_len,
+        )
+        n_params = sum(p.numel() for p in new_model.parameters())
+        log_training(f"Model: dim={req.dim} layers={req.layers} heads={req.heads} params={n_params:,}",
+                     job_id=job_id)
+
+        cfg = TrainConfig({
+            "model": {"dim": req.dim, "layers": req.layers, "heads": req.heads, "max_len": req.max_len},
+            "train": {"lr": req.learning_rate, "batch_size": req.batch_size, "epochs": 1,
+                      "data_path": str(combined_path)},
+        })
+        cfg.gradient_accumulation_steps = 1
+
+        for epoch in range(req.epochs):
+            with _training_lock:
+                if _training_state.get("stop_requested"):
+                    log_training(f"Training stopped at epoch {epoch+1}", job_id=job_id)
+                    break
+                _training_state["epoch"] = epoch + 1
+                _training_state["samples_trained"] = len(dataset)
+
+            result = run_train(new_model, dataset, new_tokenizer, cfg, device="cpu")
+            epoch_loss = result.get("final_loss") if result else None
+            ppl = math.exp(min(epoch_loss, 20)) if epoch_loss else evaluate(new_model, dataset, new_tokenizer, device="cpu")
+            loss = epoch_loss if epoch_loss is not None else (math.log(ppl) if ppl else None)
+            elapsed = time.time() - _training_state["started_at"]
+            eta = (elapsed / (epoch + 1)) * (req.epochs - epoch - 1)
+
+            with _training_lock:
+                _training_state["loss"] = loss
+                _training_state["perplexity"] = ppl
+                _training_state["elapsed_seconds"] = elapsed
+                _training_state["eta_seconds"] = eta
+                if _training_state.get("first_loss") is None and loss is not None:
+                    _training_state["first_loss"] = loss
+                if loss is not None and (_training_state.get("best_loss") is None or loss < _training_state["best_loss"]):
+                    _training_state["best_loss"] = loss
+
+            loss_str = f"{loss:.4f}" if loss is not None else "N/A"
+            ppl_str = f"{ppl:.2f}" if ppl is not None else "N/A"
+            log_training(f"Epoch {epoch+1}/{req.epochs} complete. Loss: {loss_str}, PPL: {ppl_str}",
+                         epoch=epoch + 1, loss=loss, job_id=job_id)
+
+        weights_dir = root / "ai_model" / "weights"
+        weights_dir.mkdir(parents=True, exist_ok=True)
+        weights_path = weights_dir / "model.pt"
+        if weights_path.exists():
+            backup_path = weights_dir / "model.pre_bpe_backup.pt"
+            if not backup_path.exists():
+                os.replace(weights_path, backup_path)
+                log_training(f"Backed up previous checkpoint -> {backup_path}", job_id=job_id)
+
+        new_tokenizer.freeze()
+        new_config = {"dim": req.dim, "layers": req.layers, "heads": req.heads, "max_len": req.max_len}
+        torch.save({
+            "model_state_dict": new_model.state_dict(),
+            "vocab": new_tokenizer.vocab,
+            "inv_vocab": new_tokenizer.inv_vocab,
+            "merges": new_tokenizer.merges,
+            "config": new_config,
+        }, str(weights_path))
+        log_training(f"Saved checkpoint -> {weights_path}", job_id=job_id)
+
+        # Hot-swap the live globals so /generate immediately uses the new model.
+        _tokenizer = new_tokenizer
+        _model_config = new_config
+        _creative_model = CreativeModel(new_model, new_tokenizer)
+
+        log_training(f"BPE scale-up job {job_id} completed. Live model swapped in.", job_id=job_id)
+        with _training_lock:
+            _training_state["state"] = "completed"
+            _training_state["weights_exist"] = True
+
+    except Exception as e:
+        log_training(f"BPE scale-up job {job_id} failed: {e}", level="error", job_id=job_id)
         with _training_lock:
             _training_state["state"] = "error"
         import traceback
@@ -1487,7 +1680,7 @@ def _run_curriculum(phases: list, req: ScheduleRequest, job_id: str):
                 import numpy as np
                 state_dict = _creative_model.model.state_dict()
                 torch.save({"model_state_dict": state_dict, "vocab": _tokenizer.vocab,
-                            "inv_vocab": _tokenizer.inv_vocab, "next_id": _tokenizer.next_id,
+                            "inv_vocab": _tokenizer.inv_vocab, "merges": _tokenizer.merges,
                             "config": _model_config, "job_id": job_id, "phase": phase_id,
                             "final_loss": final_loss}, str(weights_dir / "model.pt"))
                 np_weights = {k: v.cpu().numpy() for k, v in state_dict.items()}
@@ -3931,7 +4124,7 @@ def _run_storage_training(req: StorageTrainRequest, job_id: str):
                     "model_state_dict": state_dict,
                     "vocab": _tokenizer.vocab,
                     "inv_vocab": _tokenizer.inv_vocab,
-                    "next_id": _tokenizer.next_id,
+                    "merges": _tokenizer.merges,
                     "config": _model_config,
                     "job_id": job_id,
                     "source": "storage",
