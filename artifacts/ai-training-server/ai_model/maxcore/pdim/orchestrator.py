@@ -78,6 +78,13 @@ class PDIMOrchestrator:
         self.dedup = dedup if dedup is not None else (_dedup or _FallbackDedup())
         self._inflight: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
+        # L1 in-process cache — written by the leader *before* releasing the
+        # single-flight event, so followers always find the result here even when
+        # the pdim HTTP write is slow or times out silently.  This closes the
+        # race that caused spurious re-computes: follower wakes, L2 (pdim) GET
+        # races with L2 SET still in-flight → miss → re-contend → recompute.
+        self._l1: dict[str, dict] = {}
+        self._l1_lock = threading.Lock()
 
     # ── synchronous: dedup + single-flight ────────────────────────────────────
     def compute(self, request: Any, compute_fn: Callable[[Any], dict],
@@ -85,9 +92,21 @@ class PDIMOrchestrator:
         ns = namespace or self.config.namespace
         key = self.dedup.key_for(ns, request)
 
+        # L1 check first — guaranteed in-process hit, zero network cost.
+        if key:
+            with self._l1_lock:
+                l1 = self._l1.get(key)
+            if l1 is not None:
+                METRICS.incr("pdim.cache_hit")
+                return {"result": l1, "source": "cache"}
+
+        # L2 check — fleet-wide pdim storage (HTTP round-trip).
         cached = self.dedup.get(key)
         if cached is not None:
             METRICS.incr("pdim.cache_hit")
+            if key:
+                with self._l1_lock:
+                    self._l1[key] = cached
             return {"result": cached, "source": "cache"}
 
         # Un-hashable request: nothing to dedup or coalesce on — compute directly.
@@ -113,9 +132,17 @@ class PDIMOrchestrator:
             if leader:
                 # Double-checked: a prior leader may have finished (caching the
                 # result and removing its slot) between our cache miss above and
-                # winning leadership here — re-read before paying to recompute.
+                # winning leadership here — re-read L1 then L2 before recomputing.
+                with self._l1_lock:
+                    l1 = self._l1.get(key)
+                if l1 is not None:
+                    self._release(key, ev)
+                    METRICS.incr("pdim.cache_hit")
+                    return {"result": l1, "source": "cache"}
                 cached = self.dedup.get(key)
                 if cached is not None:
+                    with self._l1_lock:
+                        self._l1[key] = cached
                     self._release(key, ev)
                     METRICS.incr("pdim.cache_hit")
                     return {"result": cached, "source": "cache"}
@@ -123,15 +150,29 @@ class PDIMOrchestrator:
                     METRICS.incr("pdim.compute")
                     with METRICS.timer("pdim.compute_ms"):
                         result = compute_fn(request)
+                    # Store in L1 BEFORE releasing the event so every follower
+                    # that wakes up is guaranteed to find the result there,
+                    # regardless of whether the L2 (pdim) write succeeds.
+                    if isinstance(result, dict):
+                        with self._l1_lock:
+                            self._l1[key] = result
                     self.dedup.put(key, result)
                     return {"result": result, "source": "compute"}
                 finally:
                     self._release(key, ev)
 
-            # Follower: wait for the in-flight leader, then re-check the cache.
+            # Follower: wait for the in-flight leader, then check L1 (guaranteed)
+            # then L2 (pdim) before re-contending.
             signaled = ev.wait(timeout=self.config.inflight_wait_seconds)
+            with self._l1_lock:
+                l1 = self._l1.get(key)
+            if l1 is not None:
+                METRICS.incr("pdim.coalesced")
+                return {"result": l1, "source": "coalesced"}
             cached = self.dedup.get(key)
             if cached is not None:
+                with self._l1_lock:
+                    self._l1[key] = cached
                 METRICS.incr("pdim.coalesced")
                 return {"result": cached, "source": "coalesced"}
             # Leader is still running (timeout) or produced a non-cacheable
