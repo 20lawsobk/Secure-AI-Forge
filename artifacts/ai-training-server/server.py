@@ -1803,7 +1803,6 @@ def _resolve_topic_from_url(raw_topic: str) -> str:
 
 @app.post("/content/generate")
 async def generate_content(req: ContentRequest, _key = Depends(require_scope("generate"))):
-    import asyncio
     start = time.time()
     platform = normalize_platform(req.platform)
     topic = _resolve_topic_from_url(req.topic)
