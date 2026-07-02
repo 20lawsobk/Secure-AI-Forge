@@ -392,9 +392,13 @@ def build_brief(
         aug_parts.append("themes: " + ", ".join(keywords[:4]))
     augmented_idea = " | ".join(aug_parts)
 
-    # Candidate count: only worth >1 for short-form text modalities where
-    # ranking is cheap. Image/audio/video are expensive so keep at 1.
-    candidate_count = 3 if modality in ("content", "text") else 1
+    # Candidate count: >1 whenever ranking is cheap relative to render cost.
+    # Text/content ranking is essentially free. Image spec generation is a
+    # short prompt string (not a pixel render) so it can also afford ranked
+    # candidates. Audio/video candidate work happens at the pixel/audio
+    # render layer itself (too expensive to multiply), so those stay at 1
+    # and instead get scored phrase/spec selection upstream of the render.
+    candidate_count = 3 if modality in ("content", "text", "image") else 1
 
     return GenerationBrief(
         modality=modality,
@@ -523,6 +527,66 @@ def best_hook(topic: str, artist: str, agent_hook: str, brief: GenerationBrief) 
     if not ranked:
         return agent_hook, 0.0, 0
     return ranked[0][0], ranked[0][1], len(ranked)
+
+
+def score_scene_phrase(
+    phrase: str,
+    scene_type: str,
+    keywords: Optional[List[str]] = None,
+) -> float:
+    """Score a raw (pre-personalisation) video scene phrase candidate.
+
+    Applies the same hook/CTA/keyword heuristics used for text ranking,
+    tuned per scene type, so video phrase selection is no longer purely
+    random — the highest-scoring available candidate wins. Scored on the
+    raw template (with `{idea}`/`{artist}`/`{genre}` placeholders intact)
+    since personalisation happens after selection.
+    """
+    text = _norm(phrase)
+    if not text:
+        return 0.0
+    low = text.lower()
+    keywords = keywords or []
+
+    # Templates that will bind to this specific idea/artist/genre outrank
+    # generic filler that carries no personalisation.
+    placeholder_score = 1.0 if re.search(r"\{(idea|artist|genre)\}", phrase) else 0.4
+
+    length = len(text.split())
+    length_score = 1.0 if 4 <= length <= 14 else max(0.0, 1.0 - abs(length - 9) / 12.0)
+
+    if scene_type in ("hook", "drop", "build", "chorus"):
+        punch_score = 0.0
+        if any(p in low for p in _POWER_WORDS):
+            punch_score += 0.5
+        if "?" in low or "!" in low or "—" in text or "-" in text:
+            punch_score += 0.25
+        if length <= 10:
+            punch_score += 0.25
+        punch_score = min(1.0, punch_score)
+        blended = placeholder_score * 0.3 + length_score * 0.3 + punch_score * 0.4
+    elif scene_type in ("cta", "outro"):
+        cta_score = 1.0 if any(w in low for w in _CTA_KEYWORDS) else 0.0
+        blended = placeholder_score * 0.3 + length_score * 0.2 + cta_score * 0.5
+    else:  # body / verse / bridge / transition
+        kw_score = (
+            sum(1 for kw in keywords if kw in low) / len(keywords)
+            if keywords else 0.5
+        )
+        blended = placeholder_score * 0.3 + length_score * 0.3 + kw_score * 0.4
+
+    return round(min(100.0, blended * 100), 1)
+
+
+def rank_scene_phrases(
+    pool: List[str],
+    scene_type: str,
+    keywords: Optional[List[str]] = None,
+) -> List[Tuple[str, float]]:
+    """Score+sort a pool of raw scene phrase candidates, best first."""
+    scored = [(p, score_scene_phrase(p, scene_type, keywords)) for p in pool]
+    scored.sort(key=lambda ps: ps[1], reverse=True)
+    return scored
 
 
 def deterministic_candidate(topic: str, artist: str, brief: GenerationBrief) -> str:

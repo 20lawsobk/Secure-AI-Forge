@@ -286,6 +286,12 @@ class VideoAgent:
         # Phrases are drawn from the same corpus the model was trained on,
         # personalised with idea / genre / tone / platform / artist_name,
         # and de-duplicated within the video via the _UsedSet guard.
+        try:
+            from ai_model.request_intelligence import extract_keywords
+            scene_keywords = extract_keywords(req.idea)
+        except Exception:
+            scene_keywords = None
+
         scene_texts, script_source = _sample_all_scenes(
             scene_sequence,
             idea=req.idea,
@@ -294,6 +300,7 @@ class VideoAgent:
             platform=platform,
             artist_name=req.artist_name,
             awareness=req.awareness,
+            keywords=scene_keywords,
         )
 
         # ── Assemble VideoScene list in order ────────────────────────────
