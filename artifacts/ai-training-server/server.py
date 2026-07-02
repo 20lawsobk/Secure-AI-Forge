@@ -33,16 +33,18 @@ import urllib.request as _urllib_request
 # ── Size BLAS/OpenMP thread pools to the real host BEFORE numpy is imported ───
 # Derived from os.cpu_count() at runtime — 2 on the dev box, 16 on the prod
 # Reserved VM — never hardcoded. setdefault() means an explicit operator override
-# always wins. For a single process this equals OpenBLAS's own all-core default;
-# it becomes load-bearing only when running multiple worker *processes*, where
-# each must be capped to cpus // workers. Canonical helper:
-# ai_model/maxcore/hardware.py (configure_blas_threads / plan_blas_threads).
+# always wins. With multiple uvicorn worker *processes* each must be capped to
+# cpus // workers to prevent thread explosion (N workers × N threads = N² BLAS
+# threads all competing on the same cores). UVICORN_WORKERS env var must be set
+# before the process starts so the cap is correct from the first numpy call.
 _cpus = os.cpu_count() or 1
+_uvicorn_workers = max(1, int(os.environ.get("UVICORN_WORKERS", "1")))
+_blas_threads_per_worker = max(1, _cpus // _uvicorn_workers)
 for _blas_var in (
     "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
     "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
 ):
-    os.environ.setdefault(_blas_var, str(_cpus))
+    os.environ.setdefault(_blas_var, str(_blas_threads_per_worker))
 
 import psycopg2
 import psycopg2.pool
@@ -632,6 +634,72 @@ async def on_startup():
     thread.start()
     storage_thread = threading.Thread(target=_init_storage, daemon=True)
     storage_thread.start()
+    warm_thread = threading.Thread(target=_warm_content_cache, daemon=True)
+    warm_thread.start()
+
+
+def _warm_content_cache() -> None:
+    """
+    Pre-warm the PDIM dedup cache with the top platform/topic combos so the
+    first real user request hits the cache instead of waiting ~3 s for compute.
+    Runs in a daemon thread after startup; waits up to 120 s for the model.
+    """
+    import time as _wt
+    for _ in range(120):
+        if _model_ready and _script_agent is not None and _distribution_agent is not None:
+            break
+        _wt.sleep(1)
+    else:
+        print("[CacheWarm] Model not ready after 120 s — skipping pre-warm")
+        return
+
+    from ai_model.agents.script_agent import ScriptRequest
+    from ai_model.agents.distribution_agent import DistributionRequest
+
+    WARM_PLATFORMS = ["tiktok", "instagram", "youtube", "twitter", "spotify"]
+    WARM_TOPICS = [
+        "new music drop", "album release", "tour announcement",
+        "single out now", "music video premiere",
+    ]
+    WARM_TONE = "energetic"
+    WARM_GOAL = "growth"
+
+    _orch = _get_pdim_orchestrator()
+    warmed = 0
+    total = len(WARM_PLATFORMS) * len(WARM_TOPICS)
+    for plat in WARM_PLATFORMS:
+        for topic in WARM_TOPICS:
+            try:
+                cache_key = {
+                    "platform": plat, "topic": topic,
+                    "tone": WARM_TONE, "goal": WARM_GOAL, "awareness": None,
+                }
+
+                def _builder(_req=None, _p=plat, _t=topic):
+                    sr = _script_agent.run(ScriptRequest(
+                        idea=_t, platform=_p, goal=WARM_GOAL, tone=WARM_TONE,
+                    ))
+                    full_script = f"{sr.hook}\n{sr.body}\n{sr.cta}"
+                    dr = _distribution_agent.run(DistributionRequest(
+                        script=full_script, platform=_p, goal=WARM_GOAL,
+                    ))
+                    return {
+                        "success": True,
+                        "platform": _p,
+                        "caption": dr.caption,
+                        "hook": sr.hook,
+                        "body": sr.body,
+                        "cta": sr.cta,
+                        "hashtags": dr.hashtags,
+                        "source": getattr(sr, "source", "template"),
+                    }
+
+                _orch.compute(cache_key, _builder, namespace="api_content")
+                warmed += 1
+            except Exception as exc:
+                print(f"[CacheWarm] {plat}/{topic}: {exc}")
+
+    print(f"[CacheWarm] Pre-warmed {warmed}/{total} content slots into PDIM cache")
 
 
 def _init_storage():
@@ -5935,15 +6003,13 @@ if __name__ == "__main__":
             _time.sleep(1.0)
         os._exit(0)
 
-    # Single worker.  Each worker loads the full model (~1.7 GB) into its own
-    # process address space.  2 workers = ~3.4 GB idle; on the 8 GB host that
-    # leaves only ~2 GB headroom for render threads (PIL frame buffers +
-    # ffmpeg compositor), which tips the host into an OOM crash-loop under
-    # any real render load.  1 worker = ~1.7 GB idle, leaving ~4.3 GB for
-    # parallel PIL scene rendering.  Throughput is identical because render
-    # work is done inside daemon threads, not across workers.
+    # Worker count: default 1 to keep memory footprint small (each worker
+    # loads the full ~1.7 GB model independently).  Operators on hosts with
+    # more RAM can set UVICORN_WORKERS=N to scale unique-request throughput
+    # linearly.  BLAS thread caps are applied proportionally at module load
+    # time (see _blas_threads_per_worker above) so thread counts stay sane.
     cpu_count = multiprocessing.cpu_count()
-    worker_count = 1
+    worker_count = max(1, int(os.environ.get("UVICORN_WORKERS", "1")))
     print(f"[Server] Starting MaxBooster AI Training Server on port {port} "
           f"({worker_count} uvicorn workers, {cpu_count} CPUs detected)")
     uvicorn.run(
@@ -5952,7 +6018,7 @@ if __name__ == "__main__":
         port=port,
         log_level="info",
         workers=worker_count,
-        timeout_keep_alive=30,
-        limit_concurrency=256,
-        backlog=512,
+        timeout_keep_alive=300,
+        limit_concurrency=512,
+        backlog=2048,
     )

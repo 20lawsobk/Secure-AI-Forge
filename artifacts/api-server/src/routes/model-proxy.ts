@@ -1,3 +1,4 @@
+import os from "os";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { Agent, request as undiciRequest } from "undici";
 import {
@@ -21,13 +22,18 @@ const _SERVER_FALLBACK_KEY =
   "";
 
 // ─── Keep-alive connection pool ─────────────────────────────────────────────
-// Reuse TCP connections to the Python server instead of opening a new socket
-// on every request — eliminates per-request TCP + TLS handshake overhead.
-
+// Reuse TCP connections to the Python server — eliminates per-request TCP
+// handshake overhead.  Pool tuned for high-concurrency AI proxy:
+//   connections: cpu*8 (min 64) — enough concurrent in-flight requests for
+//     all Node workers × expected generation bursts without queuing at the pool.
+//   keepAliveTimeout: 300s — matches uvicorn's timeout_keep_alive so the
+//     server side never closes first (avoids ECONNRESET under load).
+//   headersTimeout/bodyTimeout added per-request (see undiciRequest calls) so
+//     long model generations never get aborted by socket inactivity.
 const _keepAlivePool = new Agent({
-  keepAliveTimeout: 30_000,
-  keepAliveMaxTimeout: 60_000,
-  connections: 32,
+  keepAliveTimeout: 300_000,
+  keepAliveMaxTimeout: 600_000,
+  connections: Math.max(64, os.cpus().length * 8),
   pipelining: 1,
 });
 
@@ -244,6 +250,8 @@ async function proxyRequest(
         dispatcher: _keepAlivePool,
         headers,
         body: !isGet && req.body ? JSON.stringify(req.body) : undefined,
+        headersTimeout: 0,
+        bodyTimeout: 300_000,
       });
     } finally {
       clearTimeout(timeoutId);
@@ -316,6 +324,8 @@ async function proxyBinary(
         signal: controller.signal,
         dispatcher: _keepAlivePool,
         headers,
+        headersTimeout: 0,
+        bodyTimeout: 300_000,
       });
     } finally {
       clearTimeout(timeoutId);
