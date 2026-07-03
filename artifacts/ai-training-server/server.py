@@ -1568,6 +1568,28 @@ async def api_pocket_accelerator_stats(key: dict = Depends(verify_api_key)):
         stats["effective_speedup_on_hits"] = "inf"
     return {"success": True, "stats": stats}
 
+@app.post("/api/awareness/quality/harvest")
+async def api_quality_awareness_harvest(replace: bool = True,
+                                        admin=Depends(verify_admin)):
+    """Run the quality harvester now: scan live public sources (music charts,
+    top music channels, high-engagement stories), study the patterns, and
+    store the quality buffer in pdim. Raises 502 if every source fails —
+    an empty world-scan is never stored as knowledge."""
+    from workers import quality_harvester
+    try:
+        summary = await _in_thread(lambda: quality_harvester.harvest(replace=replace))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return {"success": True, **summary}
+
+@app.get("/api/awareness/quality/status")
+async def api_quality_awareness_status(key: dict = Depends(verify_api_key)):
+    """Quality buffer status: whether the temporary world-studied buffer is
+    present, its influence weight, and self-sufficiency progress toward the
+    buffer's automatic retirement."""
+    from ai_model.quality_awareness import status as qa_status
+    return {"success": True, **qa_status()}
+
 def _run_hyper_scaleup(req: HyperScaleUpRequest, job_id: str):
     """Background task: build corpus + BPE train + train a model whose real
     compute runs on the Digital GPU, then transfer weights to the serving model."""
