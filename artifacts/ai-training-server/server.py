@@ -633,6 +633,19 @@ class HyperScaleUpRequest(BaseModel):
     learning_rate: float = 3e-4
     max_samples: int = 800
 
+class PocketMultiplyRequest(BaseModel):
+    """Multiply two matrices inside a PDIM pocket.
+
+    A pocket is one dedup + single-flight domain: identical multiplications
+    inside the same pocket are computed once on the DigitalGPU backend and
+    every repeat (or concurrent duplicate) shares that stored result. Pockets
+    nest without limit — ``pocket: "root/sub/leaf"`` addresses a pocket inside
+    a pocket inside a pocket; the zlib compression applied to every stored
+    payload is what lets one pocket hold arbitrarily many sub-pockets."""
+    a: list = []
+    b: list = []
+    pocket: str = "default"
+
 class _AwarenessMixin(BaseModel):
     """Normalises ``awareness`` whether Node.js sends it as a plain string or as
     the structured object ``{contextString, trendingGenres, ...}`` that
@@ -1502,6 +1515,47 @@ async def train_hyper_scaleup(req: HyperScaleUpRequest, background_tasks: Backgr
     return {"success": True,
             "message": f"Digital-GPU scale-up training job {job_id} started",
             "job_id": job_id, "compute_backend": "hyper_gpu"}
+
+@app.post("/api/maxcore/pocket-multiply")
+async def api_pocket_multiply(req: PocketMultiplyRequest,
+                              key: dict = Depends(verify_api_key)):
+    """Pocket-dimension multiplication inside one pocket.
+
+    Routes the GEMM through the PDIM orchestrator: the named pocket is one
+    dedup + single-flight namespace, so identical multiplications inside it
+    are computed ONCE (on the DigitalGPU backend) and shared. Nested pockets
+    (``"a/b/c"``) are isolated sub-domains inside their parent pocket."""
+    import numpy as _np
+    from ai_model.maxcore.pdim import PocketDimension
+
+    try:
+        A = _np.asarray(req.a, dtype=_np.float32)
+        B = _np.asarray(req.b, dtype=_np.float32)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=f"Invalid matrix payload: {e}")
+    if A.size == 0 or B.size == 0:
+        raise HTTPException(status_code=400, detail="Both 'a' and 'b' matrices are required")
+    if A.size > 1_000_000 or B.size > 1_000_000:
+        raise HTTPException(status_code=413, detail="Matrix too large (limit 1M elements each)")
+
+    def _run() -> dict:
+        pocket = PocketDimension(req.pocket, orchestrator=_get_pdim_orchestrator())
+        return pocket.matmul(A, B)
+
+    try:
+        out = await _in_thread(_run)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "success": True,
+        "pocket": out["pocket"],
+        "source": out["source"],
+        "shape": list(out["result"].shape),
+        "result": out["result"].tolist(),
+        "compression": out["compression"],
+        "compute_backend": "digital_gpu",
+    }
 
 def _run_hyper_scaleup(req: HyperScaleUpRequest, job_id: str):
     """Background task: build corpus + BPE train + train a model whose real
