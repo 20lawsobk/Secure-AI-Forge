@@ -44,6 +44,17 @@ _state: Dict[str, Any] = {
     "own": 0, "own_at": 0.0,
     "harvest_inflight": False,
 }
+# formatted hook -> raw template, so a winning buffer hook can graduate its
+# TEMPLATE (not the topic-specific text) into the own corpus. Bounded.
+_recent_hooks: Dict[str, str] = {}
+_RECENT_HOOKS_MAX = 200
+
+
+def _max_age_seconds() -> float:
+    try:
+        return max(1.0, float(os.environ.get("MB_AWARENESS_MAX_AGE_H", "24"))) * 3600.0
+    except ValueError:
+        return 24 * 3600.0
 
 
 def retire_threshold() -> int:
@@ -95,8 +106,9 @@ def self_sufficiency() -> Dict[str, Any]:
     }
 
 
-def _spawn_harvest() -> None:
-    """Kick one background harvest when the buffer is missing (single-flight)."""
+def _spawn_harvest(replace: bool = False) -> None:
+    """Kick one background harvest when the buffer is missing or stale
+    (single-flight)."""
     with _lock:
         if _state["harvest_inflight"]:
             return
@@ -105,7 +117,7 @@ def _spawn_harvest() -> None:
     def _run() -> None:
         try:
             from workers import quality_harvester
-            summary = quality_harvester.harvest(replace=False)
+            summary = quality_harvester.harvest(replace=replace)
             logger.info("auto-harvest complete: %s exemplars",
                         summary.get("exemplar_count"))
         except Exception as exc:  # noqa: BLE001
@@ -135,9 +147,22 @@ def get_doc(trigger_harvest: bool = True) -> Optional[Dict[str, Any]]:
     with _lock:
         _state["doc"] = doc
         _state["doc_at"] = now
-    if doc is None and trigger_harvest and not self_sufficiency()["retired"]:
-        _spawn_harvest()
+    if trigger_harvest and not self_sufficiency()["retired"]:
+        if doc is None:
+            _spawn_harvest()
+        elif _doc_age_seconds(doc) > _max_age_seconds():
+            # Stale world-view: keep serving the old buffer, refresh behind it.
+            _spawn_harvest(replace=True)
     return doc
+
+
+def _doc_age_seconds(doc: Dict[str, Any]) -> float:
+    try:
+        harvested = time.strptime(doc.get("harvested_at", ""),
+                                  "%Y-%m-%dT%H:%M:%SZ")
+        return max(0.0, time.time() - time.mktime(harvested) + time.timezone)
+    except (ValueError, TypeError, OverflowError):
+        return float("inf")  # unreadable timestamp → treat as stale
 
 
 # ── blending API (all never-raise) ───────────────────────────────────────────
@@ -169,11 +194,41 @@ def hook_candidates(topic: str, artist: str) -> List[str]:
     out: List[str] = []
     for tpl in scene_phrases("hook"):
         try:
-            out.append(tpl.format(idea=topic or "this drop",
-                                  artist=artist or "the artist"))
+            formatted = tpl.format(idea=topic or "this drop",
+                                   artist=artist or "the artist")
         except (KeyError, IndexError, ValueError):
             continue
+        out.append(formatted)
+        with _lock:
+            if len(_recent_hooks) >= _RECENT_HOOKS_MAX:
+                _recent_hooks.pop(next(iter(_recent_hooks)))
+            _recent_hooks[formatted] = tpl
     return out
+
+
+def graduate_hook(winner: str) -> bool:
+    """If a ranking winner came from the quality buffer, graduate its raw
+    TEMPLATE into the own corpus (mb:phrases:hook) — text-generation's
+    contribution to self-sufficiency, mirroring the video sampler's
+    graduation. Never-raise; returns True when a graduation happened."""
+    with _lock:
+        tpl = _recent_hooks.get(winner)
+    if not tpl:
+        return False
+    store = _store()
+    if store is None:
+        return False
+    try:
+        existing = store.lrange("phrases:hook", 0, -1)
+        if tpl in existing:
+            return False
+        store.lpush("phrases:hook", tpl)
+        store.ltrim("phrases:hook", 0, 499)
+        with _lock:
+            _state["own_at"] = 0.0  # own corpus changed — re-measure
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def brief_enrichment() -> Optional[Dict[str, str]]:

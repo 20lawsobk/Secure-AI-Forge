@@ -546,6 +546,13 @@ def best_hook(topic: str, artist: str, agent_hook: str, brief: GenerationBrief) 
     ranked = rank_candidates(candidates, brief)
     if not ranked:
         return agent_hook, 0.0, 0
+    # If a quality-buffer hook wins, its template graduates into the own
+    # corpus so text generation also progresses buffer retirement.
+    try:
+        from ai_model.quality_awareness import graduate_hook
+        graduate_hook(ranked[0][0])
+    except Exception:
+        pass
     return ranked[0][0], ranked[0][1], len(ranked)
 
 
