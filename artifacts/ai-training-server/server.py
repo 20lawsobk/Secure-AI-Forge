@@ -612,6 +612,27 @@ class BPEScaleUpRequest(BaseModel):
     batch_size: int = 8
     learning_rate: float = 3e-4
 
+class HyperScaleUpRequest(BaseModel):
+    """Train a fresh model whose real forward+backward compute is routed through
+    the in-house Digital GPU (HyperGPU) tensor-core kernels — not native PyTorch.
+
+    The Digital GPU executes matmul/attention/layer-norm/SiLU via NumPy
+    tensor-core simulation with hand-written autograd, so this is genuine
+    backend compute (~100-1000x slower per op than native torch). Defaults are
+    intentionally modest so a real run completes in this CPU-only environment;
+    ``max_samples`` caps the corpus and can be raised if you accept the time cost.
+    The trained weights are transferred into the fast KV-cache serving model."""
+    epochs: int = 2
+    synthetic_count: int = 600
+    vocab_size: int = 2000
+    dim: int = 256
+    layers: int = 4
+    heads: int = 8
+    max_len: int = 128
+    batch_size: int = 8
+    learning_rate: float = 3e-4
+    max_samples: int = 800
+
 class _AwarenessMixin(BaseModel):
     """Normalises ``awareness`` whether Node.js sends it as a plain string or as
     the structured object ``{contextString, trendingGenres, ...}`` that
@@ -1449,6 +1470,218 @@ def _run_bpe_scaleup(req: BPEScaleUpRequest, job_id: str):
 
     except Exception as e:
         log_training(f"BPE scale-up job {job_id} failed: {e}", level="error", job_id=job_id)
+        with _training_lock:
+            _training_state["state"] = "error"
+        import traceback
+        traceback.print_exc()
+
+@app.post("/admin/train-hyper-scaleup")
+async def train_hyper_scaleup(req: HyperScaleUpRequest, background_tasks: BackgroundTasks,
+                              _key = Depends(require_scope("train"))):
+    """Train a fresh model with real forward+backward compute routed through the
+    in-house Digital GPU (HyperGPU) tensor-core kernels, then transfer the trained
+    weights into the fast KV-cache serving model and hot-swap it live."""
+    job_id = str(uuid.uuid4())[:8]
+    with _training_lock:
+        if _training_state["state"] in ("running", "starting"):
+            return {"success": False, "message": "Training already in progress",
+                    "job_id": _training_state.get("job_id")}
+        _training_state["state"] = "starting"
+        _training_state["job_id"] = job_id
+        _training_state["epoch"] = 0
+        _training_state["total_epochs"] = req.epochs
+        _training_state["started_at"] = time.time()
+        _training_state["stop_requested"] = False
+        _training_state["loss"] = None
+        _training_state["perplexity"] = None
+        _training_state["eta_seconds"] = None
+        _training_state["first_loss"] = None
+        _training_state["elapsed_seconds"] = 0
+
+    background_tasks.add_task(_run_hyper_scaleup, req, job_id)
+    return {"success": True,
+            "message": f"Digital-GPU scale-up training job {job_id} started",
+            "job_id": job_id, "compute_backend": "hyper_gpu"}
+
+def _run_hyper_scaleup(req: HyperScaleUpRequest, job_id: str):
+    """Background task: build corpus + BPE train + train a model whose real
+    compute runs on the Digital GPU, then transfer weights to the serving model."""
+    global _tokenizer, _creative_model, _model_config
+    import math
+    with _training_lock:
+        _training_state["state"] = "running"
+    log_training(f"Digital-GPU scale-up job {job_id} started (compute routed through HyperGPU)",
+                 job_id=job_id)
+
+    try:
+        sys.path.insert(0, str(Path(__file__).parent))
+        from ai_model.training.synthetic import generate_synthetic_samples
+        from ai_model.training.dataset import CreativeDataset, extract_text_from_item
+        from ai_model.training.trainer import train as run_train, evaluate
+        from ai_model.training.config import TrainConfig
+        from ai_model.model.tokenizer import BPETokenizer
+        from ai_model.model.transformer import TransformerLM
+        from ai_model.model.creative_model import CreativeModel
+        from ai_model.gpu.hyper_core import HyperGPU, PrecisionMode
+        from ai_model.gpu.hyper_creative_transformer import HyperCreativeTransformerLM
+        import torch
+
+        root = Path(__file__).parent
+        workspace_root = root.parent.parent
+        real_data_files = [
+            workspace_root / "training" / "boostsheet_samples.json",
+            root.parent / "api-server" / "training" / "curriculum_phase_1_social.json",
+        ]
+
+        items = []
+        for f in real_data_files:
+            if f.exists():
+                with open(f, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                if not isinstance(data, list):
+                    data = [data]
+                items.extend(data)
+                log_training(f"Loaded {len(data)} items from {f}", job_id=job_id)
+
+        synth_path = root / "training" / "synthetic_generated.json"
+        os.makedirs(root / "training", exist_ok=True)
+        log_training(f"Generating {req.synthetic_count} synthetic samples...", job_id=job_id)
+        synth_items = generate_synthetic_samples(str(synth_path), n=req.synthetic_count)
+        items.extend(synth_items)
+
+        # Cap the corpus — the Digital GPU is orders of magnitude slower than
+        # native torch, so a bounded sample count keeps the run tractable.
+        if req.max_samples and len(items) > req.max_samples:
+            import random as _rnd
+            _rnd.seed(1234)
+            items = _rnd.sample(items, req.max_samples)
+            log_training(f"Capped corpus to {len(items)} items (max_samples={req.max_samples})",
+                         job_id=job_id)
+
+        combined_path = root / "training" / "hyper_combined_training_data.json"
+        with open(combined_path, "w", encoding="utf-8") as fh:
+            json.dump(items, fh)
+        log_training(f"Combined corpus: {len(items)} items -> {combined_path}", job_id=job_id)
+
+        texts = [extract_text_from_item(it) for it in items]
+        texts = [t for t in texts if t and t.strip()]
+        log_training(f"Training BPE tokenizer on {len(texts)} texts (target vocab_size={req.vocab_size})...",
+                     job_id=job_id)
+        new_tokenizer = BPETokenizer()
+        new_tokenizer.train(texts, vocab_size=req.vocab_size, min_freq=2)
+        log_training(f"Tokenizer trained: {new_tokenizer.vocab_size} tokens, {len(new_tokenizer.merges)} merges",
+                     job_id=job_id)
+
+        dataset = CreativeDataset(str(combined_path), new_tokenizer, max_len=req.max_len)
+        log_training(f"Dataset ready: {len(dataset)} encoded samples", job_id=job_id)
+        if len(dataset) == 0:
+            raise ValueError("Empty dataset after BPE encoding")
+
+        # Free the old model before allocating the new one (CPU-only, no swap).
+        import gc
+        if _creative_model is not None:
+            del _creative_model.model
+            _creative_model = None
+        gc.collect()
+
+        gpu = HyperGPU(lanes=512, tensor_cores=8, precision=PrecisionMode.MIXED)
+        hyper_model = HyperCreativeTransformerLM(
+            vocab_size=new_tokenizer.vocab_size,
+            dim=req.dim, n_layers=req.layers, n_heads=req.heads,
+            max_len=req.max_len, gpu=gpu,
+        )
+        n_params = sum(p.numel() for p in hyper_model.parameters())
+        log_training(f"Digital-GPU model: dim={req.dim} layers={req.layers} heads={req.heads} "
+                     f"params={n_params:,} — compute routed through HyperGPU", job_id=job_id)
+
+        cfg = TrainConfig({
+            "model": {"dim": req.dim, "layers": req.layers, "heads": req.heads, "max_len": req.max_len},
+            "train": {"lr": req.learning_rate, "batch_size": req.batch_size, "epochs": 1,
+                      "data_path": str(combined_path)},
+        })
+        cfg.gradient_accumulation_steps = 1
+
+        for epoch in range(req.epochs):
+            with _training_lock:
+                if _training_state.get("stop_requested"):
+                    log_training(f"Training stopped at epoch {epoch+1}", job_id=job_id)
+                    break
+                _training_state["epoch"] = epoch + 1
+                _training_state["samples_trained"] = len(dataset)
+
+            result = run_train(hyper_model, dataset, new_tokenizer, cfg, device="cpu")
+            epoch_loss = result.get("final_loss") if result else None
+            ppl = math.exp(min(epoch_loss, 20)) if epoch_loss else evaluate(hyper_model, dataset, new_tokenizer, device="cpu")
+            loss = epoch_loss if epoch_loss is not None else (math.log(ppl) if ppl else None)
+            elapsed = time.time() - _training_state["started_at"]
+            eta = (elapsed / (epoch + 1)) * (req.epochs - epoch - 1)
+
+            gpu_ops = gpu.core._total_ops
+            with _training_lock:
+                _training_state["loss"] = loss
+                _training_state["perplexity"] = ppl
+                _training_state["elapsed_seconds"] = elapsed
+                _training_state["eta_seconds"] = eta
+                _training_state["hyper_gpu_ops"] = gpu_ops
+                if _training_state.get("first_loss") is None and loss is not None:
+                    _training_state["first_loss"] = loss
+                if loss is not None and (_training_state.get("best_loss") is None or loss < _training_state["best_loss"]):
+                    _training_state["best_loss"] = loss
+
+            loss_str = f"{loss:.4f}" if loss is not None else "N/A"
+            ppl_str = f"{ppl:.2f}" if ppl is not None else "N/A"
+            log_training(f"Epoch {epoch+1}/{req.epochs} complete. Loss: {loss_str}, PPL: {ppl_str}, "
+                         f"HyperGPU ops: {gpu_ops:,}", epoch=epoch + 1, loss=loss, job_id=job_id)
+
+        # Transfer Digital-GPU-trained weights into the fast KV-cache serving model.
+        log_training("Transferring Digital-GPU-trained weights into serving model...", job_id=job_id)
+        serve_model = TransformerLM(
+            vocab_size=new_tokenizer.vocab_size,
+            dim=req.dim, n_layers=req.layers, n_heads=req.heads, max_len=req.max_len,
+        )
+        missing, unexpected = serve_model.load_state_dict(hyper_model.state_dict(), strict=False)
+        # head.weight is tied to token_emb.weight and re-tied in __init__, so it is
+        # the only expected "missing" key; anything else is a real mismatch.
+        real_missing = [k for k in missing if k != "head.weight"]
+        if real_missing or unexpected:
+            raise RuntimeError(f"Weight transfer mismatch: missing={real_missing} unexpected={unexpected}")
+        log_training("Weight transfer OK (Digital-GPU weights -> KV-cache serving model)", job_id=job_id)
+
+        del hyper_model
+        gc.collect()
+
+        weights_dir = root / "ai_model" / "weights"
+        weights_dir.mkdir(parents=True, exist_ok=True)
+        weights_path = weights_dir / "model.pt"
+        if weights_path.exists():
+            backup_path = weights_dir / "model.pre_hyper_backup.pt"
+            if not backup_path.exists():
+                os.replace(weights_path, backup_path)
+                log_training(f"Backed up previous checkpoint -> {backup_path}", job_id=job_id)
+
+        new_tokenizer.freeze()
+        new_config = {"dim": req.dim, "layers": req.layers, "heads": req.heads, "max_len": req.max_len}
+        torch.save({
+            "model_state_dict": serve_model.state_dict(),
+            "vocab": new_tokenizer.vocab,
+            "inv_vocab": new_tokenizer.inv_vocab,
+            "merges": new_tokenizer.merges,
+            "config": new_config,
+            "trained_on": "hyper_gpu",
+        }, str(weights_path))
+        log_training(f"Saved checkpoint -> {weights_path}", job_id=job_id)
+
+        _tokenizer = new_tokenizer
+        _model_config = new_config
+        _creative_model = CreativeModel(serve_model, new_tokenizer)
+
+        log_training(f"Digital-GPU scale-up job {job_id} completed. Live model swapped in.", job_id=job_id)
+        with _training_lock:
+            _training_state["state"] = "completed"
+            _training_state["weights_exist"] = True
+
+    except Exception as e:
+        log_training(f"Digital-GPU scale-up job {job_id} failed: {e}", level="error", job_id=job_id)
         with _training_lock:
             _training_state["state"] = "error"
         import traceback
