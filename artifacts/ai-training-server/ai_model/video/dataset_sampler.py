@@ -101,6 +101,16 @@ def _pdim_fetch_phrases(scene_type: str, count: int = 20) -> List[str]:
         return []
 
 
+def _quality_buffer_phrases(scene_type: str) -> List[str]:
+    """Temporary quality-buffer templates (world-studied patterns) — active
+    only while the own pdim corpus is still small; empty once retired."""
+    try:
+        from ai_model.quality_awareness import scene_phrases
+        return scene_phrases(scene_type)
+    except Exception:
+        return []
+
+
 def _pdim_push_phrase(scene_type: str, phrase: str) -> None:
     if not phrase or len(phrase) < 5:
         return
@@ -243,12 +253,19 @@ def sample_all_scenes(
     results: Dict[int, str] = {}
 
     for idx, stype in enumerate(scene_sequence):
-        # ── Tier 1: pdim live corpus ──────────────────────────────────────────
+        # ── Tier 1: pdim live corpus + quality buffer ─────────────────────────
+        # The quality buffer (world-studied patterns) is blended in while the
+        # own corpus is small; buffer picks graduate INTO the own corpus so
+        # every use grows self-sufficiency toward the buffer's retirement.
         pdim_pool = _pdim_fetch_phrases(stype)
-        if pdim_pool:
-            raw = used.pick(pdim_pool, stype, keywords)
+        qa_pool = [p for p in _quality_buffer_phrases(stype) if p not in pdim_pool]
+        tier1_pool = pdim_pool + qa_pool
+        if tier1_pool:
+            raw = used.pick(tier1_pool, stype, keywords)
             text = _personalise(raw, **ctx)
             results[idx] = _trim(text)
+            if raw in qa_pool:
+                _pdim_push_phrase(stype, raw)
             continue
 
         # ── Tier 2: awareness (guaranteed non-empty when awareness is active) ─

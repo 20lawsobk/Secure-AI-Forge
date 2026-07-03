@@ -382,6 +382,19 @@ def build_brief(
     }
     directives = _build_directives(directive_bits)
 
+    # ── Quality awareness buffer (temporary, self-retiring) ────────────────
+    # World-studied chart/content patterns blended in while the own pdim
+    # corpus is small. Never-raise + TTL-cached: cannot break or slow a brief.
+    notes: List[str] = []
+    try:
+        from ai_model.quality_awareness import brief_enrichment
+        _enr = brief_enrichment()
+        if _enr:
+            directives.append(_enr["directive"])
+            notes.append(_enr["note"])
+    except Exception:
+        pass
+
     # Augmented idea fed to the underlying agents to steer better output.
     aug_parts = [topic or "music content"]
     if resolved_tone:
@@ -421,6 +434,7 @@ def build_brief(
         temperature=float(profile["temperature"]),
         directives=directives,
         augmented_idea=augmented_idea,
+        notes=notes,
     )
 
 
@@ -523,6 +537,12 @@ def best_hook(topic: str, artist: str, agent_hook: str, brief: GenerationBrief) 
     if _norm(agent_hook):
         candidates.append(agent_hook)
     candidates.extend(hook_variants(topic, artist, brief))
+    # Quality-buffer hooks compete in the same ranking (empty once retired).
+    try:
+        from ai_model.quality_awareness import hook_candidates as _qa_hooks
+        candidates.extend(_qa_hooks(topic, artist))
+    except Exception:
+        pass
     ranked = rank_candidates(candidates, brief)
     if not ranked:
         return agent_hook, 0.0, 0
