@@ -38,9 +38,18 @@ does). Apply dropout to the attention **output** instead and document it as an
 intentional deviation. It does not affect weight compatibility (dropout has no
 params), so a hyper-trained checkpoint still transfers 1:1 into `TransformerLM`.
 
-## Perf reality
-Real routing (tiled python-loop tensor-core matmul) is ~100–1000x slower than
-torch. A 90M-param fwd+bwd step at B=1,T=64 is ~30s, peak RSS ~1.2GB. Full-scale
-training is HOURS/epoch — keep bounded defaults + a `max_samples` cap, and be
-transparent about the tradeoff. Serving still uses the fast KV-cache
-`TransformerLM` with the transferred weights.
+## Perf: the slowness was a BUG, not inherent
+The Digital GPU is spec'd to match a top physical GPU incl. speed. It was ~100–
+1000x slower ONLY because `TensorCoreUnit.matmul`/`mixed_precision_matmul` and
+`core.flash_attention` executed the math with **pure-Python triple-nested tile /
+block loops**. The fix: execute each as a single vectorized `np.matmul`
+(BLAS-backed) — the tiling/online-softmax is just a memory-hierarchy detail, the
+result is numerically identical (fp32 exact; attention fwd+bwd match torch to
+~1e-7). Also: `.astype(np.float32)` ALWAYS copies — profiling showed 5633 copies
+(1.8s) from re-casting already-fp32 arrays; use `.astype(np.float32, copy=False)`
+(no-op when dtype matches; safe where arrays are read-only). For mixed precision,
+`np.matmul(A_fp16, B_fp16, dtype=np.float32)` upcasts+accumulates in fp32 in one
+shot (no round-trip copy). Result: 90M fwd+bwd step B=1,T=64 30s→~3s, B=4,T=128
+~12s (native torch ~1–1.7s, i.e. same order of magnitude). Peak RSS ~1.3–2GB.
+**Any reintroduced Python matmul/attention loop re-breaks this — keep kernels
+vectorized.** Serving still uses the fast KV-cache `TransformerLM`.

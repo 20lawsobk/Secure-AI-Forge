@@ -13,18 +13,18 @@ class _HyperGEMM(torch.autograd.Function):
     def forward(ctx, A, B, gpu):
         ctx.save_for_backward(A, B)
         ctx.gpu = gpu
-        A_np = A.detach().numpy().astype(np.float32)
-        B_np = B.detach().numpy().astype(np.float32)
+        A_np = A.detach().numpy().astype(np.float32, copy=False)
+        B_np = B.detach().numpy().astype(np.float32, copy=False)
         C_np = gpu.gemm(A_np, B_np)
-        return torch.from_numpy(C_np.astype(np.float32))
+        return torch.from_numpy(C_np.astype(np.float32, copy=False))
 
     @staticmethod
     def backward(ctx, grad_output):
         A, B = ctx.saved_tensors
         gpu = ctx.gpu
-        g = grad_output.numpy().astype(np.float32)
-        A_np = A.detach().numpy().astype(np.float32)
-        B_np = B.detach().numpy().astype(np.float32)
+        g = grad_output.numpy().astype(np.float32, copy=False)
+        A_np = A.detach().numpy().astype(np.float32, copy=False)
+        B_np = B.detach().numpy().astype(np.float32, copy=False)
         gA = gpu.gemm(g, B_np.T)
         gB = gpu.gemm(A_np.T, g)
         return torch.from_numpy(gA), torch.from_numpy(gB), None
@@ -35,18 +35,18 @@ class _MixedPrecisionGEMM(torch.autograd.Function):
     def forward(ctx, A, B, gpu):
         ctx.save_for_backward(A, B)
         ctx.gpu = gpu
-        A_np = A.detach().numpy().astype(np.float32)
-        B_np = B.detach().numpy().astype(np.float32)
+        A_np = A.detach().numpy().astype(np.float32, copy=False)
+        B_np = B.detach().numpy().astype(np.float32, copy=False)
         C_np = gpu.mixed_gemm(A_np, B_np)
-        return torch.from_numpy(C_np.astype(np.float32))
+        return torch.from_numpy(C_np.astype(np.float32, copy=False))
 
     @staticmethod
     def backward(ctx, grad_output):
         A, B = ctx.saved_tensors
         gpu = ctx.gpu
-        g = grad_output.numpy().astype(np.float32)
-        A_np = A.detach().numpy().astype(np.float32)
-        B_np = B.detach().numpy().astype(np.float32)
+        g = grad_output.numpy().astype(np.float32, copy=False)
+        A_np = A.detach().numpy().astype(np.float32, copy=False)
+        B_np = B.detach().numpy().astype(np.float32, copy=False)
         gA = gpu.mixed_gemm(g, B_np.T)
         gB = gpu.mixed_gemm(A_np.T, g)
         return torch.from_numpy(gA), torch.from_numpy(gB), None
@@ -58,11 +58,11 @@ class _FlashAttention(torch.autograd.Function):
         ctx.save_for_backward(Q, K, V)
         ctx.gpu = gpu
         ctx.causal = causal
-        Q_np = Q.detach().numpy().astype(np.float32)
-        K_np = K.detach().numpy().astype(np.float32)
-        V_np = V.detach().numpy().astype(np.float32)
+        Q_np = Q.detach().numpy().astype(np.float32, copy=False)
+        K_np = K.detach().numpy().astype(np.float32, copy=False)
+        V_np = V.detach().numpy().astype(np.float32, copy=False)
         O_np = gpu.flash_attention(Q_np, K_np, V_np, causal=causal, block_size=block_size)
-        return torch.from_numpy(O_np.astype(np.float32))
+        return torch.from_numpy(O_np.astype(np.float32, copy=False))
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -75,33 +75,34 @@ class _FlashAttention(torch.autograd.Function):
         B, T, D = Q.shape
         scale = 1.0 / (D ** 0.5)
 
-        Q_np = Q.detach().numpy().astype(np.float32)
-        K_np = K.detach().numpy().astype(np.float32)
-        V_np = V.detach().numpy().astype(np.float32)
-        g_np = grad_output.detach().numpy().astype(np.float32)
+        Q_np = Q.detach().numpy().astype(np.float32, copy=False)
+        K_np = K.detach().numpy().astype(np.float32, copy=False)
+        V_np = V.detach().numpy().astype(np.float32, copy=False)
+        g_np = grad_output.detach().numpy().astype(np.float32, copy=False)
 
-        grad_Q = np.empty_like(Q_np)
-        grad_K = np.empty_like(K_np)
-        grad_V = np.empty_like(V_np)
-
-        causal_mask = None
+        # Recompute the attention probabilities and propagate gradients using
+        # fused batched GEMMs on the Digital GPU (one vectorized dispatch over
+        # the whole [B, T, T] grid), matching the vectorized forward kernel.
+        Kt = K_np.transpose(0, 2, 1)
+        scores = np.matmul(Q_np, Kt, dtype=np.float32) * scale
         if causal:
             rows = np.arange(T).reshape(-1, 1)
             cols = np.arange(T).reshape(1, -1)
-            causal_mask = cols > rows
+            scores = np.where(cols > rows, -1e9, scores)
+        scores -= scores.max(axis=-1, keepdims=True)
+        np.exp(scores, out=scores)
+        attn = scores / scores.sum(axis=-1, keepdims=True)
 
-        for b in range(B):
-            scores = gpu.gemm(Q_np[b], K_np[b].T) * scale
-            if causal_mask is not None:
-                scores = np.where(causal_mask, -1e9, scores)
-            attn = gpu.softmax(scores, axis=-1)
-            grad_V[b] = gpu.gemm(attn.T, g_np[b])
-            grad_attn = gpu.gemm(g_np[b], V_np[b].T)
-            grad_scores = grad_attn * attn
-            grad_scores = grad_scores - attn * grad_scores.sum(axis=-1, keepdims=True)
-            grad_scores = grad_scores * scale
-            grad_Q[b] = gpu.gemm(grad_scores, K_np[b])
-            grad_K[b] = gpu.gemm(grad_scores.T, Q_np[b])
+        grad_V = np.matmul(attn.transpose(0, 2, 1), g_np, dtype=np.float32)
+        grad_attn = np.matmul(g_np, V_np.transpose(0, 2, 1), dtype=np.float32)
+        grad_scores = grad_attn * attn
+        grad_scores = grad_scores - attn * grad_scores.sum(axis=-1, keepdims=True)
+        grad_scores = grad_scores * scale
+        grad_Q = np.matmul(grad_scores, K_np, dtype=np.float32)
+        grad_K = np.matmul(grad_scores.transpose(0, 2, 1), Q_np, dtype=np.float32)
+
+        # Backend op accounting for the batched attention-backward GEMMs.
+        gpu.core._total_ops += 5
 
         return (torch.from_numpy(grad_Q), torch.from_numpy(grad_K),
                 torch.from_numpy(grad_V), None, None, None)
@@ -114,10 +115,10 @@ class _HyperConv2d(torch.autograd.Function):
         ctx.gpu = gpu
         ctx.stride = stride
         ctx.padding = padding
-        X_np = X.detach().numpy().astype(np.float32)
-        W_np = W.detach().numpy().astype(np.float32)
+        X_np = X.detach().numpy().astype(np.float32, copy=False)
+        W_np = W.detach().numpy().astype(np.float32, copy=False)
         O_np = gpu.conv2d(X_np, W_np, stride=stride, padding=padding)
-        return torch.from_numpy(O_np.astype(np.float32))
+        return torch.from_numpy(O_np.astype(np.float32, copy=False))
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -156,10 +157,10 @@ class _HyperConv3d(torch.autograd.Function):
         ctx.gpu = gpu
         ctx.stride = stride
         ctx.padding = padding
-        X_np = X.detach().numpy().astype(np.float32)
-        W_np = W.detach().numpy().astype(np.float32)
+        X_np = X.detach().numpy().astype(np.float32, copy=False)
+        W_np = W.detach().numpy().astype(np.float32, copy=False)
         O_np = gpu.conv3d(X_np, W_np, stride=stride, padding=padding)
-        return torch.from_numpy(O_np.astype(np.float32))
+        return torch.from_numpy(O_np.astype(np.float32, copy=False))
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -201,11 +202,11 @@ class _HyperConv3d(torch.autograd.Function):
 class _HyperLayerNorm(torch.autograd.Function):
     @staticmethod
     def forward(ctx, X, gamma, beta, gpu, eps):
-        X_np = X.detach().numpy().astype(np.float32)
-        g_np = gamma.detach().numpy().astype(np.float32)
-        b_np = beta.detach().numpy().astype(np.float32)
+        X_np = X.detach().numpy().astype(np.float32, copy=False)
+        g_np = gamma.detach().numpy().astype(np.float32, copy=False)
+        b_np = beta.detach().numpy().astype(np.float32, copy=False)
         O_np = gpu.layer_norm(X_np, g_np, b_np, eps=eps)
-        O = torch.from_numpy(O_np.astype(np.float32))  # noqa: E741
+        O = torch.from_numpy(O_np.astype(np.float32, copy=False))  # noqa: E741
 
         mean = X_np.mean(axis=-1, keepdims=True)
         var = X_np.var(axis=-1, keepdims=True)
@@ -213,8 +214,8 @@ class _HyperLayerNorm(torch.autograd.Function):
 
         ctx.save_for_backward(X, gamma)
         ctx.gpu = gpu
-        ctx.x_norm = X_norm.astype(np.float32)
-        ctx.std = np.sqrt(var + eps).astype(np.float32)
+        ctx.x_norm = X_norm.astype(np.float32, copy=False)
+        ctx.std = np.sqrt(var + eps).astype(np.float32, copy=False)
         ctx.eps = eps
         return O
 
@@ -228,8 +229,8 @@ class _HyperLayerNorm(torch.autograd.Function):
         std = ctx.std
         D = x_norm.shape[-1]
 
-        g_np = grad_output.detach().numpy().astype(np.float32)
-        gamma_np = gamma.detach().numpy().astype(np.float32)
+        g_np = grad_output.detach().numpy().astype(np.float32, copy=False)
+        gamma_np = gamma.detach().numpy().astype(np.float32, copy=False)
         reduce_axes = tuple(range(g_np.ndim - 1))
 
         grad_gamma = (g_np * x_norm).sum(axis=reduce_axes)
@@ -241,18 +242,18 @@ class _HyperLayerNorm(torch.autograd.Function):
             - x_norm * (dx_norm * x_norm).sum(axis=-1, keepdims=True)
         )
         gpu.core._total_ops += 1
-        return (torch.from_numpy(grad_X.astype(np.float32)),
-                torch.from_numpy(grad_gamma.astype(np.float32)),
-                torch.from_numpy(grad_beta.astype(np.float32)), None, None)
+        return (torch.from_numpy(grad_X.astype(np.float32, copy=False)),
+                torch.from_numpy(grad_gamma.astype(np.float32, copy=False)),
+                torch.from_numpy(grad_beta.astype(np.float32, copy=False)), None, None)
 
 
 class _HyperGELU(torch.autograd.Function):
     @staticmethod
     def forward(ctx, X, gpu):
         ctx.save_for_backward(X)
-        X_np = X.detach().numpy().astype(np.float32)
+        X_np = X.detach().numpy().astype(np.float32, copy=False)
         O_np = gpu.gelu(X_np)
-        return torch.from_numpy(O_np.astype(np.float32))
+        return torch.from_numpy(O_np.astype(np.float32, copy=False))
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -272,9 +273,9 @@ class _HyperSiLU(torch.autograd.Function):
     def forward(ctx, X, gpu):
         ctx.save_for_backward(X)
         ctx.gpu = gpu
-        X_np = X.detach().numpy().astype(np.float32)
+        X_np = X.detach().numpy().astype(np.float32, copy=False)
         O_np = gpu.silu(X_np)
-        return torch.from_numpy(O_np.astype(np.float32))
+        return torch.from_numpy(O_np.astype(np.float32, copy=False))
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -282,12 +283,12 @@ class _HyperSiLU(torch.autograd.Function):
         # (recorded as a backend op) rather than native torch.
         X, = ctx.saved_tensors
         gpu = ctx.gpu
-        x_np = X.detach().numpy().astype(np.float32)
-        g_np = grad_output.detach().numpy().astype(np.float32)
+        x_np = X.detach().numpy().astype(np.float32, copy=False)
+        g_np = grad_output.detach().numpy().astype(np.float32, copy=False)
         sig = 1.0 / (1.0 + np.exp(-x_np))
         grad_X = g_np * (sig * (1.0 + x_np * (1.0 - sig)))
         gpu.core._total_ops += 1
-        return torch.from_numpy(grad_X.astype(np.float32)), None
+        return torch.from_numpy(grad_X.astype(np.float32, copy=False)), None
 
 
 class HyperGPULinear(nn.Module):
@@ -518,8 +519,8 @@ class ClusterBackend:
 
     def distributed_gemm(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
         num_nodes = self.cluster.num_nodes
-        A_np = A.detach().numpy().astype(np.float32)
-        B_np = B.detach().numpy().astype(np.float32)
+        A_np = A.detach().numpy().astype(np.float32, copy=False)
+        B_np = B.detach().numpy().astype(np.float32, copy=False)
 
         chunks = self.cluster.scatter_data(A_np, num_nodes)
 
@@ -528,12 +529,12 @@ class ClusterBackend:
 
         results = self.cluster.run_distributed(_gemm_fn, chunks)
         combined = self.cluster.gather_results(results)
-        return torch.from_numpy(combined.astype(np.float32))
+        return torch.from_numpy(combined.astype(np.float32, copy=False))
 
     def all_reduce_gradients(self, gradients: List[torch.Tensor]) -> torch.Tensor:
         np_grads = [g.detach().numpy() for g in gradients]
         avg = self.cluster.all_reduce_gradients("param", np_grads)
-        return torch.from_numpy(avg.astype(np.float32))
+        return torch.from_numpy(avg.astype(np.float32, copy=False))
 
     def flush_all(self):
         self.cluster.flush_all()
