@@ -228,21 +228,37 @@ def test_registry_and_future_backends_are_honest():
 
 
 # ── PDIM ──────────────────────────────────────────────────────────────────────
+# Namespaces are unique per run: the fleet dedup store persists across test
+# runs when pdim storage is online, so fixed namespaces would replay results.
+import uuid as _uuid  # noqa: E402
+
+_RUN = _uuid.uuid4().hex[:8]
+
+
 def test_pdim_dedup_cache_hit():
     orch = PDIMOrchestrator()
     calls = {"n": 0}
+    ns = f"test_dedup_{_RUN}"
 
     def compute(req):
         calls["n"] += 1
         return {"value": req["topic"].upper()}
 
     req = {"topic": "drop a single", "id": "abc"}        # 'id' is volatile metadata
-    r1 = orch.compute(req, compute, namespace="test_dedup")
-    r2 = orch.compute({"topic": "drop a single", "id": "xyz"}, compute, namespace="test_dedup")
+    r1 = orch.compute(req, compute, namespace=ns)
     assert r1["source"] == "compute"
+    # The leader persists via a background thread — poll until it lands.
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        r2 = orch.compute({"topic": "drop a single", "id": "xyz"}, compute, namespace=ns)
+        if r2["source"] == "cache":
+            break
+        time.sleep(0.02)
     assert r2["source"] == "cache"           # different id, same semantic request
     assert r2["result"]["value"] == "DROP A SINGLE"
-    assert calls["n"] == 1
+    n_settled = calls["n"]
+    r3 = orch.compute({"topic": "drop a single", "id": "zzz"}, compute, namespace=ns)
+    assert r3["source"] == "cache" and calls["n"] == n_settled  # deduped for good
 
 
 def test_pdim_single_flight_collapses_concurrent():
@@ -259,7 +275,8 @@ def test_pdim_single_flight_collapses_concurrent():
     results = []
 
     def worker():
-        results.append(orch.compute({"k": "same"}, compute, namespace="test_sf"))
+        results.append(orch.compute({"k": "same"}, compute,
+                                    namespace=f"test_sf_{_RUN}"))
 
     threads = [threading.Thread(target=worker) for _ in range(6)]
     threads[0].start()
@@ -276,7 +293,7 @@ def test_pdim_single_flight_collapses_concurrent():
 def test_pdim_durable_queue_roundtrip(tmp_path_factory=None):
     import tempfile
     base = tempfile.mkdtemp(prefix="pdim_test_")
-    cfg = PDIMConfig(namespace="test_q", batch_size=8, base_dir=base)
+    cfg = PDIMConfig(namespace=f"test_q_{_RUN}", batch_size=8, base_dir=base)
     storage = PDIMStorage(config=cfg)            # in-process store fallback
     orch = PDIMOrchestrator(storage=storage, config=cfg)
 
@@ -302,7 +319,7 @@ def test_pdim_durable_queue_roundtrip(tmp_path_factory=None):
 def test_pdim_preview_policy_pluggable():
     import tempfile
     base = tempfile.mkdtemp(prefix="pdim_prev_")
-    cfg = PDIMConfig(namespace="test_prev", base_dir=base)
+    cfg = PDIMConfig(namespace=f"test_prev_{_RUN}", base_dir=base)
     storage = PDIMStorage(config=cfg)
     orch = PDIMOrchestrator(storage=storage, config=cfg)
     orch.submit(model_id="m", prompt="p", params={}, context_sig="c")
@@ -439,6 +456,95 @@ def test_pocket_matmul_batched_and_shape_errors():
     except ValueError:
         raised = True
     assert raised
+
+
+# ── pocket accelerator wired into the Digital GPU ────────────────────────────
+def test_pocket_accelerator_hit_serves_repeat_at_hash_cost():
+    from ai_model.maxcore.pdim.pocket_accelerator import PocketAccelerator
+    accel = PocketAccelerator(budget_bytes=64_000_000)
+    rng = np.random.default_rng(31)
+    A = rng.standard_normal((128, 128)).astype(np.float32)   # 4.2 MFLOP > gate
+    B = rng.standard_normal((128, 128)).astype(np.float32)
+    calls = {"n": 0}
+
+    def compute():
+        calls["n"] += 1
+        return A @ B
+
+    r1, s1 = accel.accelerate("gemm", (A, B), 2.0 * A.size * B.shape[-1], compute)
+    r2, s2 = accel.accelerate("gemm", (A, B), 2.0 * A.size * B.shape[-1], compute)
+    assert (s1, s2) == ("compute", "pocket")
+    assert calls["n"] == 1                       # repeat never recomputed
+    assert np.allclose(r2, A @ B, atol=TOL)
+    r2[0, 0] = 999.0                             # mutating a hit must not
+    r3, s3 = accel.accelerate("gemm", (A, B), 2.0 * A.size * B.shape[-1], compute)
+    assert s3 == "pocket" and np.allclose(r3, A @ B, atol=TOL)  # poison the pocket
+    st = accel.stats()
+    assert st["hits"] == 2 and st["misses"] == 1
+    assert st["compute_seconds_saved"] > 0
+
+
+def test_pocket_accelerator_miss_result_mutation_cannot_poison_cache():
+    from ai_model.maxcore.pdim.pocket_accelerator import PocketAccelerator
+    accel = PocketAccelerator()
+    rng = np.random.default_rng(34)
+    A = rng.standard_normal((128, 128)).astype(np.float32)
+    B = rng.standard_normal((128, 128)).astype(np.float32)
+    ref = A @ B
+    flops = 2.0 * A.size * B.shape[-1]
+
+    r1, s1 = accel.accelerate("gemm", (A, B), flops, lambda: A @ B)
+    assert s1 == "compute"
+    r1[:] = -1.0                                 # caller trashes its MISS result
+    r2, s2 = accel.accelerate("gemm", (A, B), flops,
+                              lambda: (_ for _ in ()).throw(AssertionError))
+    assert s2 == "pocket"
+    assert np.allclose(r2, ref, atol=TOL)        # pocket stayed pristine
+
+
+def test_pocket_accelerator_adaptive_gating():
+    from ai_model.maxcore.pdim.pocket_accelerator import PocketAccelerator
+    accel = PocketAccelerator(warmup=6, reprobe_every=4)
+    rng = np.random.default_rng(32)
+    B = rng.standard_normal((128, 128)).astype(np.float32)
+
+    # Tiny multiply: below the FLOP floor — never hashed.
+    a_small = rng.standard_normal((4, 4)).astype(np.float32)
+    b_small = rng.standard_normal((4, 4)).astype(np.float32)
+    _, src = accel.accelerate("gemm", (a_small, b_small),
+                              2.0 * a_small.size * 4, lambda: a_small @ b_small)
+    assert src == "bypass"
+    assert accel.stats()["bypass_small"] == 1
+
+    # Never-repeating operands (training-style): pocket mutes itself after
+    # warmup, then hashing stops entirely — the adaptive "never slower" gate.
+    def offer_unique():
+        A = rng.standard_normal((128, 128)).astype(np.float32)
+        return accel.accelerate("gemm", (A, B),
+                                2.0 * A.size * B.shape[-1], lambda: A @ B)[1]
+
+    for _ in range(6):                            # warmup: all misses
+        assert offer_unique() == "compute"
+    assert accel.stats()["pockets_muted"] == 1
+    sources = [offer_unique() for _ in range(3)]
+    assert "bypass" in sources                    # hashing switched off
+    assert accel.stats()["bypass_adaptive_muted"] >= 1
+    # Re-probe turn arrives every 4th skip — the pocket can re-engage.
+    sources += [offer_unique() for _ in range(6)]
+    assert "compute" in sources                   # a re-probe actually ran
+
+
+def test_digital_gpu_gemm_served_from_pocket_on_repeat():
+    dg = DigitalGPU()
+    rng = np.random.default_rng(33)
+    A = rng.standard_normal((128, 96)).astype(np.float32)
+    B = rng.standard_normal((96, 128)).astype(np.float32)
+    h0 = _counter("pocket_accel.hit")
+    o1 = dg.gemm(A, B).numpy()
+    o2 = dg.gemm(A, B).numpy()                   # identical repeat
+    assert np.allclose(o1, A @ B, atol=TOL)
+    assert np.allclose(o2, o1, atol=0.0)         # bit-identical: pocket-served
+    assert _counter("pocket_accel.hit") >= h0 + 1
 
 
 # ── manual runner ─────────────────────────────────────────────────────────────

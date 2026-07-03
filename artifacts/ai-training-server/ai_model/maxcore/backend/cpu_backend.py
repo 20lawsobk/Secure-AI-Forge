@@ -30,6 +30,17 @@ from ..observability import METRICS
 from ..tensor import Tensor, to_numpy
 from .base import Backend
 
+# ── pocket accelerator (lazy: avoids import cycles at package load) ───────────
+_POCKET_ACCEL = None
+
+
+def _pocket_accel():
+    global _POCKET_ACCEL
+    if _POCKET_ACCEL is None:
+        from ..pdim.pocket_accelerator import get_pocket_accelerator
+        _POCKET_ACCEL = get_pocket_accelerator()
+    return _POCKET_ACCEL
+
 # ── Load the in-house engine in isolation (no torch, no package __init__) ─────
 _EngineGPU = None
 _ENGINE_LOAD_ERROR = None
@@ -137,30 +148,41 @@ class CPUBackend(Backend):
             out = np.squeeze(out, axis=-1)
         return out, used
 
-    # ── GEMM: every matmul (2D or batched) is engine-served ───────────────────
+    # ── GEMM: every matmul (2D or batched) is engine-served; repeats are ──────
+    # served from the pocket-dimension accelerator (content-hash dedup).
     def gemm(self, a, b, bias=None, activation=None):
         A = to_numpy(a).astype(np.float32, copy=False)
         B = to_numpy(b).astype(np.float32, copy=False)
-        with METRICS.timer("cpu.gemm"):
-            out = None
-            used_engine = False
-            # Fused 2D bias+relu fast path — a single engine kernel call.
-            if (self.engine is not None and A.ndim == 2 and B.ndim == 2
-                    and bias is not None and activation == "relu"):
-                try:
-                    out = np.asarray(self.engine.gemm_bias_relu(
-                        A, B, to_numpy(bias).astype(np.float32)))
-                    bias, activation = None, None  # consumed by fused kernel
-                    used_engine = True
-                except Exception:
-                    out = None
-                    METRICS.incr("cpu.gemm.engine_fallback")
-            if out is None:
-                out, used_engine = self._matmul_engine(A, B)
-            if bias is not None:
-                out = out + to_numpy(bias)
-            out = _activate(out, activation)
-        METRICS.incr("cpu.gemm.engine" if used_engine else "cpu.gemm.numpy")
+        bias_np = None if bias is None else to_numpy(bias).astype(np.float32, copy=False)
+
+        def _compute() -> np.ndarray:
+            with METRICS.timer("cpu.gemm"):
+                out = None
+                used_engine = False
+                fused = False
+                # Fused 2D bias+relu fast path — a single engine kernel call.
+                if (self.engine is not None and A.ndim == 2 and B.ndim == 2
+                        and bias_np is not None and activation == "relu"):
+                    try:
+                        out = np.asarray(self.engine.gemm_bias_relu(A, B, bias_np))
+                        used_engine = True
+                        fused = True               # bias+relu consumed by kernel
+                    except Exception:
+                        out = None
+                        METRICS.incr("cpu.gemm.engine_fallback")
+                if out is None:
+                    out, used_engine = self._matmul_engine(A, B)
+                if not fused:
+                    if bias_np is not None:
+                        out = out + bias_np
+                    out = _activate(out, activation)
+            METRICS.incr("cpu.gemm.engine" if used_engine else "cpu.gemm.numpy")
+            return out
+
+        flops = 2.0 * float(A.size) * float(B.shape[-1])
+        operands = (A, B) if bias_np is None else (A, B, bias_np)
+        out, _src = _pocket_accel().accelerate(
+            "gemm", operands, flops, _compute, extra_key=f"|act={activation}")
         return Tensor(out, dtype=None)
 
     def add(self, a, b):

@@ -1557,6 +1557,17 @@ async def api_pocket_multiply(req: PocketMultiplyRequest,
         "compute_backend": "digital_gpu",
     }
 
+@app.get("/api/maxcore/pocket-accelerator/stats")
+async def api_pocket_accelerator_stats(key: dict = Depends(verify_api_key)):
+    """Live stats for the pocket accelerator wired into the Digital GPU GEMM
+    paths: hits/misses, adaptive gating decisions, bytes held, compute seconds
+    avoided, and the measured effective speedup on pocket-served repeats."""
+    from ai_model.maxcore.pdim import get_pocket_accelerator
+    stats = get_pocket_accelerator().stats()
+    if stats.get("effective_speedup_on_hits") == float("inf"):
+        stats["effective_speedup_on_hits"] = "inf"
+    return {"success": True, "stats": stats}
+
 def _run_hyper_scaleup(req: HyperScaleUpRequest, job_id: str):
     """Background task: build corpus + BPE train + train a model whose real
     compute runs on the Digital GPU, then transfer weights to the serving model."""
