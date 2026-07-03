@@ -511,23 +511,36 @@ class HyperGPU:
                 self.core.tensor_core_units[0].total_flops += float(flops)
             self._total_compute_ms += simulated_ms
 
+    @staticmethod
+    def _pocket():
+        from ai_model.maxcore.pdim.pocket_accelerator import get_pocket_accelerator
+        return get_pocket_accelerator()
+
     def gemm(self, A: np.ndarray, B: np.ndarray) -> np.ndarray:
         t0 = time.time()
-        result = self.core.tensor_core_gemm(
-            A.astype(np.float32, copy=False), B.astype(np.float32, copy=False)
-        )
+        A32: np.ndarray = A.astype(np.float32, copy=False)
+        B32: np.ndarray = B.astype(np.float32, copy=False)
+        result, _src = self._pocket().accelerate(
+            "hyper_gemm", (A32, B32), 2.0 * float(A32.size) * float(B32.shape[-1]),
+            lambda: self.core.tensor_core_gemm(A32, B32))
         self._total_compute_ms += (time.time() - t0) * 1000
         return result
 
     def mixed_gemm(self, A: np.ndarray, B: np.ndarray) -> np.ndarray:
         t0 = time.time()
-        result = self.core.mixed_precision_gemm(A, B)
+        result, _src = self._pocket().accelerate(
+            "hyper_mixed", (A, B), 2.0 * float(A.size) * float(B.shape[-1]),
+            lambda: self.core.mixed_precision_gemm(A, B),
+            extra_key=f"|fp16={_EMULATE_FP16}")
         self._total_compute_ms += (time.time() - t0) * 1000
         return result
 
     def gemm_batched(self, A: np.ndarray, B: np.ndarray) -> np.ndarray:
         t0 = time.time()
-        result = self.core.batched_gemm(A, B)
+        result, _src = self._pocket().accelerate(
+            "hyper_gemm_batched", (A, B),
+            2.0 * float(A.size) * float(B.shape[-1]),
+            lambda: self.core.batched_gemm(A, B))
         self._total_compute_ms += (time.time() - t0) * 1000
         return result
 
