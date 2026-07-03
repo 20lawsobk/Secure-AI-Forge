@@ -374,6 +374,73 @@ def test_masked_multihead_attention_is_engine_served():
     assert _counter("cpu.attention.engine_fallback") == f0
 
 
+# ── pocket-dimension multiplication ──────────────────────────────────────────
+def _fresh_pocket(path):
+    """Pocket backed by a fresh in-process dedup (isolated from fleet cache)."""
+    from ai_model.maxcore.pdim.orchestrator import _FallbackDedup
+    from ai_model.maxcore.pdim.pocket_multiply import PocketDimension
+    orch = PDIMOrchestrator(dedup=_FallbackDedup())
+    return PocketDimension(path, orchestrator=orch), orch
+
+
+def test_pocket_matmul_correct_and_deduped_inside_one_pocket():
+    pocket, _ = _fresh_pocket("test/parent")
+    rng = np.random.default_rng(21)
+    A = rng.standard_normal((6, 9)).astype(np.float32)
+    B = rng.standard_normal((9, 4)).astype(np.float32)
+
+    r1 = pocket.matmul(A, B)
+    assert r1["source"] == "compute"
+    assert np.allclose(r1["result"], A @ B, atol=TOL)
+
+    # Identical multiplication inside the SAME pocket: served, not recomputed.
+    deadline = time.time() + 2.0
+    while time.time() < deadline:            # leader persists via a bg thread
+        r2 = pocket.matmul(A, B)
+        if r2["source"] in ("cache", "coalesced"):
+            break
+        time.sleep(0.02)
+    assert r2["source"] in ("cache", "coalesced")
+    assert np.allclose(r2["result"], A @ B, atol=TOL)
+    assert r2["compression"]["codec"] == "zlib+b64"
+    assert r2["compression"]["stored_bytes"] > 0
+
+
+def test_pocket_nesting_pockets_inside_one_pocket_are_isolated():
+    outer, orch = _fresh_pocket("test/outer")
+    inner_a = outer.pocket("a")
+    inner_deep = outer.pocket("a").pocket("b").pocket("c")   # unbounded nesting
+    assert inner_a.path == "test/outer/a"
+    assert inner_deep.path == "test/outer/a/b/c"
+    assert inner_deep.namespace == "pocket:test/outer/a/b/c"
+
+    rng = np.random.default_rng(22)
+    A = rng.standard_normal((3, 5)).astype(np.float32)
+    B = rng.standard_normal((5, 2)).astype(np.float32)
+
+    # Same operands in three different pockets: each pocket computes its own.
+    assert outer.matmul(A, B)["source"] == "compute"
+    assert inner_a.matmul(A, B)["source"] == "compute"
+    assert inner_deep.matmul(A, B)["source"] == "compute"
+
+
+def test_pocket_matmul_batched_and_shape_errors():
+    pocket, _ = _fresh_pocket("test/batched")
+    rng = np.random.default_rng(23)
+    A = rng.standard_normal((2, 4, 6)).astype(np.float32)    # [B, M, K]
+    W = rng.standard_normal((6, 3)).astype(np.float32)
+    out = pocket.matmul(A, W)
+    assert out["result"].shape == (2, 4, 3)
+    assert np.allclose(out["result"], A @ W, atol=TOL)
+
+    raised = False
+    try:
+        pocket.matmul(np.zeros((3, 4), np.float32), np.zeros((5, 2), np.float32))
+    except ValueError:
+        raised = True
+    assert raised
+
+
 # ── manual runner ─────────────────────────────────────────────────────────────
 def _run_all():
     tests = [v for k, v in sorted(globals().items())
