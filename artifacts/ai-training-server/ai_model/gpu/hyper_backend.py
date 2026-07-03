@@ -81,10 +81,10 @@ class _FlashAttention(torch.autograd.Function):
         g_np = grad_output.detach().numpy().astype(np.float32, copy=False)
 
         # Recompute the attention probabilities and propagate gradients using
-        # fused batched GEMMs on the Digital GPU (one vectorized dispatch over
-        # the whole [B, T, T] grid), matching the vectorized forward kernel.
-        Kt = K_np.transpose(0, 2, 1)
-        scores = np.matmul(Q_np, Kt, dtype=np.float32) * scale
+        # fused batched GEMMs dispatched through the Digital GPU backend (one
+        # vectorized dispatch over the whole [B, T, T] grid per GEMM), matching
+        # the vectorized forward kernel.
+        scores = gpu.gemm_batched(Q_np, K_np.transpose(0, 2, 1)) * scale
         if causal:
             rows = np.arange(T).reshape(-1, 1)
             cols = np.arange(T).reshape(1, -1)
@@ -93,16 +93,13 @@ class _FlashAttention(torch.autograd.Function):
         np.exp(scores, out=scores)
         attn = scores / scores.sum(axis=-1, keepdims=True)
 
-        grad_V = np.matmul(attn.transpose(0, 2, 1), g_np, dtype=np.float32)
-        grad_attn = np.matmul(g_np, V_np.transpose(0, 2, 1), dtype=np.float32)
+        grad_V = gpu.gemm_batched(attn.transpose(0, 2, 1), g_np)
+        grad_attn = gpu.gemm_batched(g_np, V_np.transpose(0, 2, 1))
         grad_scores = grad_attn * attn
         grad_scores = grad_scores - attn * grad_scores.sum(axis=-1, keepdims=True)
         grad_scores = grad_scores * scale
-        grad_Q = np.matmul(grad_scores, K_np, dtype=np.float32)
-        grad_K = np.matmul(grad_scores.transpose(0, 2, 1), Q_np, dtype=np.float32)
-
-        # Backend op accounting for the batched attention-backward GEMMs.
-        gpu.core._total_ops += 5
+        grad_Q = gpu.gemm_batched(grad_scores, K_np)
+        grad_K = gpu.gemm_batched(grad_scores.transpose(0, 2, 1), Q_np)
 
         return (torch.from_numpy(grad_Q), torch.from_numpy(grad_K),
                 torch.from_numpy(grad_V), None, None, None)

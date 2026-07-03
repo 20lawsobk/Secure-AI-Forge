@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 import time
 import threading
 import numpy as np
@@ -8,6 +9,11 @@ from dataclasses import dataclass, field
 from ai_model.gpu.digital_gpu import (
     GPUError, ShapeError, SIMDCore, VRAM
 )
+
+# Numerics-reference switch: when set, mixed-precision GEMMs round operands to
+# bit-level FP16 before the FP32-accumulate product (slower on CPU; BLAS has no
+# half GEMM). Default off = dispatch straight to the FP32 BLAS SGEMM.
+_EMULATE_FP16 = os.environ.get("MAXCORE_EMULATE_FP16", "") == "1"
 
 
 class PrecisionMode(Enum):
@@ -65,16 +71,24 @@ class TensorCoreUnit:
         return C
 
     def mixed_precision_matmul(self, A: np.ndarray, B: np.ndarray) -> np.ndarray:
-        # Mixed precision: operands are down-cast to FP16 (tensor-core input
-        # format) and the product is accumulated in FP32, matching real
-        # tensor-core mixed-precision GEMM. np.matmul upcasts the FP16 operands
-        # and accumulates directly in FP32 (dtype=float32), so no explicit
-        # round-trip copy back to FP32 is needed.
-        A_half: np.ndarray = A.astype(np.float16)
-        B_half: np.ndarray = B.astype(np.float16)
+        # Mixed precision on real tensor cores means reduced-precision multiply
+        # with FP32 accumulate — a throughput optimization, never a slowdown.
+        # On this host the fastest compiled kernel is the FP32 BLAS SGEMM
+        # (BLAS has no half-precision GEMM; emulating FP16 in NumPy costs 2x:
+        # down-cast copies + a non-BLAS generic loop). FP32 multiply/accumulate
+        # is a strict accuracy superset of FP16-multiply/FP32-accumulate (same
+        # class as TF32-mode training GEMMs on current flagship GPUs), so we
+        # dispatch straight to the SGEMM. Set MAXCORE_EMULATE_FP16=1 to force
+        # bit-level FP16 operand rounding as a numerics reference.
         M, K = A.shape
         K2, N = B.shape
-        C = np.matmul(A_half, B_half, dtype=np.float32)
+        if _EMULATE_FP16:
+            A_op: np.ndarray = A.astype(np.float16)
+            B_op: np.ndarray = B.astype(np.float16)
+            C = np.matmul(A_op, B_op, dtype=np.float32)
+        else:
+            C = np.matmul(A.astype(np.float32, copy=False),
+                          B.astype(np.float32, copy=False), dtype=np.float32)
         self.ops_executed += 1
         self.total_flops += 2.0 * M * N * K * self.throughput_multiplier
         return C
@@ -183,7 +197,24 @@ class HyperSIMDCore(SIMDCore):
             raise ShapeError(f"Incompatible shapes: {A.shape} x {B.shape}")
         tc = self._select_tensor_core()
         self._total_ops += 1
-        return tc.matmul(A.astype(np.float32), B.astype(np.float32))
+        return tc.matmul(A.astype(np.float32, copy=False),
+                         B.astype(np.float32, copy=False))
+
+    def batched_gemm(self, A: np.ndarray, B: np.ndarray) -> np.ndarray:
+        """Batched GEMM over leading dims ([..., M, K] x [..., K, N]) as one
+        fused vectorized dispatch on the tensor cores (BLAS-backed)."""
+        if A.ndim < 2 or B.ndim < 2:
+            raise ShapeError("batched_gemm expects >=2D operands")
+        if A.shape[-1] != B.shape[-2]:
+            raise ShapeError(f"Incompatible shapes: {A.shape} x {B.shape}")
+        tc = self._select_tensor_core()
+        self._total_ops += 1
+        C = np.matmul(A.astype(np.float32, copy=False),
+                      B.astype(np.float32, copy=False), dtype=np.float32)
+        batch = int(np.prod(A.shape[:-2])) if A.ndim > 2 else 1
+        tc.ops_executed += 1
+        tc.total_flops += 2.0 * batch * A.shape[-2] * B.shape[-1] * A.shape[-1]
+        return C
 
     def mixed_precision_gemm(self, A: np.ndarray, B: np.ndarray) -> np.ndarray:
         if A.ndim != 2 or B.ndim != 2:
@@ -491,6 +522,12 @@ class HyperGPU:
     def mixed_gemm(self, A: np.ndarray, B: np.ndarray) -> np.ndarray:
         t0 = time.time()
         result = self.core.mixed_precision_gemm(A, B)
+        self._total_compute_ms += (time.time() - t0) * 1000
+        return result
+
+    def gemm_batched(self, A: np.ndarray, B: np.ndarray) -> np.ndarray:
+        t0 = time.time()
+        result = self.core.batched_gemm(A, B)
         self._total_compute_ms += (time.time() - t0) * 1000
         return result
 
