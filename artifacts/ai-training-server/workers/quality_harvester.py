@@ -88,21 +88,39 @@ def _harvest_apple_charts() -> Dict[str, Any]:
 
 
 def _harvest_youtube_music() -> Dict[str, Any]:
-    """Titles from high-subscriber music channels — hook-style phrasing."""
+    """Titles from major music channels, weighted by REAL view counts taken
+    from the feed's media:statistics (no engagement data → low honest weight,
+    labelled 'curated', never inflated)."""
     out: Dict[str, Any] = {"ok": False, "items": 0, "error": None, "titles": []}
     errors: List[str] = []
+    raw: List[Dict[str, Any]] = []
     for feed in YOUTUBE_FEEDS:
         try:
             xml = _fetch(feed["url"]).decode("utf-8", errors="replace")
-            titles = re.findall(r"<title>([^<]{4,120})</title>", xml)
-            # first <title> is the channel name — skip it
-            for t in titles[1:16]:
-                text = t.strip()
-                if text:
-                    out["titles"].append({"text": text, "weight": 0.6,
-                                          "source": f"youtube:{feed['name']}"})
+            for entry in xml.split("<entry>")[1:16]:
+                tm = re.search(r"<title>([^<]{4,120})</title>", entry)
+                if not tm:
+                    continue
+                vm = re.search(r'views="(\d+)"', entry)
+                raw.append({
+                    "text": tm.group(1).strip(),
+                    "views": int(vm.group(1)) if vm else None,
+                    "channel": feed["name"],
+                })
         except Exception as exc:  # noqa: BLE001 - per-source isolation
             errors.append(f"{feed['name']}: {type(exc).__name__}")
+    max_views = max((r["views"] for r in raw if r["views"]), default=0)
+    for r in raw:
+        if not r["text"]:
+            continue
+        if r["views"] is not None and max_views > 0:
+            weight = round(0.2 + 0.8 * (r["views"] / max_views), 3)
+            source = f"youtube:{r['channel']}"
+        else:
+            weight = 0.3  # no measurable engagement — honest low weight
+            source = f"youtube_curated:{r['channel']}"
+        out["titles"].append({"text": r["text"], "weight": weight,
+                              "source": source})
     out["items"] = len(out["titles"])
     out["ok"] = out["items"] > 0
     if errors and not out["ok"]:
