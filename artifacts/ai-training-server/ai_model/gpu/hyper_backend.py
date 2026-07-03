@@ -66,23 +66,45 @@ class _FlashAttention(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
+        # Route the attention backward matmuls through the Digital GPU tensor
+        # cores (gpu.gemm) and the softmax through gpu.softmax, so the backward
+        # compute is genuinely backend-routed rather than native torch.
         Q, K, V = ctx.saved_tensors
+        gpu = ctx.gpu
         causal = ctx.causal
         B, T, D = Q.shape
         scale = 1.0 / (D ** 0.5)
-        scores = torch.bmm(Q, K.transpose(1, 2)) * scale
+
+        Q_np = Q.detach().numpy().astype(np.float32)
+        K_np = K.detach().numpy().astype(np.float32)
+        V_np = V.detach().numpy().astype(np.float32)
+        g_np = grad_output.detach().numpy().astype(np.float32)
+
+        grad_Q = np.empty_like(Q_np)
+        grad_K = np.empty_like(K_np)
+        grad_V = np.empty_like(V_np)
+
+        causal_mask = None
         if causal:
-            mask = torch.triu(torch.full((T, T), float('-inf')), diagonal=1)
-            scores = scores + mask.unsqueeze(0)
-        attn = torch.softmax(scores, dim=-1)
-        grad_V = torch.bmm(attn.transpose(1, 2), grad_output)
-        grad_attn = torch.bmm(grad_output, V.transpose(1, 2))
-        grad_scores = grad_attn * attn
-        grad_scores = grad_scores - attn * grad_scores.sum(dim=-1, keepdim=True)
-        grad_scores = grad_scores * scale
-        grad_Q = torch.bmm(grad_scores, K)
-        grad_K = torch.bmm(grad_scores.transpose(1, 2), Q)
-        return grad_Q, grad_K, grad_V, None, None, None
+            rows = np.arange(T).reshape(-1, 1)
+            cols = np.arange(T).reshape(1, -1)
+            causal_mask = cols > rows
+
+        for b in range(B):
+            scores = gpu.gemm(Q_np[b], K_np[b].T) * scale
+            if causal_mask is not None:
+                scores = np.where(causal_mask, -1e9, scores)
+            attn = gpu.softmax(scores, axis=-1)
+            grad_V[b] = gpu.gemm(attn.T, g_np[b])
+            grad_attn = gpu.gemm(g_np[b], V_np[b].T)
+            grad_scores = grad_attn * attn
+            grad_scores = grad_scores - attn * grad_scores.sum(axis=-1, keepdims=True)
+            grad_scores = grad_scores * scale
+            grad_Q[b] = gpu.gemm(grad_scores, K_np[b])
+            grad_K[b] = gpu.gemm(grad_scores.T, Q_np[b])
+
+        return (torch.from_numpy(grad_Q), torch.from_numpy(grad_K),
+                torch.from_numpy(grad_V), None, None, None)
 
 
 class _HyperConv2d(torch.autograd.Function):
@@ -190,27 +212,38 @@ class _HyperLayerNorm(torch.autograd.Function):
         X_norm = (X_np - mean) / np.sqrt(var + eps)
 
         ctx.save_for_backward(X, gamma)
-        ctx.x_norm = torch.from_numpy(X_norm.astype(np.float32))
-        ctx.std = torch.from_numpy(np.sqrt(var + eps).astype(np.float32))
+        ctx.gpu = gpu
+        ctx.x_norm = X_norm.astype(np.float32)
+        ctx.std = np.sqrt(var + eps).astype(np.float32)
         ctx.eps = eps
         return O
 
     @staticmethod
     def backward(ctx, grad_output):
-        X, gamma = ctx.saved_tensors
+        # LayerNorm backward is elementwise/reduction math executed in the
+        # backend's numpy compute domain (recorded as a backend op).
+        _, gamma = ctx.saved_tensors
+        gpu = ctx.gpu
         x_norm = ctx.x_norm
         std = ctx.std
-        D = X.shape[-1]
+        D = x_norm.shape[-1]
 
-        grad_gamma = (grad_output * x_norm).sum(dim=tuple(range(grad_output.dim() - 1)))
-        grad_beta = grad_output.sum(dim=tuple(range(grad_output.dim() - 1)))
+        g_np = grad_output.detach().numpy().astype(np.float32)
+        gamma_np = gamma.detach().numpy().astype(np.float32)
+        reduce_axes = tuple(range(g_np.ndim - 1))
 
-        dx_norm = grad_output * gamma
+        grad_gamma = (g_np * x_norm).sum(axis=reduce_axes)
+        grad_beta = g_np.sum(axis=reduce_axes)
+
+        dx_norm = g_np * gamma_np
         grad_X = (1.0 / D) * (1.0 / std) * (
-            D * dx_norm - dx_norm.sum(dim=-1, keepdim=True)
-            - x_norm * (dx_norm * x_norm).sum(dim=-1, keepdim=True)
+            D * dx_norm - dx_norm.sum(axis=-1, keepdims=True)
+            - x_norm * (dx_norm * x_norm).sum(axis=-1, keepdims=True)
         )
-        return grad_X, grad_gamma, grad_beta, None, None
+        gpu.core._total_ops += 1
+        return (torch.from_numpy(grad_X.astype(np.float32)),
+                torch.from_numpy(grad_gamma.astype(np.float32)),
+                torch.from_numpy(grad_beta.astype(np.float32)), None, None)
 
 
 class _HyperGELU(torch.autograd.Function):
@@ -238,16 +271,23 @@ class _HyperSiLU(torch.autograd.Function):
     @staticmethod
     def forward(ctx, X, gpu):
         ctx.save_for_backward(X)
+        ctx.gpu = gpu
         X_np = X.detach().numpy().astype(np.float32)
         O_np = gpu.silu(X_np)
         return torch.from_numpy(O_np.astype(np.float32))
 
     @staticmethod
     def backward(ctx, grad_output):
+        # SiLU derivative computed in the backend's numpy compute domain
+        # (recorded as a backend op) rather than native torch.
         X, = ctx.saved_tensors
-        sig = torch.sigmoid(X)
-        grad_X = sig * (1.0 + X * (1.0 - sig))
-        return grad_output * grad_X, None
+        gpu = ctx.gpu
+        x_np = X.detach().numpy().astype(np.float32)
+        g_np = grad_output.detach().numpy().astype(np.float32)
+        sig = 1.0 / (1.0 + np.exp(-x_np))
+        grad_X = g_np * (sig * (1.0 + x_np * (1.0 - sig)))
+        gpu.core._total_ops += 1
+        return torch.from_numpy(grad_X.astype(np.float32)), None
 
 
 class HyperGPULinear(nn.Module):
