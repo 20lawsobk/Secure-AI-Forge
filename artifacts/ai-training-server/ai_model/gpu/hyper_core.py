@@ -51,34 +51,30 @@ class TensorCoreUnit:
     total_flops: float = 0.0
 
     def matmul(self, A: np.ndarray, B: np.ndarray) -> np.ndarray:
+        # The tensor core issues the full tile grid in a single vectorized SIMD
+        # dispatch (BLAS-backed), not a Python-level tile loop. Tiling is a
+        # hardware detail of how the systolic array streams the operands; the
+        # numerical result is identical to the full-matrix product, so we execute
+        # it as one fused GEMM to run at the hardware's real throughput.
         M, K = A.shape
         K2, N = B.shape
-        C = np.zeros((M, N), dtype=np.float32)
-        for i in range(0, M, self.m_tile):
-            ie = min(i + self.m_tile, M)
-            for j in range(0, N, self.n_tile):
-                je = min(j + self.n_tile, N)
-                for k in range(0, K, self.k_tile):
-                    ke = min(k + self.k_tile, K)
-                    C[i:ie, j:je] += A[i:ie, k:ke] @ B[k:ke, j:je]
+        C = np.matmul(A.astype(np.float32, copy=False),
+                      B.astype(np.float32, copy=False), dtype=np.float32)
         self.ops_executed += 1
         self.total_flops += 2.0 * M * N * K
         return C
 
     def mixed_precision_matmul(self, A: np.ndarray, B: np.ndarray) -> np.ndarray:
+        # Mixed precision: operands are down-cast to FP16 (tensor-core input
+        # format) and the product is accumulated in FP32, matching real
+        # tensor-core mixed-precision GEMM. np.matmul upcasts the FP16 operands
+        # and accumulates directly in FP32 (dtype=float32), so no explicit
+        # round-trip copy back to FP32 is needed.
         A_half: np.ndarray = A.astype(np.float16)
         B_half: np.ndarray = B.astype(np.float16)
         M, K = A.shape
         K2, N = B.shape
-        C = np.zeros((M, N), dtype=np.float32)
-        for i in range(0, M, self.m_tile):
-            ie = min(i + self.m_tile, M)
-            for j in range(0, N, self.n_tile):
-                je = min(j + self.n_tile, N)
-                for k in range(0, K, self.k_tile):
-                    ke = min(k + self.k_tile, K)
-                    partial = A_half[i:ie, k:ke].astype(np.float32) @ B_half[k:ke, j:je].astype(np.float32)
-                    C[i:ie, j:je] += partial
+        C = np.matmul(A_half, B_half, dtype=np.float32)
         self.ops_executed += 1
         self.total_flops += 2.0 * M * N * K * self.throughput_multiplier
         return C
@@ -206,38 +202,26 @@ class HyperSIMDCore(SIMDCore):
             raise ShapeError("flash_attention expects [B, T, D]")
         B, T, D = Q.shape
         scale = 1.0 / np.sqrt(D)
-        out = np.zeros_like(Q)
 
-        for b in range(B):
-            Qb, Kb, Vb = Q[b], K[b], V[b]
-            for i_start in range(0, T, block_size):
-                i_end = min(i_start + block_size, T)
-                Qi = Qb[i_start:i_end]
-                oi = np.zeros((i_end - i_start, D), dtype=Q.dtype)
-                li = np.zeros((i_end - i_start, 1), dtype=Q.dtype)
-                mi = np.full((i_end - i_start, 1), -1e9, dtype=Q.dtype)
+        # The systolic array streams the full [B, T, T] score grid in one
+        # vectorized dispatch (batched GEMM), not a Python block loop. The
+        # tiling / online-softmax rescaling is a memory-hierarchy detail; the
+        # numerical result equals plain softmax attention, so we compute it in
+        # one fused batched pass at the hardware's real throughput.
+        Qf: np.ndarray = Q.astype(np.float32, copy=False)
+        Kf: np.ndarray = K.astype(np.float32, copy=False)
+        Vf: np.ndarray = V.astype(np.float32, copy=False)
 
-                for j_start in range(0, T, block_size):
-                    j_end = min(j_start + block_size, T)
-                    if causal and j_start > i_end - 1:
-                        break
-                    Kj = Kb[j_start:j_end]
-                    Vj = Vb[j_start:j_end]
-                    sij = (Qi @ Kj.T) * scale
+        scores = np.matmul(Qf, Kf.transpose(0, 2, 1), dtype=np.float32) * scale
+        if causal:
+            cols = np.arange(T).reshape(1, -1)
+            rows = np.arange(T).reshape(-1, 1)
+            scores = np.where(cols > rows, -1e9, scores)
 
-                    if causal:
-                        rows = np.arange(i_start, i_end).reshape(-1, 1)
-                        cols = np.arange(j_start, j_end).reshape(1, -1)
-                        mask = cols > rows
-                        sij = np.where(mask, -1e9, sij)
-
-                    mi_new = np.maximum(mi, sij.max(axis=-1, keepdims=True))
-                    p = np.exp(sij - mi_new)
-                    li = li * np.exp(mi - mi_new) + p.sum(axis=-1, keepdims=True)
-                    oi = oi * np.exp(mi - mi_new) + p @ Vj
-                    mi = mi_new
-
-                out[b, i_start:i_end] = oi / li
+        scores -= scores.max(axis=-1, keepdims=True)
+        np.exp(scores, out=scores)
+        scores /= scores.sum(axis=-1, keepdims=True)
+        out = np.matmul(scores, Vf, dtype=np.float32)
 
         self._total_ops += 1
         return out
@@ -499,7 +483,7 @@ class HyperGPU:
     def gemm(self, A: np.ndarray, B: np.ndarray) -> np.ndarray:
         t0 = time.time()
         result = self.core.tensor_core_gemm(
-            A.astype(np.float32), B.astype(np.float32)
+            A.astype(np.float32, copy=False), B.astype(np.float32, copy=False)
         )
         self._total_compute_ms += (time.time() - t0) * 1000
         return result
