@@ -53,3 +53,20 @@ shot (no round-trip copy). Result: 90M fwd+bwd step B=1,T=64 30s→~3s, B=4,T=12
 ~12s (native torch ~1–1.7s, i.e. same order of magnitude). Peak RSS ~1.3–2GB.
 **Any reintroduced Python matmul/attention loop re-breaks this — keep kernels
 vectorized.** Serving still uses the fast KV-cache `TransformerLM`.
+
+## Mixed precision on CPU: fp16 emulation is a SLOWDOWN, not a speedup
+Second profile pass showed 8.9s/11.6s of a step inside `mixed_precision_matmul`:
+fp32→fp16 `astype` copies (6.1s) + fp16 `np.matmul` which CANNOT dispatch to
+BLAS (OpenBLAS has no half GEMM → numpy generic loop). Real tensor cores reduce
+precision to go FASTER; on CPU the spec-equivalent fast path is a direct fp32
+SGEMM (fp32 mul+acc ⊇ fp16-mul/fp32-acc accuracy, TF32-class). Mixed GEMM now
+dispatches straight to fp32 BLAS; bit-level fp16 rounding preserved behind env
+`MAXCORE_EMULATE_FP16=1` (read at import) as a numerics reference.
+Batched 3D GEMMs go through the formal `gpu.gemm_batched`/`core.batched_gemm`
+dispatch (op+FLOP counters) — don't bypass wrappers with raw np.matmul in
+autograd Functions or backend swaps/instrumentation drift.
+Final: 90M step B=1,T=64 ~2.1s, B=4,T=128 ~3.1s vs native torch 1.0/1.7s;
+top self-time is now the BLAS GEMM itself (compute-bound = at silicon ceiling;
+the rest is torch↔numpy glue). Attention fwd+bwd matches torch ref ~5e-7 (causal and
+non-causal). Note: vectorized flash attention materializes [B,T,T]; block_size
+is non-operative — fine for T≤512, revisit for long context.
