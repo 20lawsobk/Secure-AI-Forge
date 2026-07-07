@@ -676,6 +676,12 @@ router.post("/generate-video", async (req, res) => {
   await proxyRequest(req, res, "/api/generate-video");
 });
 
+// Canonical /generate/video alias — maps to the same AI video endpoint
+router.post("/generate/video", async (req, res) => {
+  await enrichWithAwareness(req, "video_script");
+  await proxyRequest(req, res, "/api/video/generate-ai");
+});
+
 router.post("/video/generate-ai", async (req, res) => {
   await enrichWithAwareness(req, "video_script");
   await proxyRequest(req, res, "/api/video/generate-ai");

@@ -5939,14 +5939,15 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
     AI-determined genre/tone, and renders the final MP4 via FFmpeg.
 
     Body fields (all optional except idea):
-      idea        – what the video is about
-      platform    – tiktok | instagram | youtube | instagram_reels | etc.
-      goal        – growth | conversion | engagement | awareness | streams | sales
-      tone        – energetic | edgy | chill | professional | promotional | etc.
-      genre       – trap | rnb | pop | afrobeats | drill | lofi | indie | etc.
-      artist_name – shown on screen as the creator label
-      duration    – desired length in seconds (platform default if omitted)
+      idea           – what the video is about
+      platform       – tiktok | instagram | youtube | instagram_reels | etc.
+      goal           – growth | conversion | engagement | awareness | streams | sales
+      tone           – energetic | edgy | chill | professional | promotional | etc.
+      genre          – trap | rnb | pop | afrobeats | drill | lofi | indie | etc.
+      artist_name    – shown on screen as the creator label
+      duration       – desired length in seconds (platform default if omitted)
       artist_context – dict with optional audio_path key
+      scenes_override – [{type, text}, ...] user-edited scene texts; skips re-planning
     """
     body = await request.json()
 
@@ -5961,6 +5962,8 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
     artist_name  = str(body.get("artist_name", "")).strip()
     duration     = float(body.get("duration") or 0)
     artist_ctx   = body.get("artist_context", {}) or {}
+    # Optional list of {type, text} dicts the user edited in the UI
+    scenes_override_raw: list[dict] = body.get("scenes_override") or []
 
     if not idea:
         raise HTTPException(status_code=422, detail="'idea' is required")
@@ -5972,10 +5975,12 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
         topic=idea, goal=goal, tone=tone, genre=genre, artist=artist_name,
     )
 
-    from ai_model.video.video_agent import VideoAgentRequest
+    from ai_model.video.video_agent import VideoAgent as _VA, VideoAgentRequest
+    from ai_model.video.renderer import ASPECT_RATIOS, PLATFORM_RATIOS
+    from ai_model.video import ai_scene_builder
+
     # `idea` is templated raw into scene phrases — keep it clean and route
-    # the richer intent/audience/theme context through `awareness` instead
-    # (see /api/generate-video for the same fix and rationale).
+    # the richer intent/audience/theme context through `awareness` instead.
     req = VideoAgentRequest(
         idea=idea,
         platform=platform,
@@ -5988,62 +5993,66 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
         awareness="\n".join(f"• {d}" for d in brief.directives),
     )
 
+    # ── Run plan() synchronously so scenes are available in this response ──
+    # Only the heavy render step is deferred to a background thread.
+    _agent     = _VA(_creative_model, _script_agent, _visual_spec_agent)
+    production = await _in_thread(lambda: _agent.plan(req))
+
+    # Apply user-edited scene texts if provided (re-render with edits)
+    if scenes_override_raw:
+        override_map = {i: s.get("text", "") for i, s in enumerate(scenes_override_raw) if isinstance(s, dict)}
+        for i, scene in enumerate(production.scenes):
+            if i in override_map and override_map[i]:
+                scene.text = override_map[i]
+
+    ratio  = production.aspect_ratio or PLATFORM_RATIOS.get(production.platform, "9:16")
+    width, height = ASPECT_RATIOS.get(ratio, (1080, 1920))
+    scenes_data = [{"type": s.scene_type, "text": s.text} for s in production.scenes]
+
     job_id = str(uuid.uuid4())
     _job_write(job_id, {
         "status":          "pending",
         "created_at":      datetime.utcnow().isoformat() + "Z",
         "platform":        platform,
-        "genre_detected":  genre,
-        "tone_used":       tone,
-        "duration":        duration,
+        "genre_detected":  production.genre_detected,
+        "tone_used":       production.tone_used,
+        "source":          production.source,
+        "duration":        production.total_duration,
+        "aspect_ratio":    production.aspect_ratio,
+        "template":        production.template_id,
         "url":             None,
         "filename":        None,
         "width":           None,
         "height":          None,
-        "scenes":          [],
+        "scenes":          scenes_data,
         "scenes_rendered": 0,
         "render_ms":       None,
         "error":           None,
         "intelligence":    brief.to_dict(),
     })
 
-    _req = req  # capture for closure
+    # Capture references for the render closure
+    _production = production
+    _width, _height = width, height
+    _req = req
 
-    def _plan_and_render_ai():
+    def _render_only():
         import traceback as _tb
         try:
-            from ai_model.video.video_agent import VideoAgent as _VA
             from ai_model.video.cinematic_engine import render_cinematic_open
-            from ai_model.video.renderer import ASPECT_RATIOS, PLATFORM_RATIOS
-            from ai_model.video import ai_scene_builder
 
-            _agent     = _VA(_creative_model, _script_agent, _visual_spec_agent)
-            production = _agent.plan(_req)
-            _job_update(job_id, {
-                "genre_detected": production.genre_detected,
-                "tone_used":      production.tone_used,
-                "source":         production.source,
-                "duration":       production.total_duration,
-                "aspect_ratio":   production.aspect_ratio,
-                "template":       production.template_id,
-                "scenes":         [{"type": s.scene_type, "text": s.text} for s in production.scenes],
-            })
-
-            ratio  = production.aspect_ratio or PLATFORM_RATIOS.get(production.platform, "9:16")
-            width, height = ASPECT_RATIOS.get(ratio, (1080, 1920))
-
-            scene_configs = _agent.build_open_scenes(_req, production, width, height)
-            dna        = ai_scene_builder.build_dna(_req.idea, production.genre_detected, production.tone_used)
+            scene_configs = _agent.build_open_scenes(_req, _production, _width, _height)
+            dna        = ai_scene_builder.build_dna(_req.idea, _production.genre_detected, _production.tone_used)
             transition = "fadeblack" if dna.darkness > 0.70 else "dissolve" if dna.energy < 0.50 else "fade"
             result     = render_cinematic_open(
                 scenes=scene_configs,
-                width=width,
-                height=height,
-                total_duration=production.total_duration,
+                width=_width,
+                height=_height,
+                total_duration=_production.total_duration,
                 audio_path=_req.artist_context.get("audio_path"),
                 transition=transition,
                 transition_dur=0.5 if dna.energy > 0.70 else 0.8,
-                label=f"ai:{production.genre_detected}:{production.tone_used}",
+                label=f"ai:{_production.genre_detected}:{_production.tone_used}",
             )
             if result.success:
                 _job_update(job_id, {
@@ -6067,13 +6076,20 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
                 "error":  str(exc),
             })
 
-    threading.Thread(target=_plan_and_render_ai, daemon=True, name=f"AIVideoJob-{job_id}").start()
+    threading.Thread(target=_render_only, daemon=True, name=f"AIVideoJob-{job_id}").start()
 
     return {
-        "job_id":   job_id,
-        "status":   "pending",
-        "poll_url": f"/api/video-job/{job_id}",
-        "intelligence": brief.to_dict(),
+        "job_id":         job_id,
+        "status":         "pending",
+        "poll_url":       f"/api/video-job/{job_id}",
+        "scenes":         scenes_data,
+        "genre_detected": production.genre_detected,
+        "tone_used":      production.tone_used,
+        "source":         production.source,
+        "duration":       production.total_duration,
+        "aspect_ratio":   production.aspect_ratio,
+        "template":       production.template_id,
+        "intelligence":   brief.to_dict(),
     }
 
 

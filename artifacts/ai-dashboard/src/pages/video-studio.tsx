@@ -178,7 +178,8 @@ function useRenderProgress(isRendering: boolean, sceneCount: number) {
       return;
     }
     setProgress(2);
-    const estimatedMs = Math.max(sceneCount * 22_000, 10_000);
+    // ~7 s per scene measured empirically; floor at 20 s for tiny scene counts
+    const estimatedMs = Math.max(sceneCount * 7_000, 20_000);
     const tick = 800;
     let elapsed = 0;
     intervalRef.current = setInterval(() => {
@@ -192,6 +193,94 @@ function useRenderProgress(isRendering: boolean, sceneCount: number) {
   }, [isRendering, sceneCount]);
 
   return progress;
+}
+
+// ── Scene Thumbnails ──────────────────────────────────────────────────────────
+// Fetches per-scene JPEG previews from the completed video job and renders them
+// as a horizontal scrollable strip below the video player.
+
+function SceneThumbnails({
+  jobId,
+  scenes,
+  adminKey,
+}: {
+  jobId: string;
+  scenes: Scene[];
+  adminKey: string | null;
+}) {
+  const [thumbs, setThumbs] = useState<Record<number, string>>({});
+
+  useEffect(() => {
+    if (!jobId || scenes.length === 0) return;
+    setThumbs({});
+
+    const headers: Record<string, string> = {};
+    if (adminKey) headers["X-Admin-Key"] = adminKey;
+
+    scenes.forEach((_, idx) => {
+      fetch(`/api/video-job/${jobId}/preview/${idx}`, { headers })
+        .then((r) => (r.ok ? r.blob() : Promise.reject()))
+        .then((blob) =>
+          setThumbs((prev) => ({ ...prev, [idx]: URL.createObjectURL(blob) })),
+        )
+        .catch(() => {});
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobId]);
+
+  const loaded = Object.keys(thumbs).length;
+  if (loaded === 0) return null;
+
+  const LABELS: Record<string, string> = {
+    hook: "HOOK",
+    build: "BUILD",
+    body: "BODY",
+    drop: "DROP",
+    cta: "CTA",
+    outro: "OUTRO",
+    verse: "VERSE",
+    chorus: "CHORUS",
+    bridge: "BRIDGE",
+  };
+  const COLORS: Record<string, string> = {
+    hook: "text-primary",
+    build: "text-blue-400",
+    drop: "text-fuchsia-400",
+    cta: "text-amber-400",
+    outro: "text-emerald-400",
+    chorus: "text-rose-400",
+    bridge: "text-sky-400",
+  };
+
+  return (
+    <div className="mt-4">
+      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">
+        Scene Thumbnails ({loaded}/{scenes.length})
+      </p>
+      <div className="flex gap-2 overflow-x-auto pb-2">
+        {scenes.map((scene, idx) => (
+          <div key={idx} className="shrink-0 w-20 flex flex-col gap-1">
+            <div className="w-20 rounded overflow-hidden bg-black/50 border border-white/10">
+              {thumbs[idx] ? (
+                <img
+                  src={thumbs[idx]}
+                  alt={`Scene ${idx + 1}`}
+                  className="w-full h-auto block"
+                />
+              ) : (
+                <div className="w-20 h-[113px] bg-white/5 animate-pulse" />
+              )}
+            </div>
+            <span
+              className={`text-[9px] font-bold text-center truncate ${COLORS[scene.type] ?? "text-gray-400"}`}
+            >
+              {LABELS[scene.type] ?? scene.type.toUpperCase()}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 // ── DNA Indicator ─────────────────────────────────────────────────────────────
@@ -292,13 +381,16 @@ export default function VideoStudio() {
       return res.json() as Promise<GenerateResponse>;
     },
     onSuccess: (data) => {
-      setScenes(data.scenes || []);
+      const sceneList = data.scenes || [];
+      setScenes(sceneList);
       setGenerationMeta(data);
-      setJobId(null);
+      // Start polling immediately — the render is already running in the background
+      setJobId(data.job_id);
+      setIsPolling(true);
       setRenderResult(null);
       toast({
-        title: "Scenes generated",
-        description: `${data.scenes.length} scenes ready — edit if needed, then render`,
+        title: `${sceneList.length} scenes planned — rendering…`,
+        description: "Video is being rendered in the background.",
       });
     },
     onError: (e: Error) => {
@@ -312,15 +404,15 @@ export default function VideoStudio() {
 
   const renderMut = useMutation({
     mutationFn: async () => {
-      // Reuse the existing job_id if we already generated scenes (avoids a
-      // redundant API round-trip and preserves scene-level edits).
-      if (generationMeta?.job_id) {
-        return { job_id: generationMeta.job_id } as GenerateResponse;
-      }
+      // Always create a new job so user-edited scenes are sent as overrides.
       const res = await fetch(`${BASE}/video/generate-ai`, {
         method: "POST",
         headers: authHeaders(),
-        body: JSON.stringify(buildRequestBody(scenes)),
+        body: JSON.stringify({
+          ...buildRequestBody(),
+          // Pass the current (possibly edited) scenes so the backend applies them
+          scenes_override: scenes.map((s) => ({ type: s.type, text: s.text })),
+        }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -329,12 +421,15 @@ export default function VideoStudio() {
       return res.json() as Promise<GenerateResponse>;
     },
     onSuccess: (data) => {
+      // Update scenes from re-plan (in case server adjusted them)
+      if (data.scenes?.length) setScenes(data.scenes);
+      setGenerationMeta(data);
       setJobId(data.job_id);
       setIsPolling(true);
       setRenderResult(null);
       toast({
-        title: "Rendering started",
-        description: "AI is generating your video…",
+        title: "Re-rendering with your edits…",
+        description: "Applying scene changes and rendering a new video.",
       });
     },
     onError: (e: Error) => {
@@ -413,8 +508,6 @@ export default function VideoStudio() {
     setScenes((prev) =>
       prev.map((s, i) => (i === editingIdx ? { ...s, text: editText } : s)),
     );
-    // Clear cached job_id so render uses updated scenes
-    setGenerationMeta((prev) => (prev ? { ...prev, job_id: undefined } : null));
     setEditingIdx(null);
   };
 
@@ -878,19 +971,25 @@ export default function VideoStudio() {
               </div>
             </div>
 
-            {hasScenes && (
+            {hasScenes && !isRendering && !videoDone && (
               <p className="text-xs text-muted-foreground bg-primary/5 border border-primary/20 rounded-lg p-2 flex items-start gap-1.5">
                 <ChevronRight className="w-3 h-3 text-primary mt-0.5 shrink-0" />
-                {generationMeta?.job_id
-                  ? "Scene edits applied — rendering with updated scenes."
-                  : "Scenes ready. Click Render Video to start."}
+                Rendering automatically started. Edit scenes then re-render if
+                needed.
+              </p>
+            )}
+
+            {videoDone && hasScenes && (
+              <p className="text-xs text-muted-foreground bg-amber-500/5 border border-amber-500/20 rounded-lg p-2 flex items-start gap-1.5">
+                <ChevronRight className="w-3 h-3 text-amber-400 mt-0.5 shrink-0" />
+                Edit scenes above and click Re-render to apply your changes.
               </p>
             )}
 
             <Button
               className="w-full bg-gradient-to-r from-amber-500 to-orange-600 hover:opacity-90 text-white h-10 font-semibold shadow-lg shadow-amber-500/20 disabled:opacity-50"
               onClick={() => renderMut.mutate()}
-              disabled={!idea.trim() || isRendering || isGenerating}
+              disabled={!hasScenes || isRendering || isGenerating}
             >
               {isRendering ? (
                 <>
@@ -899,7 +998,8 @@ export default function VideoStudio() {
                 </>
               ) : (
                 <>
-                  <Radio className="w-4 h-4 mr-2" /> Render Video
+                  <Radio className="w-4 h-4 mr-2" />{" "}
+                  {videoDone ? "Re-render with Edits" : "Render Video"}
                 </>
               )}
             </Button>
@@ -1072,6 +1172,14 @@ export default function VideoStudio() {
                   }}
                 />
               </div>
+
+              {jobId && scenes.length > 0 && (
+                <SceneThumbnails
+                  jobId={jobId}
+                  scenes={scenes}
+                  adminKey={adminKey}
+                />
+              )}
             </Card>
           </motion.div>
         )}
