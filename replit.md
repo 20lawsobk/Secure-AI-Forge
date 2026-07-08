@@ -15,7 +15,7 @@ Required env vars: `DATABASE_URL`, `PORT`, `MODEL_API_PORT`, `ADMIN_KEY`, `STORA
 ## Stack
 
 - **Frontend**: React 19, Vite 7, Tailwind CSS v4, Radix UI, TanStack Query, Framer Motion, Wouter
-- **API Server**: Express 5, TypeScript, tsx (dev) / esbuild (prod), Drizzle ORM
+- **API Server**: Express 5, TypeScript, tsx (dev) / esbuild (prod), Drizzle ORM — requires **Node.js 22** (undici v8 dependency)
 - **AI Engine**: Python 3.11, FastAPI, PyTorch (custom Transformer), NumPy GPU simulation, Pillow, FFmpeg
 - **Database**: PostgreSQL via Drizzle ORM (drizzle-kit for migrations)
 - **Package manager**: pnpm (workspace monorepo)
