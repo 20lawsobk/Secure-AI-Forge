@@ -19,7 +19,7 @@
     "express": "^5",
     "express-rate-limit": "^8.3.2",
     "fast-xml-parser": "^5.9.3",
-    "undici": "^8.3.0"
+    "undici": "^8.5.0"
   },
   "devDependencies": {
     "@types/compression": "^1.8.1",
@@ -27,7 +27,7 @@
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "catalog:",
-    "esbuild": "^0.27.3",
+    "esbuild": "^0.28.1",
     "tsx": "catalog:"
   }
 }
