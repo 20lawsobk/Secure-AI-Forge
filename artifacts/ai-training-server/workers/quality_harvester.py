@@ -190,6 +190,11 @@ def _derive_templates(stats: Dict[str, Any]) -> Dict[str, List[str]]:
     Only produced when real data exists (empty stats → empty templates).
     Templates are style guidance conditioned on live chart data — the robots
     whisper "here's how the winners look", they never copy a plant.
+
+    Template FORMS follow the researched hook archetypes catalogued in
+    ai_model/content_playbook.py (identity call, curiosity gap, reveal,
+    emotion-first story, low-friction CTA) — the playbook supplies the shape,
+    the live harvest supplies today's genres/artists to fill it.
     """
     genres = stats.get("top_genres", [])
     artists = stats.get("top_artists", [])
@@ -201,10 +206,14 @@ def _derive_templates(stats: Dict[str, Any]) -> Dict[str, List[str]]:
     a1 = artists[0] if artists else "the biggest artists"
 
     hooks = [
+        # curiosity gap / bold claim forms
         f"{g1} is running the charts — {{idea}} is next",
         f"The {g1} wave is peaking. {{idea}} rides it",
         "Charts move fast — {idea} moves faster",
+        # reveal form (live-chart flavored)
         f"While the world loops {a1}, {{artist}} drops {{idea}}",
+        # identity-call form — the top-retention archetype in 2026 testing
+        f"If {g1} is your whole personality, {{idea}} was made for you",
     ]
     if stats.get("median_title_words", 0) and stats["median_title_words"] <= 4:
         hooks.append("{idea}. That's the post")
@@ -215,9 +224,11 @@ def _derive_templates(stats: Dict[str, Any]) -> Dict[str, List[str]]:
         "Studied what the top of the charts does — then made it ours with {idea}",
     ]
     ctas = [
+        # low-friction save / share / stream forms per CTA research
         "Stream {idea} before the algorithm catches up",
         f"Add {{idea}} to the rotation next to {a1}",
         "Early on {idea} now — say you knew first",
+        f"Tag the friend who won't stop playing {g1} — {{idea}} is for them",
     ]
     return {"hook": hooks, "body": bodies, "cta": ctas}
 

@@ -35,30 +35,32 @@ from typing import Any, Dict, List, Optional, Tuple
 # word_count is a (low, high) target window for a single post/caption.
 
 PLATFORM_PROFILES: Dict[str, Dict[str, Any]] = {
+    # Hashtag counts follow the 2025-26 quality-over-quantity norms curated
+    # in ai_model/content_playbook.py (Instagram hard-caps at 5).
     "tiktok": {
         "aspect_ratio": "9:16", "layout": "portrait_9_16", "word_count": (12, 40),
         "hook_style": "pattern_interrupt", "cta_style": "comment_engage",
-        "hashtags": 5, "tempo": "fast", "temperature": 0.95,
+        "hashtags": 4, "tempo": "fast", "temperature": 0.95,
     },
     "instagram": {
         "aspect_ratio": "1:1", "layout": "square_1_1", "word_count": (20, 60),
         "hook_style": "aesthetic_curiosity", "cta_style": "save_share",
-        "hashtags": 8, "tempo": "medium", "temperature": 0.9,
+        "hashtags": 5, "tempo": "medium", "temperature": 0.9,
     },
     "instagram_reels": {
         "aspect_ratio": "9:16", "layout": "portrait_9_16", "word_count": (12, 40),
         "hook_style": "pattern_interrupt", "cta_style": "save_share",
-        "hashtags": 6, "tempo": "fast", "temperature": 0.95,
+        "hashtags": 5, "tempo": "fast", "temperature": 0.95,
     },
     "youtube": {
         "aspect_ratio": "16:9", "layout": "landscape_16_9", "word_count": (40, 90),
         "hook_style": "value_promise", "cta_style": "subscribe",
-        "hashtags": 4, "tempo": "steady", "temperature": 0.85,
+        "hashtags": 3, "tempo": "steady", "temperature": 0.85,
     },
     "youtube_shorts": {
         "aspect_ratio": "9:16", "layout": "portrait_9_16", "word_count": (12, 40),
         "hook_style": "pattern_interrupt", "cta_style": "subscribe",
-        "hashtags": 4, "tempo": "fast", "temperature": 0.95,
+        "hashtags": 3, "tempo": "fast", "temperature": 0.95,
     },
     "twitter": {
         "aspect_ratio": "16:9", "layout": "landscape_16_9", "word_count": (10, 35),
@@ -78,7 +80,7 @@ PLATFORM_PROFILES: Dict[str, Dict[str, Any]] = {
     "general": {
         "aspect_ratio": "1:1", "layout": "square_1_1", "word_count": (20, 55),
         "hook_style": "curiosity", "cta_style": "act_now",
-        "hashtags": 5, "tempo": "medium", "temperature": 0.9,
+        "hashtags": 4, "tempo": "medium", "temperature": 0.9,
     },
 }
 
@@ -345,6 +347,18 @@ def _build_directives(brief_bits: Dict[str, Any]) -> List[str]:
     ]
     if brief_bits["keywords"]:
         directives.append("Work in keywords: " + ", ".join(brief_bits["keywords"][:4]))
+    # Research-backed directives from the content playbook (world knowledge
+    # distilled from published engagement studies — internal steering only).
+    # Borrowed knowledge: gated by the same self-retirement contract as the
+    # quality buffer, so ALL outside influence fades out together as the
+    # platform's own corpus grows.
+    try:
+        from ai_model.quality_awareness import self_sufficiency
+        if not self_sufficiency()["retired"]:
+            from ai_model.content_playbook import brief_directives as _pb
+            directives.extend(_pb(intent))
+    except Exception:  # noqa: BLE001 - playbook must never break a brief
+        pass
     return directives
 
 
@@ -489,11 +503,21 @@ def score_candidate(text: str, brief: GenerationBrief) -> float:
         hook_score += 0.1
     hook_score = min(1.0, hook_score)
 
+    # Research-backed Hook->Value->CTA structure + high-arousal bonus
+    # (content_playbook: HVC captions earn ~23% more engagement; hook must
+    # land inside the first 125 visible characters).
+    try:
+        from ai_model.content_playbook import structure_score as _pb_structure
+        struct_score = _pb_structure(text)
+    except Exception:  # noqa: BLE001 - scoring must never break ranking
+        struct_score = 0.0
+
     blended = (
-        length_score * 0.35
-        + cta_score * 0.20
+        length_score * 0.30
+        + cta_score * 0.15
         + keyword_score * 0.20
-        + hook_score * 0.25
+        + hook_score * 0.20
+        + struct_score * 0.15
     )
     return round(min(100.0, blended * 100), 1)
 
@@ -538,6 +562,8 @@ def best_hook(topic: str, artist: str, agent_hook: str, brief: GenerationBrief) 
         candidates.append(agent_hook)
     candidates.extend(hook_variants(topic, artist, brief))
     # Quality-buffer hooks compete in the same ranking (empty once retired).
+    # This pool already blends the harvester's live-chart templates with the
+    # research playbook's archetypes (see quality_awareness.scene_phrases).
     try:
         from ai_model.quality_awareness import hook_candidates as _qa_hooks
         candidates.extend(_qa_hooks(topic, artist))

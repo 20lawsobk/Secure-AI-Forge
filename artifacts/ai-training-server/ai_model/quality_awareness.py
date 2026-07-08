@@ -175,14 +175,28 @@ _SCENE_MAP = {
 
 
 def scene_phrases(scene_type: str) -> List[str]:
-    """Quality-buffer phrase templates for a video scene, scaled by weight."""
+    """Borrowed-world phrase templates for a video scene, scaled by weight.
+
+    Blends TWO borrowed-knowledge sources under the same self-retirement
+    weight: the live harvester buffer (current chart patterns) and the
+    research playbook (ai_model/content_playbook.py — distilled published
+    engagement research). Both fade out together as the own corpus grows.
+    """
     suff = self_sufficiency()
     if suff["retired"]:
         return []
+    bank: List[str] = []
     doc = get_doc()
-    if not doc:
-        return []
-    bank = doc.get("templates", {}).get(_SCENE_MAP.get(scene_type, "body"), [])
+    if doc:
+        bank.extend(doc.get("templates", {}).get(
+            _SCENE_MAP.get(scene_type, "body"), []))
+    try:
+        from ai_model.content_playbook import scene_phrase_templates
+        for tpl in scene_phrase_templates(scene_type):
+            if tpl not in bank:
+                bank.append(tpl)
+    except Exception:  # noqa: BLE001 - playbook must never break generation
+        pass
     if not bank:
         return []
     n = max(1, math.ceil(len(bank) * suff["buffer_weight"]))
