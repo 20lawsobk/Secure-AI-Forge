@@ -37,6 +37,22 @@ style, word-count window, hashtag count, tempo, temperature) plus an
 - **Hashtag count** is capped at `min(10, max(brief.hashtags_target, len(preferred)))`
   — keep the hard `min(10, …)` so behaviour stays compatible with the old `[:10]`.
 
+## Caption composer (content endpoint)
+
+`compose_caption(topic, artist, brief, genre, brand_voice, agent_hook/body/cta)`
+composes the caption FROM the brief instead of templating the raw topic:
+- Body candidates are built from brief keywords/audience/tone/genre; the agent
+  body competes but is **rejected as an echo** when its alphanumeric skeleton
+  equals the topic's (punctuation/emoji-only edits still count as echoes).
+- CTA candidates = agent cta + `brief.suggested_cta` + playbook bank, where the
+  playbook contribution is **gated on `quality_awareness.self_sufficiency()["retired"]`**
+  — same retirement contract as directives and hooks. Any new borrowed-playbook
+  injection point must carry the same gate.
+- Every full hook/body/cta combination is scored with `score_candidate` (whole
+  caption, structure-aware) and the best wins; deterministic, no model calls.
+  **Why:** ranking parts in isolation misses structure effects (HVC bonus, length
+  windows) that only exist at the caption level.
+
 ## How to apply
 When adding/altering a generation endpoint, call `build_brief(modality, platform,
 topic, goal, tone, genre, artist, extra)` first, feed the clean `topic`/`idea`

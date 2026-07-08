@@ -51,6 +51,21 @@ old-env standby Python can grab the lock. Verify with
 `curl -H "X-Admin-Key: $ADMIN_KEY" localhost:9878/storage/status` → `available:true`
 and the expected `instance` name.
 
+# Whole-app hang ≠ token mismatch
+
+A second, distinct failure mode (seen 2026-07-08): **every** route on
+`pocketdimensionstorage.replit.app` hangs — TCP connects (Replit edge accepts)
+but no HTTP response ever comes back, including the unauthenticated
+`GET /api/redis/instances` and plain `GET /`. That is the pdim **deployment
+itself being down/hung**, not an auth problem; no token scan will help. The
+user must wake/republish their pdim app. Distinguish quickly: WRONGPASS/403 =
+token mismatch (fixable here); universal read-timeout = pdim app down (not
+fixable from this project).
+
+Health-check protocol: `storage_client` POSTs `{"cmd":"PING"}` to
+`STORAGE_HTTP_URL` itself (the `.../exec` URL) — GETing `/ping` or `/health`
+on the host is the wrong protocol and proves nothing.
+
 # Resolution of record
 
 App was repointed from `max-booster-training` (id `f26378c8…`) to

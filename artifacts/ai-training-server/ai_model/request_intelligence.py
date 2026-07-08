@@ -653,3 +653,121 @@ def deterministic_candidate(topic: str, artist: str, brief: GenerationBrief) -> 
     hook = variants[0] if variants else (_norm(topic) or "New drop")
     body = f"{(_norm(topic) or 'New music').capitalize()} — made for {brief.audience}."
     return f"{hook}\n{body}\n{brief.suggested_cta}"
+
+
+# ---------------------------------------------------------------------------
+# Intelligence-driven caption composer
+# ---------------------------------------------------------------------------
+
+def _body_candidates(
+    topic: str,
+    brief: GenerationBrief,
+    genre: Optional[str] = None,
+    brand_voice: Optional[str] = None,
+    agent_body: str = "",
+) -> List[str]:
+    """Value-line candidates composed FROM the brief (keywords, audience,
+    tone, genre) instead of echoing the raw topic back as the body."""
+    topic_n = _norm(topic)
+    genre_n = _norm(genre) or "music"
+    tone = brief.tone or "authentic"
+    out: List[str] = []
+
+    # Agent body competes — unless it is just a raw-topic echo (the exact
+    # failure mode this composer exists to fix). Compare on a strong
+    # normalisation (alphanumerics only) so punctuation/emoji-only edits
+    # of the topic are still rejected as echoes.
+    def _skeleton(s: str) -> str:
+        return "".join(ch for ch in s.lower() if ch.isalnum())
+
+    agent_n = _norm(agent_body)
+    if agent_n and _skeleton(agent_n) != _skeleton(topic_n):
+        out.append(agent_n)
+
+    # Keyword-woven value line (the brief's own reading of the request).
+    kws = [k for k in brief.keywords if k][:2]
+    if len(kws) == 2:
+        out.append(
+            f"Every second of this leans into {kws[0]} and {kws[1]} — "
+            f"{tone} from the first bar."
+        )
+    elif len(kws) == 1:
+        out.append(f"Built around one thing: {kws[0]} — {tone}, no filler.")
+
+    # Audience-targeted value line from the brief's strategy.
+    out.append(
+        f"{tone.capitalize()} {genre_n} made for {brief.audience} — "
+        f"no skips, all intent."
+    )
+
+    # Brand voice as copy, when the caller supplied one.
+    bv = _norm(brand_voice)
+    if bv:
+        out.append(f"{bv.rstrip('.')}. This is what that sounds like.")
+
+    return out or [f"{(topic_n or 'New music').capitalize()} — made for {brief.audience}."]
+
+
+def _cta_candidates(topic: str, brief: GenerationBrief, agent_cta: str = "") -> List[str]:
+    """CTA candidates: agent output + intent CTA + research-playbook bank."""
+    out: List[str] = []
+    if _norm(agent_cta):
+        out.append(_norm(agent_cta))
+    out.append(brief.suggested_cta)
+    # Research-playbook CTAs are borrowed world knowledge — same retirement
+    # contract as directives/hooks: once the platform's own corpus graduates
+    # (self-sufficiency retired), the playbook stops contributing.
+    try:
+        from ai_model.quality_awareness import self_sufficiency
+        if not self_sufficiency()["retired"]:
+            from ai_model.content_playbook import cta_candidates as _pb_ctas
+            out.extend(_pb_ctas(brief.intent, topic))
+    except Exception:  # noqa: BLE001 - playbook must never break composition
+        pass
+    return out
+
+
+def compose_caption(
+    topic: str,
+    artist: str,
+    brief: GenerationBrief,
+    genre: Optional[str] = None,
+    brand_voice: Optional[str] = None,
+    agent_hook: str = "",
+    agent_body: str = "",
+    agent_cta: str = "",
+) -> Dict[str, Any]:
+    """Compose the best caption FROM the brief's intelligence.
+
+    The hook is ranked across agent output + stylistic variants + awareness
+    hooks (best_hook); bodies are composed from the brief's keywords,
+    audience and strategy rather than echoing the raw topic; CTAs come from
+    the agent, the intent library and the research playbook. Every complete
+    hook/body/CTA combination is scored as a full caption (structure-aware
+    via score_candidate) and the best one wins. Deterministic.
+    """
+    hook, hook_score, hooks_considered = best_hook(topic, artist, agent_hook, brief)
+
+    bodies = _body_candidates(topic, brief, genre=genre,
+                              brand_voice=brand_voice, agent_body=agent_body)
+    ctas = _cta_candidates(topic, brief, agent_cta=agent_cta)
+
+    best: Tuple[str, str, str, float] = ("", "", "", -1.0)
+    for body in bodies:
+        for cta in ctas:
+            caption = f"{hook}\n\n{body}\n\n{cta}"
+            s = score_candidate(caption, brief)
+            if s > best[3]:
+                best = (caption, body, cta, s)
+
+    return {
+        "caption": best[0],
+        "hook": hook,
+        "body": best[1],
+        "cta": best[2],
+        "caption_score": best[3],
+        "hook_score": hook_score,
+        "hooks_considered": hooks_considered,
+        "bodies_considered": len(bodies),
+        "ctas_considered": len(ctas),
+    }

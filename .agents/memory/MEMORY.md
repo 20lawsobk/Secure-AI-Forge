@@ -1,7 +1,7 @@
 - [KV-cache inference](kv-cache-inference.md) — transformer needs KV-cache (prefill+decode_one) or plan() takes 3+ min per call
 - [Video pipeline architecture](video-pipeline.md) — non-blocking job pattern, ffmpeg framerate fix, text cleaning rules
 - [Video scene text generation](video-scene-generation.md) — use dataset_sampler not model.generate_batch() for scene text; batch inference exists but model is undertrained
-- [Request intelligence layer](request-intelligence-layer.md) — shared pre-gen brief on every generation endpoint; additive `intelligence` block; ranking now spans text/content/image (candidate_count=3) + scored (not random) video scene phrases; keep raw-topic guardrail candidate
+- [Request intelligence layer](request-intelligence-layer.md) — shared pre-gen brief, additive `intelligence` block; compose_caption ranks whole captions from brief (echo-filtered agent body, retirement-gated playbook CTAs)
 - [Idea vs awareness field separation](idea-awareness-field-separation.md) — never concatenate augmented/brief context into a raw `idea` field that gets templated into output; corrupts user-facing text
 - [MaxBooster↔MaxCore contract](maxbooster-contract.md) — client prepends /api; viral-score is 0–1 (client×100); satisfy contract via additive /api endpoints, don't port TS files
 - [ffmpeg spawn under memory pressure](ffmpeg-spawn-memory.md) — ffmpeg must use posix_spawn via run_ffmpeg(), not fork(), or prod renders die with [Errno 5] EIO under model memory
@@ -18,7 +18,7 @@
 - [Retrieval flywheel + brand centroid](retrieval-self-healing.md) — ingestor folds rendered assets back into index (TOTAL enqueue, bounded retry); brand centroid is incremental accumulator that must equal a rebuild
 - [Dynamic batching coalescer](dynamic-batching-coalescer.md) — opt-in cross-request generate batching; lone batcher thread owns model (never take INFERENCE_GATE); left-pad+kpm = logits-exact, text-exact only B=1
 - [mypy object-from-dict pattern](mypy-object-dict-pattern.md) — state dicts → dict[str,Any]; constant config dicts → cast() at use; call-arg errors are often real bugs (TrainConfig takes one cfg dict)
-- [pdim storage topology](pdim-storage-topology.md) — pdim tokens are per-instance & user-rotated; WRONGPASS=token/instance mismatch; scan instances+PING to find the match; storage_client reads HTTP_URL+BEARER_TOKEN+INSTANCE (CONNECTION_URL unused); availability self-heals via 30s health thread
+- [pdim storage topology](pdim-storage-topology.md) — WRONGPASS=token/instance mismatch (scan+PING); universal read-timeout=pdim app itself down (not fixable here); health = POST {"cmd":"PING"} to exec URL
 - [real-audio generation](real-audio-generation.md) — /api/generate/audio renders from seeded FMA dataset in pdim (no synth fallback); seed via admin POST /storage/datasets/audio/seed; field is `b64`; seeder module is import-cached so restart to reload edits
 - [PDIM pocket multiplication](pdim-pocket-multiply.md) — pocket = one orchestrator dedup namespace; unbounded nesting is path namespacing + compressed payloads; pass digests not arrays; auth is X-Api-Key
 - [Pocket accelerator in GPU](pocket-accelerator.md) — all GEMM paths route via adaptive content-hash pocket dedup; ascontiguousarray aliases (must .copy() into cache); key must include numerics flags; fleet-dedup tests need per-run namespaces

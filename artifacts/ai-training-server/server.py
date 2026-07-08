@@ -4841,28 +4841,38 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
                 body = sr.body or body
                 cta  = sr.cta  or cta
 
-        # ── Pick the strongest hook among the agent output + ranked variants ───
-        hook, hook_score, hooks_considered = ri.best_hook(topic, artist, hook, brief)
-        if not cta:
-            cta = brief.suggested_cta
+        # ── Intelligence-driven composition ────────────────────────────────
+        # The composer consumes the brief (keywords, audience, strategy) to
+        # build the body/CTA instead of echoing the raw topic back, ranks
+        # the agent's parts against brief-composed candidates, and scores
+        # every complete caption (structure-aware) to pick the winner.
+        composed = ri.compose_caption(
+            topic, artist, brief,
+            genre=req.genre, brand_voice=req.brand_voice,
+            agent_hook=hook, agent_body=body, agent_cta=cta,
+        )
+        caption = composed["caption"]
 
         hashtags = (req.preferred_hashtags or []) + _api_hashtags(topic, req.genre, req.platform)
         hashtag_cap = min(10, max(brief.hashtags_target, len(req.preferred_hashtags or [])))
-        caption  = f"{hook}\n\n{body}\n\n{cta}"
-        quality  = ri.score_candidate(caption, brief)
+        quality  = composed["caption_score"]
         score    = _api_heuristic_score(caption, req.platform)
         return {
             "caption":    caption,
-            "hook":       hook,
-            "body":       body,
-            "cta":        cta,
+            "hook":       composed["hook"],
+            "body":       composed["body"],
+            "cta":        composed["cta"],
             "hashtags":   list(dict.fromkeys(hashtags))[:hashtag_cap],
             "confidence": round(max(quality, score) / 100, 3),
             "quality_score": quality,
             "intelligence": {
                 **brief.to_dict(),
-                "hook_score": hook_score,
-                "candidates_considered": hooks_considered,
+                "hook_score": composed["hook_score"],
+                "candidates_considered": composed["hooks_considered"],
+                "composer": {
+                    "bodies_considered": composed["bodies_considered"],
+                    "ctas_considered": composed["ctas_considered"],
+                },
             },
         }
 
