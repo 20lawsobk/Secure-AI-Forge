@@ -11,7 +11,7 @@ id = "artifacts/mockup-sandbox"
 
 [deployment]
 router = "application"
-deploymentTarget = "cloudrun"
+deploymentTarget = "gce"
 build = ["pnpm", "run", "build:production"]
 run = ["pnpm", "start"]
 
