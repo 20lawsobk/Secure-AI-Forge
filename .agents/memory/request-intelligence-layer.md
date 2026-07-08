@@ -24,16 +24,23 @@ style, word-count window, hashtag count, tempo, temperature) plus an
   — those modalities are too expensive to generate N times.
   **Why:** the in-house model is undertrained and inference is slow/gated;
   doing N model generations per request would blow latency and the gate budget.
-- **Feed `augmented_idea` to the agents, but always keep a deterministic
-  raw-topic candidate in the ranking pool.**
-  **Why:** verbose steering text can degrade the undertrained model's output, so
-  a clean raw-topic candidate must be able to win the ranking as a guardrail.
+- **Never feed `augmented_idea` (or `brief.directives`) into an `idea`/`topic`
+  field that gets templated raw into user-facing text.** Keep `idea` a clean
+  topic string; route richer context through a dedicated `awareness` param
+  instead — see `idea-awareness-field-separation.md` for the parser-specific
+  caveats (some awareness parsers echo bulleted directives verbatim).
+  **Why:** an earlier version of this guidance said to feed `augmented_idea`
+  straight to agents; that caused the pipe-joined `"topic | tone: X | goal: Y
+  | audience: Z"` string (and later, directive bullets like "Optimise for: X")
+  to render literally in captions/thumbnail headlines — a shipped, silent
+  quality bug (200 response, garbled/leaked text).
 - **Hashtag count** is capped at `min(10, max(brief.hashtags_target, len(preferred)))`
   — keep the hard `min(10, …)` so behaviour stays compatible with the old `[:10]`.
 
 ## How to apply
 When adding/altering a generation endpoint, call `build_brief(modality, platform,
-topic, goal, tone, genre, artist, extra)` first, feed `brief.augmented_idea` /
-`brief.tone` to the agent, rank outputs with `rank_candidates` / `best_hook`
-(text/content only), and return `brief.to_dict()` under an `intelligence` key.
-Keyword extraction is Unicode-aware (`[^\W_]+`), so non-Latin topics still work.
+topic, goal, tone, genre, artist, extra)` first, feed the clean `topic`/`idea`
+string (not `brief.augmented_idea`) plus `brief.tone` to the agent, rank
+outputs with `rank_candidates` / `best_hook` (text/content only), and return
+`brief.to_dict()` under an `intelligence` key. Keyword extraction is
+Unicode-aware (`[^\W_]+`), so non-Latin topics still work.

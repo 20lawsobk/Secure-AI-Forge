@@ -4808,8 +4808,23 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
             from ai_model.agents.distribution_agent import DistributionRequest
 
             def _infer():
-                # Feed the enriched, intent-aware idea + resolved tone to the agent.
-                _sr = _script_agent.run(ScriptRequest(idea=brief.augmented_idea, platform=platform, goal=goal, tone=brief.tone))
+                # `idea` is templated raw into hook/body text (e.g. "Playlist
+                # editors are watching — here's {idea}") — it must stay a
+                # clean topic string. The richer intent/audience/theme
+                # context from `brief.augmented_idea` is routed through
+                # `awareness` instead, not concatenated into `idea` where it
+                # would corrupt the visible caption (mirrors the video path).
+                # NOTE: `brief.directives` are internal prompt-engineering
+                # instructions (e.g. "Optimise for: X", "Open with a hook")
+                # meant to steer generation, not real-world context — the
+                # script agent's awareness parser treats any bulleted line
+                # as a quotable signal, so feeding directives in here would
+                # leak them verbatim into the caption. Only genuine external
+                # awareness (client-supplied trend data) belongs here.
+                _sr = _script_agent.run(ScriptRequest(
+                    idea=topic, platform=platform, goal=goal, tone=brief.tone,
+                    awareness=getattr(req, "awareness", "") or "",
+                ))
                 _distribution_agent.run(DistributionRequest(script=f"{_sr.hook}\n{_sr.body}\n{_sr.cta}", platform=platform, goal=goal))
                 return _sr
 
@@ -4905,7 +4920,16 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
             from ai_model.agents.script_agent import ScriptRequest
 
             def _infer():
-                return _script_agent.run(ScriptRequest(idea=brief.augmented_idea, platform=platform, goal=intent, tone=brief.tone))
+                # Keep `idea` clean (templated raw into hook/body text); do
+                # NOT feed `brief.directives` in as awareness — those are
+                # internal prompt-engineering instructions, not real-world
+                # context, and the script agent's awareness parser treats
+                # any bulleted line as a quotable signal (see the matching
+                # comment in /api/generate/content above).
+                return _script_agent.run(ScriptRequest(
+                    idea=idea, platform=platform, goal=intent, tone=brief.tone,
+                    awareness=getattr(req, "awareness", "") or "",
+                ))
 
             try:
                 # Hold an adaptive-concurrency slot for the duration of inference.
@@ -5436,11 +5460,17 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
         if _visual_spec_agent:
             try:
                 from ai_model.agents.visual_spec_agent import VisualSpecRequest
+                # `idea` is templated raw into the thumbnail prompt and drawn
+                # on-canvas as the headline — it must stay a clean topic
+                # string. The richer intent/audience/theme context from
+                # `brief.augmented_idea` is routed through `awareness`
+                # instead, not concatenated into `idea` where it would
+                # corrupt the visible headline text (mirrors the video path).
                 vis = await _in_thread(lambda: _visual_spec_agent.run(VisualSpecRequest(
-                    idea=brief.augmented_idea,
+                    idea=str(topic),
                     platform=normalize_platform(platform),
                     tone=style_tags[0] if style_tags else brief.tone,
-                    awareness=getattr(req, "awareness", ""),
+                    awareness=getattr(req, "awareness", "") or "\n".join(f"• {d}" for d in brief.directives),
                 )))
                 layout       = vis.layout or layout
                 color_scheme = vis.color_scheme or color_scheme
@@ -5460,6 +5490,7 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
                 from ai_model.image.image_engine import ImageRequest
                 _req = ImageRequest(
                     prompt=prompt,
+                    headline=str(topic),
                     color_scheme=color_scheme,
                     layout=layout,
                     platform=platform,
@@ -5735,7 +5766,13 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         try:
             from ai_model.agents.script_agent import ScriptRequest
             _mood_hint = req.intent or "energetic"
-            idea_text  = f"{genre_hint} audio track ({brief.tempo} tempo) — {brief.augmented_idea}"
+            # Keep `idea` clean (templated raw into hook/body text); do NOT
+            # feed `brief.directives` in as awareness — those are internal
+            # prompt-engineering instructions, not real-world context, and
+            # the script agent's awareness parser treats any bulleted line
+            # as a quotable signal (see the matching comment in
+            # /api/generate/content above).
+            idea_text  = f"{genre_hint} audio track ({brief.tempo} tempo)"
             sr = await _in_thread(lambda: _script_agent.run(ScriptRequest(
                 idea=idea_text, platform="general",
                 goal="creative production", tone=brief.tone,

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import threading
 import uuid
 import textwrap
@@ -70,6 +71,11 @@ class ImageRequest:
     # same request always yields identical pixels — used by the retrieval pipeline
     # for idempotent anchor/seed assets. Default None keeps legacy random behavior.
     seed: Optional[int] = None
+    # Short, display-only text drawn as the on-image headline. `prompt` is the
+    # (potentially long, brief-laden) generation/style description used for
+    # meta/logging — it is never drawn onto the canvas directly. When empty,
+    # falls back to a sanitized/truncated `prompt`.
+    headline: str = ""
 
 
 @dataclass
@@ -127,6 +133,58 @@ def _draw_gradient_bar(draw: "ImageDraw.Draw", x0: int, y0: int, x1: int, y1: in
 
 def _wrap_text(text: str, max_chars: int) -> list[str]:
     return textwrap.wrap(text, width=max_chars)
+
+
+# Engineering-brief artifacts that must never reach an on-image headline —
+# these come from `augmented_idea`/prompt-template scaffolding (e.g.
+# "goal: drive_streams | audience: fans | themes: ...", "Focus: ..."),
+# not from what a viewer should actually read on the asset.
+_BRIEF_FIELD_RE = re.compile(
+    r"\b(goal|audience|themes?|focus|tone|intent)\s*:\s*[^|.]*", re.IGNORECASE
+)
+_PIPE_SEP_RE   = re.compile(r"\s*\|\s*")
+_SECRET_RE     = re.compile(r"\S{20,}")      # long opaque token ≈ id / hash / slug
+_NUMBER_RE     = re.compile(r"\b\d{4,}\b")   # long bare numbers (ids), keep short ones
+_STYLE_TAIL_RE = re.compile(
+    r",?\s*(high-contrast and share-ready|capturing .*$|share-ready)\s*$",
+    re.IGNORECASE,
+)
+_LEAD_PHRASE_RE = re.compile(
+    r"^(bold|cinematic|eye-catching)\s+\S+\s+(cover art for|thumbnail for:?|visual for:?)\s*",
+    re.IGNORECASE,
+)
+_HEADLINE_MAX_WORDS = 12
+
+
+def _clean_headline(text: str, max_words: int = _HEADLINE_MAX_WORDS) -> str:
+    """
+    Sanitize arbitrary generation-prompt text into a short, safe on-image
+    headline. Strips brief scaffolding (goal/audience/themes/focus), pipe
+    separators, long opaque tokens (ids/hashes), decorative style suffixes,
+    and caps length — mirroring the video overlay `_clean` pattern so no
+    engineering metadata ever renders as visible text.
+    """
+    if not text:
+        return ""
+    t = _PIPE_SEP_RE.sub(" — ", text)
+    t = _BRIEF_FIELD_RE.sub("", t)
+    t = _LEAD_PHRASE_RE.sub("", t)
+    t = _STYLE_TAIL_RE.sub("", t)
+    t = _SECRET_RE.sub("", t)
+    t = _NUMBER_RE.sub("", t)
+    t = re.sub(r"\s+", " ", t).strip(" -—,.")
+    if not t:
+        return ""
+
+    m = re.search(r"[.!?]", t)
+    if m and m.start() > 3:
+        t = t[: m.start() + 1].strip()
+
+    words = t.split()
+    if len(words) > max_words:
+        t = " ".join(words[:max_words])
+
+    return t.strip(" -—,.")
 
 
 def _scheme_for(name: str) -> tuple:
@@ -285,7 +343,11 @@ class ImageEngine:
         headline_font_sz = max(32, w // (22 if is_portrait else 28))
         headline_font    = _load_font(headline_font_sz, bold=True)
         max_chars        = max(12, w // (headline_font_sz // 2))
-        lines            = _wrap_text(req.prompt, max_chars)[:4]  # cap 4 lines
+        # Always sanitize before drawing — `prompt` is a generation/style
+        # description that may carry brief scaffolding (goal/audience/ids);
+        # only the cleaned, short headline is ever rendered on-canvas.
+        headline_text    = _clean_headline(req.headline or req.prompt)
+        lines            = _wrap_text(headline_text, max_chars)[:4]  # cap 4 lines
 
         line_gap  = int(headline_font_sz * 1.25)
         block_h   = len(lines) * line_gap
