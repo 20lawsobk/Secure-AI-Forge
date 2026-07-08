@@ -60,3 +60,20 @@ string (not `brief.augmented_idea`) plus `brief.tone` to the agent, rank
 outputs with `rank_candidates` / `best_hook` (text/content only), and return
 `brief.to_dict()` under an `intelligence` key. Keyword extraction is
 Unicode-aware (`[^\W_]+`), so non-Latin topics still work.
+
+## Garble guard (undertrained-model output)
+`looks_garbled(text, whitelist)` is the deterministic gate that keeps raw
+undertrained-transformer garble (glued tokens like "beingpre-save",
+letter+multi-digit fusions like "frequency82") out of user-facing copy.
+- **Enforced at two layers:** ScriptAgent rejects a garbled model hook+body
+  (falls through to awareness composition) with whitelist = request idea +
+  awareness; `score_candidate` subtracts a decisive 40-point penalty with
+  whitelist = brief keywords + `augmented_idea`.
+- **Why the whitelist matters:** legit alphanumeric artist/track names
+  ("Frequency82") match the fusion heuristic; words from the request itself
+  must always be exempt or the guard suppresses valid copy. Ranking whitelist
+  must include `augmented_idea` (carries the raw topic), not keywords alone —
+  keyword extraction can drop numeric-suffixed names.
+- **Why _is_meaningful is not enough:** it only checks length/control-tokens/
+  repetition; glued-token garble passes it. Any new consumer of raw model text
+  must route through the garble guard too.

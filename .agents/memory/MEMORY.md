@@ -1,7 +1,7 @@
 - [KV-cache inference](kv-cache-inference.md) — transformer needs KV-cache (prefill+decode_one) or plan() takes 3+ min per call
 - [Video pipeline architecture](video-pipeline.md) — non-blocking job pattern, ffmpeg framerate fix, text cleaning rules
 - [Video scene text generation](video-scene-generation.md) — use dataset_sampler not model.generate_batch() for scene text; batch inference exists but model is undertrained
-- [Request intelligence layer](request-intelligence-layer.md) — shared pre-gen brief, additive `intelligence` block; compose_caption ranks whole captions from brief (echo-filtered agent body, retirement-gated playbook CTAs)
+- [Request intelligence layer](request-intelligence-layer.md) — shared pre-gen brief, additive `intelligence` block; compose_caption ranks captions; looks_garbled guard (ScriptAgent + score penalty, whitelist=request words)
 - [Idea vs awareness field separation](idea-awareness-field-separation.md) — never concatenate augmented/brief context into a raw `idea` field that gets templated into output; corrupts user-facing text
 - [MaxBooster↔MaxCore contract](maxbooster-contract.md) — client prepends /api; viral-score is 0–1 (client×100); satisfy contract via additive /api endpoints, don't port TS files
 - [ffmpeg spawn under memory pressure](ffmpeg-spawn-memory.md) — ffmpeg must use posix_spawn via run_ffmpeg(), not fork(), or prod renders die with [Errno 5] EIO under model memory

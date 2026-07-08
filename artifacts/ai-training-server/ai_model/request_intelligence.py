@@ -519,7 +519,17 @@ def score_candidate(text: str, brief: GenerationBrief) -> float:
         + hook_score * 0.20
         + struct_score * 0.15
     )
-    return round(min(100.0, blended * 100), 1)
+    score = blended * 100
+
+    # Garbled model output (glued tokens, letter-digit fusions) must never
+    # outrank a clean composed candidate — apply a decisive penalty. The
+    # whitelist carries the brief's full raw request context (augmented_idea
+    # includes the raw topic) so legitimate alphanumeric names (e.g. an
+    # artist called "Frequency82") are never penalised.
+    if looks_garbled(text, whitelist=f"{' '.join(brief.keywords)} {brief.augmented_idea}"):
+        score -= 40.0
+
+    return round(min(100.0, max(0.0, score)), 1)
 
 
 def rank_candidates(
@@ -640,6 +650,54 @@ def rank_scene_phrases(
     scored = [(p, score_scene_phrase(p, scene_type, keywords)) for p in pool]
     scored.sort(key=lambda ps: ps[1], reverse=True)
     return scored
+
+
+# ---------------------------------------------------------------------------
+# Garble detection — undertrained-model output guard
+# ---------------------------------------------------------------------------
+# The in-house transformer sometimes emits glued-together tokens ("beingpre-save",
+# "beingstarting", "Frequency82") that pass length/repetition checks but read as
+# gibberish in user-facing overlays. This detector is deterministic, dependency-
+# free and whitelist-aware (words from the request itself are never flagged).
+
+# Function words that essentially never form the PREFIX of a longer real English
+# word with 4+ extra chars (e.g. "being"+"pre-save"). Chosen so real words like
+# "everything", "startling" or "forever" are NOT flagged.
+_GLUE_PREFIXES = ("being", "because", "would", "their", "going", "about")
+
+
+def looks_garbled(text: str, whitelist: str = "") -> bool:
+    """True when text shows glued-token / letter-digit-fusion artefacts.
+
+    ``whitelist`` should carry the raw request context (topic, artist,
+    awareness) — any word appearing there is trusted verbatim.
+    """
+    if not text:
+        return False
+    wl = set(re.findall(r"[a-z0-9]+", whitelist.lower()))
+    words = re.findall(r"[A-Za-z0-9'’\-]+", text)
+    if not words:
+        return False
+    bad = 0
+    for w in words:
+        base = w.strip("'’-").lower()
+        core = re.sub(r"[^a-z0-9]", "", base)
+        if not core or core in wl:
+            continue
+        # Implausibly long single token (mashed words)
+        if len(core) > 14:
+            bad += 1
+            continue
+        # Letters fused with a trailing multi-digit run ("frequency82")
+        if re.search(r"[a-z]{4,}\d{2,}$", core):
+            bad += 1
+            continue
+        # Function word glued onto a content word ("beingpre-save")
+        for p in _GLUE_PREFIXES:
+            if core.startswith(p) and len(core) - len(p) >= 4:
+                bad += 1
+                break
+    return bad >= 2 or (bad / len(words)) > 0.2
 
 
 def deterministic_candidate(topic: str, artist: str, brief: GenerationBrief) -> str:

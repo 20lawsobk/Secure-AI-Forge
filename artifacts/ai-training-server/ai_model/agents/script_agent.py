@@ -277,11 +277,20 @@ class ScriptAgent:
                     body = _clean_text(remainder)
 
             if self._is_meaningful(hook) and self._is_meaningful(body):
-                if not cta or not self._is_meaningful(cta):
-                    cta = _parse_cta_from_awareness(req.awareness, req.platform)
-                    if not cta:
-                        cta = PLATFORM_CTAS.get(req.platform.lower(), "Let me know what you think!")
-                return ScriptResponse(hook=hook, body=body, cta=cta, source="ai_model")
+                # Undertrained-model garble guard: glued tokens ("beingpre-save",
+                # "beingstarting") or letter-digit fusions ("Frequency82") pass
+                # the length/repetition checks above but read as gibberish in
+                # user-facing overlays. Words from the request itself (idea,
+                # awareness) are whitelisted, so real names never trip it.
+                # On garble, fall through to the awareness composition below.
+                from ai_model.request_intelligence import looks_garbled
+                _wl = f"{req.idea} {req.awareness or ''}"
+                if not looks_garbled(f"{hook}\n{body}", whitelist=_wl):
+                    if not cta or not self._is_meaningful(cta) or looks_garbled(cta, whitelist=_wl):
+                        cta = _parse_cta_from_awareness(req.awareness, req.platform)
+                        if not cta:
+                            cta = PLATFORM_CTAS.get(req.platform.lower(), "Let me know what you think!")
+                    return ScriptResponse(hook=hook, body=body, cta=cta, source="ai_model")
         except Exception:
             pass
 
