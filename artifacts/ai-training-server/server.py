@@ -663,6 +663,35 @@ class _AwarenessMixin(BaseModel):
         return data
 
 
+def _as_text(v: Any) -> str:
+    """Coerce a possibly-Any request field to a clean string ("" if not a str)."""
+    return v.strip() if isinstance(v, str) else ""
+
+
+def _merged_awareness_for(req: Any) -> str:
+    """Build one endpoint's awareness-bridge input identically to
+    /api/generate/content, personalised by that endpoint's own direction fields.
+
+    The caller's creative direction (instruction / extra_context /
+    content_themes) is serialised FIRST via ``awareness_from_direction`` (so it
+    outranks generic trend context, is lead-in-stripped + colon-safe, and themes
+    go in as a bullet — never #hashtags), then genuine external live-signal
+    awareness is appended. ``brief.directives`` are deliberately NOT used as a
+    fallback: they are internal prompt-engineering instructions the awareness
+    parser would quote verbatim. Returns "" when there is no real context, which
+    every agent handles gracefully. Every modality now uses awareness the same
+    way — only the direction personalisation differs per endpoint."""
+    from ai_model import request_intelligence as ri
+    direction = " ".join(s for s in (
+        _as_text(getattr(req, "instruction", None)),
+        _as_text(getattr(req, "extra_context", None)),
+    ) if s)
+    return "\n".join(p for p in (
+        ri.awareness_from_direction(direction, getattr(req, "content_themes", None)),
+        (getattr(req, "awareness", "") or "").strip(),
+    ) if p)
+
+
 class ContentRequest(_AwarenessMixin):
     platform: str = "tiktok"
     topic: str
@@ -4636,7 +4665,7 @@ class ApiGenerateContentRequest(_AwarenessMixin):
     extra_context: Optional[str] = None
 
 
-class ApiGenerateTextRequest(BaseModel):
+class ApiGenerateTextRequest(_AwarenessMixin):
     mode: str  # "planner" | "content"
     system: Optional[str] = None
     step: Optional[Any] = None
@@ -4655,6 +4684,9 @@ class ApiGenerateTextRequest(BaseModel):
     artist_name: Optional[str] = None
     brand_voice: Optional[str] = None
     extra_context: Optional[Any] = None
+    # Freeform creative direction for THIS request (parity with content route).
+    instruction: Optional[str] = None
+    content_themes: Optional[List[str]] = None
 
 
 class ApiContentScoreRequest(BaseModel):
@@ -4701,7 +4733,7 @@ class ApiPredictEngagementRequest(BaseModel):
     postsPerWeek: Optional[int] = None
 
 
-class ApiGenerateImageRequest(BaseModel):
+class ApiGenerateImageRequest(_AwarenessMixin):
     step: Optional[Any] = None
     inputs: Optional[Any] = None
     slots: Optional[Any] = None
@@ -4717,9 +4749,13 @@ class ApiGenerateImageRequest(BaseModel):
     timecode: Optional[float] = None
     video_style: Optional[str] = None
     style_confidence: Optional[float] = None
+    # Freeform creative direction for THIS request (parity with content route).
+    instruction: Optional[str] = None
+    extra_context: Optional[str] = None
+    content_themes: Optional[List[str]] = None
 
 
-class ApiGenerateAudioRequest(BaseModel):
+class ApiGenerateAudioRequest(_AwarenessMixin):
     style_fingerprint: Optional[List[float]] = None
     notes: Optional[List[Any]] = None
     duration: Optional[float] = 30
@@ -4731,6 +4767,10 @@ class ApiGenerateAudioRequest(BaseModel):
     artistProfileId: Optional[str] = None
     intent: Optional[str] = None
     platformRules: Optional[Any] = None
+    # Freeform creative direction for THIS request (parity with content route).
+    instruction: Optional[str] = None
+    extra_context: Optional[str] = None
+    content_themes: Optional[List[str]] = None
 
 
 class SceneOverride(BaseModel):
@@ -4738,7 +4778,7 @@ class SceneOverride(BaseModel):
     text: str
 
 
-class ApiGenerateVideoRequest(BaseModel):
+class ApiGenerateVideoRequest(_AwarenessMixin):
     idea: str
     platform: str = "tiktok"
     genre: Optional[str] = None
@@ -4758,6 +4798,10 @@ class ApiGenerateVideoRequest(BaseModel):
     aspect_ratio: Optional[str] = None
     template: Optional[str] = None
     is_drop: Optional[bool] = None
+    # Freeform creative direction for THIS request (parity with content route).
+    instruction: Optional[str] = None
+    extra_context: Optional[str] = None
+    content_themes: Optional[List[str]] = None
     energy: Optional[float] = None
     bpm: Optional[float] = None
 
@@ -4880,11 +4924,7 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
         #      so this path never actually fed the bridge.
         # `brief.directives` are deliberately excluded: they are internal
         # prompt-engineering instructions the parser would quote verbatim.
-        _direction = " ".join(filter(None, [req.instruction, req.extra_context]))
-        _merged_awareness = "\n".join(p for p in [
-            ri.awareness_from_direction(_direction, req.content_themes),
-            (getattr(req, "awareness", "") or "").strip(),
-        ] if p)
+        _merged_awareness = _merged_awareness_for(req)
 
         if _model_ready and _script_agent:
             from ai_model.agents.script_agent import ScriptRequest
@@ -5014,7 +5054,7 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
                 # comment in /api/generate/content above).
                 return _script_agent.run(ScriptRequest(
                     idea=idea, platform=platform, goal=intent, tone=brief.tone,
-                    awareness=getattr(req, "awareness", "") or "",
+                    awareness=_merged_awareness_for(req),
                 ))
 
             try:
@@ -5529,6 +5569,10 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
         tone=style_tags[0] if style_tags else None,
         extra=" ".join(str(s) for s in style_tags),
     )
+    # Awareness bridge (identical to content route, personalised by this
+    # request's own direction fields) → drives the VisualSpecAgent's layout /
+    # colour / prompt, which the PIL render then consumes.
+    _img_awareness = _merged_awareness_for(req)
 
     outputs = []
     for slot in raw_slots:
@@ -5556,7 +5600,7 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
                     idea=str(topic),
                     platform=normalize_platform(platform),
                     tone=style_tags[0] if style_tags else brief.tone,
-                    awareness=getattr(req, "awareness", "") or "\n".join(f"• {d}" for d in brief.directives),
+                    awareness=_img_awareness,
                 )))
                 layout       = vis.layout or layout
                 color_scheme = vis.color_scheme or color_scheme
@@ -5862,6 +5906,7 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
             sr = await _in_thread(lambda: _script_agent.run(ScriptRequest(
                 idea=idea_text, platform="general",
                 goal="creative production", tone=brief.tone,
+                awareness=_merged_awareness_for(req),
             )))
             if sr:
                 audio_concept = sr.body
@@ -5879,8 +5924,17 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         if fp and len(fp) >= 4:
             bpm = round(float(_np2.mean(fp[:4]) * 100 + 80), 1)
         else:
+            # No client style fingerprint → let the awareness/intent-derived
+            # tempo band (via brief.tempo) shape the BPM, so the live signal
+            # actually influences the rendered sound (the dataset render then
+            # selects the sample whose tempo best matches). Seeded jitter keeps
+            # per-request variety within the band.
+            _bands = {"fast": (126.0, 140.0), "punchy": (118.0, 130.0),
+                      "medium": (100.0, 116.0), "steady": (84.0, 98.0),
+                      "slow": (76.0, 90.0)}
+            _lo, _hi = _bands.get((brief.tempo or "").lower(), (96.0, 120.0))
             rng = _np2.random.default_rng(abs(hash(audio_concept or job_id)) % (2**31))
-            bpm = round(float(rng.uniform(80, 160)), 1)
+            bpm = round(float(rng.uniform(_lo, _hi)), 1)
         # Key derived from fingerprint tail
         keys_list = ["C major", "A minor", "G major", "E minor", "D major",
                      "F major", "B minor", "D minor", "E major", "G minor"]
@@ -5980,7 +6034,7 @@ async def api_generate_video(req: ApiGenerateVideoRequest, _key=Depends(require_
                 artist_name=req.artist_name or "",
                 duration=float(req.duration or 0),
                 artist_context={"audio_path": req.user_audio_path} if req.user_audio_path else {},
-                awareness="\n".join(f"• {d}" for d in brief.directives),
+                awareness=_merged_awareness_for(req),
             )
 
             production = agent.plan(agent_req)

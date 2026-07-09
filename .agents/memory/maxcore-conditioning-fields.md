@@ -15,5 +15,13 @@ MaxCore's Python agents (`script_agent.py` ScriptRequest, `visual_spec_agent` Vi
 
 **Rule:** a new conditioning signal only takes effect if you BOTH (a) declare the field on the relevant `Maxcore*Request` model in server.py, AND (b) pass it into `ScriptRequest(...)`/`VisualSpecRequest(...)` inside every handler (analyze, content-text, audio, video, image). Missing either half = the signal is silently ignored, no error.
 
+# Parity across ALL generation endpoints (not just content)
+The awareness bridge must be wired IDENTICALLY on every generation endpoint, personalised only by that endpoint's own direction fields. Historically ONLY `/api/generate/content` had the full wiring; `text`/`image`/`audio`/`video` each silently dropped Node awareness (plain `BaseModel`) and/or fed `brief.directives` as awareness (the parser quotes directives verbatim — wrong). Fix pattern, three parts per endpoint:
+1. Request model extends `_AwarenessMixin` (+ declare `instruction`/`extra_context`/`content_themes` direction fields) — stops the silent drop.
+2. Build the merged awareness with the shared `_merged_awareness_for(req)` helper (user direction via `awareness_from_direction` FIRST, then external `req.awareness`; NO directives fallback — return "" when empty, agents handle it) and thread it into that endpoint's agent request (`ScriptRequest`/`VisualSpecRequest`/`VideoAgentRequest`).
+3. Thread awareness into the actual RENDER, not just the concept text. Text/image/video get this for free (agent output → render). AUDIO is the trap: awareness only shaped a metadata "concept" while the sound came from fingerprint/RNG — wire the awareness/intent-derived `brief.tempo` into BPM band selection so the live signal reaches the dataset-sample render.
+
+**Why:** "each endpoint has an equal awareness layer" is the design intent, but code drifted so only one route implemented it — verify with `grep "_AwarenessMixin" server.py` that every `ApiGenerate*Request` extends it, and that no gen handler still does `awareness="\n".join(... brief.directives)`. (Platform endpoints at the bottom of server.py are separate and may still use the directives fallback — out of the 5-gen-route scope.)
+
 # How to verify it actually landed
 A generation asset's `metadata.source` flips to `"awareness"` (fallback parsed your block) or `"ai_model"` (LLM consumed the prompt) once awareness is wired — previously text could not report `source:"awareness"`. Model output may still look garbled (the in-house model is undertrained); that is a model-quality issue, not a wiring failure. Wiring correctness = the signal reaches the agent, not that it's echoed verbatim.
