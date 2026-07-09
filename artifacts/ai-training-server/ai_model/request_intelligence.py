@@ -558,14 +558,29 @@ def rank_candidates(
     candidates: List[str], brief: GenerationBrief
 ) -> List[Tuple[str, float]]:
     """Return candidates sorted best-first with their scores (dedup, stable)."""
+    # Stage 8 constraint enforcement (post-generation): each candidate is run
+    # through the content-safety policy so the stored text is already redacted /
+    # refused, and unsafe candidates are penalised so a clean variant wins.
+    try:
+        from ai_model.safety import get_safety
+        _safety = get_safety()
+    except Exception:
+        _safety = None
+
     seen = set()
     scored: List[Tuple[str, float]] = []
     for cand in candidates:
-        key = _norm(cand)
+        safe_cand, pen = cand, 0.0
+        if _safety is not None:
+            # Screen once (counters increment once), reuse for text + penalty.
+            res = _safety.enforce(cand)
+            safe_cand = res.text
+            pen = _safety.penalty_of(res)
+        key = _norm(safe_cand)
         if not key or key in seen:
             continue
         seen.add(key)
-        scored.append((cand, score_candidate(cand, brief)))
+        scored.append((safe_cand, score_candidate(safe_cand, brief) + pen))
     scored.sort(key=lambda cs: cs[1], reverse=True)
     return scored
 

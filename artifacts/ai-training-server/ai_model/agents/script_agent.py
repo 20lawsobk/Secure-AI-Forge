@@ -55,6 +55,13 @@ def _clean_text(text: str) -> str:
     text = re.sub(r"\[(?:UNK|PAD|CLS|SEP|MASK|BOS|EOS)\]", "", text, flags=re.IGNORECASE)
     # Collapse whitespace left by removed tokens
     text = re.sub(r"\s+", " ", text).strip()
+    # Stage 8 constraint enforcement (post-generation): redact/refuse unsafe
+    # content on every agent output path, independent of downstream ranking.
+    try:
+        from ai_model.safety import enforce as _safety_enforce
+        text = _safety_enforce(text)
+    except Exception:
+        pass
     return text
 
 

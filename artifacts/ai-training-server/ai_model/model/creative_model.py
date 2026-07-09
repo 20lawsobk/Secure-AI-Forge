@@ -36,6 +36,18 @@ class CreativeModel:
             new_head.weight = new_emb.weight
             self.model.head = new_head
 
+    def _safety_bad_ids(self) -> list[int]:
+        """Cached list of hard-blocked token ids for logit masking (Stage 8)."""
+        cached = getattr(self, "_safety_bad_ids_cache", None)
+        if cached is None:
+            try:
+                from ai_model.safety import get_safety
+                cached = list(get_safety().bad_token_ids(self.tokenizer))
+            except Exception:
+                cached = []
+            self._safety_bad_ids_cache = cached
+        return cached
+
     def _apply_repetition_penalty(
         self,
         logits: torch.Tensor,
@@ -61,6 +73,12 @@ class CreativeModel:
         top_k: int,
     ) -> torch.Tensor:
         """Apply temperature + top-k + nucleus sampling. Returns next token id [B, 1]."""
+        # ── Stage 8 constraint enforcement (during generation) ──────────────
+        # Mask hard-blocked tokens to -inf so the decoder can never emit them.
+        bad_ids = self._safety_bad_ids()
+        if bad_ids:
+            logits[:, bad_ids] = float('-inf')
+
         logits = logits / max(temperature, 1e-8)
 
         if top_k > 0:
@@ -453,6 +471,10 @@ class CreativeModel:
 
                     next_logits[0, pad_id] = float('-inf')
                     next_logits[0, unk_id] = float('-inf')
+                    # Stage 8 constraint enforcement — mask hard-blocked tokens.
+                    bad_ids = self._safety_bad_ids()
+                    if bad_ids:
+                        next_logits[0, bad_ids] = float('-inf')
                     if len(beam_ids) - len(ids) < min_length:
                         next_logits[0, eos_id] = float('-inf')
 

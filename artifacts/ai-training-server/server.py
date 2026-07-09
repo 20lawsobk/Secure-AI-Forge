@@ -6628,6 +6628,25 @@ async def api_rta_status(selftest: bool = False, _key=Depends(require_scope("gen
     return out
 
 
+class ApiSafetyScreenRequest(BaseModel):
+    text: str = ""
+
+
+@app.post("/api/safety/screen")
+async def api_safety_screen(req: ApiSafetyScreenRequest, _key=Depends(require_scope("generate"))):
+    """Stage 8 content-safety probe: screen + enforce a piece of text. Returns the
+    policy verdict and the enforced (redacted/refused) output. Also exposes the
+    running violation counters."""
+    from ai_model.safety import get_safety
+    s = get_safety()
+    res = s.enforce(req.text or "")
+    return {
+        **res.to_dict(),
+        "enforced_text": res.text,
+        "stats": s.stats(),
+    }
+
+
 @app.post("/api/audio/analyze")
 async def api_audio_analyze(req: ApiAudioAnalyzeRequest, _key=Depends(require_scope("generate"))):
     """
