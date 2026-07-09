@@ -5899,8 +5899,11 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
     if os.environ.get("RTA_AUDIO_SPECTRAL") == "1":
         try:
             _arc_spectral_clean_file(mp3_path)
+            print(f"[RTA] ARC spectral clean applied to audio_{job_id}.mp3", flush=True)
         except Exception as _arc_err:
-            print(f"[RTA] ARC spectral clean skipped: {_arc_err}")
+            # Honest fallback: spectral failure is logged and the un-cleaned
+            # base clip (already on disk) is still served — never a broken file.
+            print(f"[RTA] ARC spectral clean skipped (serving base clip): {_arc_err}", flush=True)
 
     return f"/uploads/audio_{job_id}.mp3"
 

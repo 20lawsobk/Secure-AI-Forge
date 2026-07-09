@@ -1,37 +1,14 @@
 ---
-name: real-audio generation pipeline
-description: How /api/generate/audio renders from a real FMA dataset stored in pdim (no procedural synth fallback), how to seed it, and the gotchas
+name: real-audio generation
+description: How /api/generate/audio renders real audio and how the ARC spectral-cleanup gate works end-to-end
 ---
 
-# Real-audio generation (no synth fallback)
+- `/api/generate/audio` renders from a seeded FMA dataset in pdim (no synth fallback). Seed via admin `POST /storage/datasets/audio/seed?count=N` with `X-Admin-Key` (the admin/api key works as this header). Seeding pulls FMA-small from HuggingFace (slow/flaky ~60-90s for 6 tracks); poll `GET /storage/datasets` until an `audio` manifest with `num_chunks>0` appears. Dataset field is `b64`; seeder module is import-cached so restart to reload edits.
+- Audio job status endpoint is `GET /api/audio-job/{job_id}` (NOT `/api/jobs/...`, which 404s).
 
-`/api/generate/audio` renders output by looping/trimming a REAL source track pulled
-from a dataset seeded into pdim — there is **no procedural-synthesis fallback**. If
-the dataset is empty/unavailable the endpoint raises explicitly (RuntimeError).
-
-**Why:** the user's hard requirement was real datasets, not synth, with no silent
-fallbacks. Selection picks a dataset entry by key then closest BPM to the request,
-then ffmpeg `-stream_loop` to reach the requested duration.
-
-# Seeding the dataset
-
-Admin-only: `POST /storage/datasets/audio/seed?count=N&replace=` (header
-`X-Admin-Key: $ADMIN_KEY`). Runs in a daemon thread; returns immediately
-(`{"status":"seeding"}` or `{"status":"already_seeding"}` — a single-flight lock
-guards re-entry). The seeder downloads CC tracks from HF
-`benjamin-paine/free-music-archive-small`, ffmpeg-transcodes to bounded mono MP3,
-computes bpm/key with librosa, and stores:
-- `mb:dataset:audio:meta` — manifest
-- `mb:dataset:audio:chunk:{idx}` — per-track record; **binary is base64 in field `b64`**
-
-Verify: `/storage/datasets` lists `audio`; or PING the pdim instance and
-`KEYS mb:dataset:audio:*`.
-
-# Gotchas
-
-- HF datasets-server is flaky; the seeder's `_http_get` uses retries + long timeouts.
-- `server.py` has **no module-level `logger`** — use `print(...)` in new endpoints.
-- The seeder module is import-cached per process; after editing
-  `workers/seed_audio_dataset.py` restart the workflow(s) spawning `server.py`.
-- Data lives in whichever pdim instance `STORAGE_HTTP_URL` points at; if you repoint
-  instances (see pdim-storage-topology) you must RE-SEED — chunks don't migrate.
+## ARC spectral cleanup gate (RTA_AUDIO_SPECTRAL)
+- Studio audio cleanup (RTA-1 ARC / `_arc_spectral_clean_file` → `ai_model.rta.api.spectral_clean_audio`) is **opt-in via env flag `RTA_AUDIO_SPECTRAL=1`**, read from `os.environ` at request time inside `_render_audio_from_dataset`. It is deliberately NOT default-on (denoising already-clean dataset music is a creative choice).
+- ARC is gentle & deterministic on real FMA audio: it slightly lowers the noise floor and leaves the signal essentially intact (tiny mean-abs-diff). Not destructive.
+- **Honest fallback**: the ARC call is wrapped in try/except; on failure it logs `[RTA] ARC spectral clean skipped (serving base clip)` and still serves the un-cleaned base clip (already on disk) — never a broken file. On success it logs `[RTA] ARC spectral clean applied to <file>`.
+- **Why the flag is hard to make live**: two workflows spawn `server.py` (`Start application` AND `artifacts/api-server: API Server`), both via `python-server.ts` which passes `...process.env`. A single flock singleton means only one server.py wins port 9878. If a wrapper node process started BEFORE the shared env var was set, its child server.py won't see the flag. **How to apply:** set the var in shared env (`setEnvVars`), then restart BOTH workflows so both wrappers carry it, then kill server.py so a flag-carrying wrapper respawns it. Verify the live log shows the `ARC spectral clean applied` line for a novel job.
+- To validate the exact endpoint code path deterministically (independent of wrapper env propagation): import `server` as a module (safe — `init_db`/`uvicorn`/flock are under `__main__`) with `RTA_AUDIO_SPECTRAL=1`, call `_render_audio_from_dataset(...)` directly, and monkeypatch `_arc_spectral_clean_file` to raise to prove the honest fallback.
