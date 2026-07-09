@@ -76,6 +76,11 @@ class ImageRequest:
     # meta/logging — it is never drawn onto the canvas directly. When empty,
     # falls back to a sanitized/truncated `prompt`.
     headline: str = ""
+    # Optional pre-rendered background as an H×W×3 uint8 array (e.g. an RTA-1
+    # path-traced hero image). When provided it replaces the procedural gradient
+    # background; all accent bars, brackets and typography are still composited
+    # on top, so the poster layout is preserved over real rendered pixels.
+    background: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -277,11 +282,18 @@ class ImageEngine:
         grad_top, grad_bot, accent, text_col = _scheme_for(req.color_scheme)
         is_portrait = h > w
 
-        # ── Background gradient ────────────────────────────────────────────────
+        # ── Background: injected (RTA path-traced) or procedural gradient ───────
         rng = np.random.RandomState(req.seed) if req.seed is not None else None
-        bg_arr = _gradient_array(w, h, grad_top, grad_bot)
-        bg_arr = _add_noise_texture(bg_arr, strength=10, rng=rng)
-        img = Image.fromarray(bg_arr, "RGB")
+        if req.background is not None:
+            bg_in = np.asarray(req.background, dtype=np.uint8)
+            bg_img = Image.fromarray(bg_in[:, :, :3], "RGB")
+            if bg_img.size != (w, h):
+                bg_img = bg_img.resize((w, h), Image.LANCZOS)
+            img = bg_img.convert("RGB")
+        else:
+            bg_arr = _gradient_array(w, h, grad_top, grad_bot)
+            bg_arr = _add_noise_texture(bg_arr, strength=10, rng=rng)
+            img = Image.fromarray(bg_arr, "RGB")
         draw = ImageDraw.Draw(img)
 
         # ── Top accent bar ─────────────────────────────────────────────────────

@@ -4749,6 +4749,11 @@ class ApiGenerateImageRequest(_AwarenessMixin):
     timecode: Optional[float] = None
     video_style: Optional[str] = None
     style_confidence: Optional[float] = None
+    # Opt into the RTA-1 IRC path tracer for the hero background: "pathtraced"
+    # (aliases "rta"/"raytraced") renders real lit geometry via the Digital GPU,
+    # then composites the poster typography on top. Any other/absent value keeps
+    # the fast procedural PIL background. Env RTA_IMAGE_ENGINE sets the default.
+    render_engine: Optional[str] = None
     # Freeform creative direction for THIS request (parity with content route).
     instruction: Optional[str] = None
     extra_context: Optional[str] = None
@@ -5613,6 +5618,29 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
         if brief.keywords:
             prompt = f"{prompt}. Focus: {', '.join(brief.keywords[:4])}"
 
+        # ── RTA-1 IRC path-traced background (opt-in, explicit fallback) ──────
+        _rta_bg = None
+        _engine_choice = (req.render_engine or os.environ.get("RTA_IMAGE_ENGINE") or "").lower()
+        if _engine_choice in ("pathtraced", "rta", "raytraced", "path-traced"):
+            try:
+                from ai_model import rta as _rta
+                from ai_model.image.image_engine import PLATFORM_DIMS
+                _pw, _ph = PLATFORM_DIMS.get(layout, (1080, 1080))
+                _base = 384
+                if _pw >= _ph:
+                    _bw, _bh = _base, max(64, int(round(_base * _ph / _pw)))
+                else:
+                    _bh, _bw = _base, max(64, int(round(_base * _pw / _ph)))
+                _seed = _rta.image.scene_builder.stable_seed(str(topic), platform, color_scheme)
+                _mood = style_tags[0] if style_tags else "cinematic"
+                _rta_bg = await _in_thread(lambda: _rta.api.render_image(
+                    color_scheme=color_scheme, mood=_mood,
+                    width=_bw, height=_bh, samples=20, max_bounces=3, seed=_seed,
+                ))
+            except Exception as _rta_err:
+                print(f"[RTA] path-trace bg failed, falling back to PIL: {_rta_err}")
+                _rta_bg = None
+
         # ── Render via PIL ImageEngine ─────────────────────────────────────────
         result = None
         if _image_engine:
@@ -5627,6 +5655,7 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
                     artist_name=artist_name,
                     intent=purpose,
                     style_tags=style_tags,
+                    background=_rta_bg,
                 )
                 result = await _in_thread(lambda r=_req: _image_engine.render(r))
             except Exception as _img_err:
@@ -5660,7 +5689,8 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
                     "layout":       result.layout,
                     "prompt_used":  result.prompt_used,
                     "style_tags":   style_tags,
-                    "engine":       "maxbooster-pil-v1",
+                    "engine":       ("rta-irc-pathtraced-v1" if _rta_bg is not None
+                                     else "maxbooster-pil-v1"),
                 },
             })
         else:
@@ -5861,7 +5891,56 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
             src_path.unlink(missing_ok=True)
         except OSError:
             pass
+
+    # ── RTA-1 ARC spectral restoration (opt-in) ──────────────────────────────
+    # Runs an STFT noise-gate (DFT forward/inverse as GEMMs on the self-contained
+    # Digital GPU) over the rendered clip before serving. Opt-in via env because
+    # denoising already-clean dataset music is a creative choice, not a default.
+    if os.environ.get("RTA_AUDIO_SPECTRAL") == "1":
+        try:
+            _arc_spectral_clean_file(mp3_path)
+        except Exception as _arc_err:
+            print(f"[RTA] ARC spectral clean skipped: {_arc_err}")
+
     return f"/uploads/audio_{job_id}.mp3"
+
+
+def _arc_spectral_clean_file(mp3_path) -> None:
+    """Decode → RTA ARC spectral denoise → re-encode the given MP3 in place."""
+    import wave
+    import numpy as _np
+    from ai_model.video.ffmpeg_util import run_ffmpeg
+    from ai_model import rta as _rta
+
+    wav_in = mp3_path.with_suffix(".arc_in.wav")
+    wav_out = mp3_path.with_suffix(".arc_out.wav")
+    try:
+        r = run_ffmpeg(["ffmpeg", "-y", "-i", str(mp3_path), "-ac", "1",
+                        "-ar", "44100", "-f", "wav", str(wav_in)], timeout=60)
+        if r.returncode != 0 or not wav_in.exists():
+            raise RuntimeError(f"decode failed rc={r.returncode}")
+        with wave.open(str(wav_in), "rb") as wf:
+            sr = wf.getframerate()
+            raw = wf.readframes(wf.getnframes())
+        samples = _np.frombuffer(raw, dtype="<i2").astype(_np.float32) / 32768.0
+        cleaned = _rta.api.spectral_clean_audio(samples, sr)
+        out16 = _np.clip(cleaned, -1.0, 1.0)
+        out16 = (out16 * 32767.0).astype("<i2")
+        with wave.open(str(wav_out), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sr)
+            wf.writeframes(out16.tobytes())
+        r2 = run_ffmpeg(["ffmpeg", "-y", "-i", str(wav_out), "-codec:a",
+                         "libmp3lame", "-q:a", "4", str(mp3_path)], timeout=60)
+        if r2.returncode != 0:
+            raise RuntimeError(f"re-encode failed rc={r2.returncode}")
+    finally:
+        for _p in (wav_in, wav_out):
+            try:
+                _p.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 @app.post("/api/generate/audio")
@@ -6529,6 +6608,24 @@ async def api_health():
         "uptime_seconds": time.time() - _start_time,
         "version": "1.0.0",
     }
+
+
+@app.get("/api/rta/status")
+async def api_rta_status(selftest: bool = False, _key=Depends(require_scope("generate"))):
+    """RTA-1 rendering-fabric status. Proves the trinity (IRC/VRC/ARC) runs on the
+    self-contained Digital GPU by reporting cumulative GEMM ops; ``?selftest=1``
+    runs a fast end-to-end render of all three mediums."""
+    from ai_model import rta as _rta
+    out = {
+        "fabric": "RTA-1 (UMRF)",
+        "compute_backend": "digital_gpu",
+        "nodes": sorted(_rta.node_registry().keys()),
+        "digital_gpu_ops": _rta.global_op_counts(),
+    }
+    if selftest:
+        out["selftest"] = await _in_thread(_rta.api.self_test)
+        out["digital_gpu_ops_after"] = _rta.global_op_counts()
+    return out
 
 
 @app.post("/api/audio/analyze")

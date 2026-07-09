@@ -326,6 +326,25 @@ def _render_pil_based(
     if not bg_png or not os.path.exists(bg_png):
         return _render_fallback(scene, width, height, dur, out_path)
 
+    # ── RTA-1 VRC colour grade (Digital-GPU node-based grade) ───────────────
+    # Applied to the background still itself via the RTA fabric (lift/gamma/gain
+    # + creative colour matrix as a GEMM on the self-contained Digital GPU),
+    # replacing the ad-hoc ffmpeg grade filter. Explicit fallback to the ffmpeg
+    # grade preset if RTA is unavailable, so colour work never silently drops.
+    _vrc_applied = False
+    if scene.color_grade and os.environ.get("RTA_VIDEO_GRADE", "1") != "0":
+        try:
+            import numpy as _np
+            from PIL import Image as _Image
+            from ai_model import rta as _rta
+            _arr = _np.asarray(_Image.open(bg_png).convert("RGB"))
+            _graded = _rta.api.grade_video_frame(_arr, grade=scene.color_grade)
+            _Image.fromarray(_graded).save(bg_png, format="PNG")
+            _vrc_applied = True
+        except Exception as _vrc_err:
+            print(f"[RTA] VRC grade failed, using ffmpeg grade: {_vrc_err}")
+            _vrc_applied = False
+
     vf_parts: List[str] = []
 
     if scene.vignette > 0:
@@ -338,7 +357,7 @@ def _render_pil_based(
         "neon":      color_grade_neon,
         "vintage":   color_grade_vintage,
     }
-    if scene.color_grade and scene.color_grade in grade_map:
+    if not _vrc_applied and scene.color_grade and scene.color_grade in grade_map:
         vf_parts.append(grade_map[scene.color_grade]())
 
     if scene.letterbox_ratio > 0:
