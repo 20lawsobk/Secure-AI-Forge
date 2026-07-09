@@ -570,8 +570,15 @@ def rank_candidates(
     return scored
 
 
-def hook_variants(topic: str, artist: str, brief: GenerationBrief) -> List[str]:
+def hook_variants(
+    topic: str,
+    artist: str,
+    brief: GenerationBrief,
+    weave_active: Optional[bool] = None,
+) -> List[str]:
     """Deterministic stylistic hook candidates for the brief's hook style."""
+    if weave_active is None:
+        weave_active = _weave_active()
     topic = _norm(topic) or "this"
     artist = _norm(artist) or "the artist"
     templates = HOOK_TEMPLATES.get(brief.hook_style, HOOK_TEMPLATES["curiosity"])
@@ -583,21 +590,29 @@ def hook_variants(topic: str, artist: str, brief: GenerationBrief) -> List[str]:
             continue
 
     # Request-specific hooks: reference the actual story/track/themes so the
-    # hook can only belong to THIS release (Option B distinctiveness). These
-    # compete in the same ranking as the stylistic templates.
-    track = _norm(brief.track) or topic
-    themes = [t for t in (brief.themes or []) if _norm(t)][:2]
-    clause = _narrative_clause(brief.narrative, limit=70)
-    if clause:
-        out.append(f"{clause}?")
-        if track:
-            out.append(f"{clause} — and then came {track}.")
-    if themes and artist.lower() != "the artist":
-        out.append(f"Nobody turns {themes[0]} into a record like {artist}.")
+    # hook can only belong to THIS release. This is hand-authored borrowed
+    # weave, so it retires with the corpus (see _weave_active) — once the model
+    # can render the direction itself, these stop competing.
+    if weave_active:
+        track = _norm(brief.track) or topic
+        themes = [t for t in (brief.themes or []) if _norm(t)][:2]
+        clause = _narrative_clause(brief.narrative, limit=70)
+        if clause:
+            out.append(f"{clause}?")
+            if track:
+                out.append(f"{clause} — and then came {track}.")
+        if themes and artist.lower() != "the artist":
+            out.append(f"Nobody turns {themes[0]} into a record like {artist}.")
     return out
 
 
-def best_hook(topic: str, artist: str, agent_hook: str, brief: GenerationBrief) -> Tuple[str, float, int]:
+def best_hook(
+    topic: str,
+    artist: str,
+    agent_hook: str,
+    brief: GenerationBrief,
+    weave_active: Optional[bool] = None,
+) -> Tuple[str, float, int]:
     """Pick the best hook among the agent's hook + deterministic variants.
 
     Returns (hook_text, score, num_candidates_considered).
@@ -605,7 +620,7 @@ def best_hook(topic: str, artist: str, agent_hook: str, brief: GenerationBrief) 
     candidates = []
     if _norm(agent_hook):
         candidates.append(agent_hook)
-    candidates.extend(hook_variants(topic, artist, brief))
+    candidates.extend(hook_variants(topic, artist, brief, weave_active=weave_active))
     # Quality-buffer hooks compete in the same ranking (empty once retired).
     # This pool already blends the harvester's live-chart templates with the
     # research playbook's archetypes (see quality_awareness.scene_phrases).
@@ -735,14 +750,20 @@ def looks_garbled(text: str, whitelist: str = "") -> bool:
     return bad >= 2 or (bad / len(words)) > 0.2
 
 
-def deterministic_candidate(topic: str, artist: str, brief: GenerationBrief) -> str:
+def deterministic_candidate(
+    topic: str,
+    artist: str,
+    brief: GenerationBrief,
+    weave_active: Optional[bool] = None,
+) -> str:
     """A fully deterministic raw-topic caption (no model call).
 
     Used as a quality guardrail: it is ranked alongside model output so that if
     the (undertrained) model is degraded by prompt steering, a clean raw-topic
-    candidate can still win.
+    candidate can still win. ``weave_active`` threads the per-request retirement
+    decision so callers get one consistent gate; when omitted it self-computes.
     """
-    variants = hook_variants(topic, artist, brief)
+    variants = hook_variants(topic, artist, brief, weave_active=weave_active)
     hook = variants[0] if variants else (_norm(topic) or "New drop")
     body = f"{(_norm(topic) or 'New music').capitalize()} — made for {brief.audience}."
     return f"{hook}\n{body}\n{brief.suggested_cta}"
@@ -856,15 +877,75 @@ def _narrative_clause(narrative: str, limit: int = 140) -> str:
     return s[:1].upper() + s[1:]
 
 
+def _weave_active() -> bool:
+    """Whether the hand-authored narrative/theme weave should still compete.
+
+    The weave is borrowed knowledge — a crutch for rendering the caller's
+    direction while the in-house model is undertrained. It retires on the SAME
+    self-sufficiency contract as every other borrowed source (quality-buffer
+    hooks, playbook CTAs): once the own-corpus has graduated, the
+    model/awareness path carries composition unassisted and the weave stops
+    competing. Without this gate the weave would out-score the model forever
+    and silently pin the system to templates, defeating the retirement design.
+    """
+    try:
+        from ai_model.quality_awareness import self_sufficiency
+        return not self_sufficiency()["retired"]
+    except Exception:  # noqa: BLE001 - never let the buffer break composition
+        return True
+
+
+def awareness_from_direction(
+    narrative: str,
+    themes: Optional[List[str]] = None,
+) -> str:
+    """Serialise the caller's creative direction into awareness signal lines the
+    ScriptAgent's parsers recognise, so the awareness *bridge* (model
+    conditioning + awareness-composed fallback) works from the user's own
+    direction — not only external trend data.
+
+    The narrative becomes a top-priority ``[HIGH]`` signal (it leads both the
+    awareness hook and the body's opening clause because parsed signals keep
+    document order); themes become a single ``•`` recommendation bullet.
+
+    Two guards, both load-bearing:
+    * The narrative is run through ``_narrative_clause`` first — the awareness
+      parsers do NO imperative-lead-in stripping, so an unstripped "write a
+      caption about ..." would leak verbatim as a quotable signal.
+    * Themes are emitted as a bullet, NEVER as ``#hashtags`` — the distribution
+      agent harvests awareness hashtags into a persistent, platform-shared pool
+      (``dist:hashtags:*``), so user-specific themes as tags would resurface
+      for unrelated artists.
+    Colons are neutralised because the hook/body parsers ``split(":")[0]`` and
+    would otherwise drop everything after the first colon. Returns "" when
+    there is no usable direction.
+    """
+    lines: List[str] = []
+    clause = _narrative_clause(narrative)
+    if clause:
+        lines.append(f"[HIGH] {clause.replace(':', ' —')}")
+    clean_themes = [t.strip() for t in (themes or []) if _norm(t)][:3]
+    if clean_themes:
+        if len(clean_themes) == 1:
+            phrase = clean_themes[0]
+        else:
+            phrase = ", ".join(clean_themes[:-1]) + " and " + clean_themes[-1]
+        lines.append(f"• Woven around {phrase.replace(':', ' —')}")
+    return "\n".join(lines)
+
+
 def _body_candidates(
     topic: str,
     brief: GenerationBrief,
     genre: Optional[str] = None,
     brand_voice: Optional[str] = None,
     agent_body: str = "",
+    weave_active: Optional[bool] = None,
 ) -> List[str]:
     """Value-line candidates composed FROM the brief (keywords, audience,
     tone, genre) instead of echoing the raw topic back as the body."""
+    if weave_active is None:
+        weave_active = _weave_active()
     topic_n = _norm(topic)
     genre_n = _norm(genre) or "music"
     tone = brief.tone or "authentic"
@@ -889,34 +970,41 @@ def _body_candidates(
     # generic "Every second of this leans into X and Y" line is exactly the
     # placeholder-feel copy this weave exists to replace, so it must not be
     # allowed to out-score genuine, release-specific material.
-    artist = _norm(brief.artist)
-    has_artist = bool(artist) and artist.lower() != "the artist"
-    track = _norm(brief.track) or topic_n
-    narrative = _narrative_clause(brief.narrative)
-    themes = [t for t in (brief.themes or []) if _norm(t)][:3]
+    #
+    # This is hand-authored borrowed weave: it retires with the corpus (see
+    # _weave_active). Once the own-corpus has graduated, the model/awareness
+    # path renders the direction itself and this stops competing — the generic
+    # fallback below remains only as a minimal, low-scoring safety net.
+    has_distinctive = False
+    if weave_active:
+        artist = _norm(brief.artist)
+        has_artist = bool(artist) and artist.lower() != "the artist"
+        track = _norm(brief.track) or topic_n
+        narrative = _narrative_clause(brief.narrative)
+        themes = [t for t in (brief.themes or []) if _norm(t)][:3]
 
-    if narrative:
-        anchor = track or "this one"
-        out.append(f"{narrative} — that's {anchor}.")
-        if has_artist:
-            lowered = narrative[:1].lower() + narrative[1:]
-            out.append(f"{artist} put everything into this: {lowered}.")
-        elif len(themes) >= 2:
-            out.append(f"{narrative}. {themes[0].capitalize()}, {themes[1]}, no filler.")
-    if has_artist and track:
+        if narrative:
+            anchor = track or "this one"
+            out.append(f"{narrative} — that's {anchor}.")
+            if has_artist:
+                lowered = narrative[:1].lower() + narrative[1:]
+                out.append(f"{artist} put everything into this: {lowered}.")
+            elif len(themes) >= 2:
+                out.append(f"{narrative}. {themes[0].capitalize()}, {themes[1]}, no filler.")
+        if has_artist and track:
+            if len(themes) >= 2:
+                out.append(
+                    f"{track} is {artist} at their most {themes[0]} — {themes[1]} in every bar."
+                )
+            else:
+                out.append(f"{track} is the {artist} record you didn't know you needed.")
         if len(themes) >= 2:
             out.append(
-                f"{track} is {artist} at their most {themes[0]} — {themes[1]} in every bar."
+                f"{themes[0].capitalize()} meets {themes[1]} — {tone} {genre_n} for {brief.audience}."
             )
-        else:
-            out.append(f"{track} is the {artist} record you didn't know you needed.")
-    if len(themes) >= 2:
-        out.append(
-            f"{themes[0].capitalize()} meets {themes[1]} — {tone} {genre_n} for {brief.audience}."
-        )
 
-    has_distinctive = bool(out) and (bool(narrative) or (has_artist and bool(track))
-                                     or len(themes) >= 2)
+        has_distinctive = bool(out) and (bool(narrative) or (has_artist and bool(track))
+                                         or len(themes) >= 2)
 
     if not has_distinctive:
         # Fallback: generic brief-reading lines for sparse requests (no
@@ -980,10 +1068,15 @@ def compose_caption(
     hook/body/CTA combination is scored as a full caption (structure-aware
     via score_candidate) and the best one wins. Deterministic.
     """
-    hook, hook_score, hooks_considered = best_hook(topic, artist, agent_hook, brief)
+    # Compute the retirement gate ONCE per caption and thread it down, so the
+    # weave's self-sufficiency probe doesn't hit the corpus store repeatedly.
+    weave_active = _weave_active()
+    hook, hook_score, hooks_considered = best_hook(topic, artist, agent_hook, brief,
+                                                   weave_active=weave_active)
 
     bodies = _body_candidates(topic, brief, genre=genre,
-                              brand_voice=brand_voice, agent_body=agent_body)
+                              brand_voice=brand_voice, agent_body=agent_body,
+                              weave_active=weave_active)
 
     # The narrative clause can surface in both the hook and a body candidate;
     # drop bodies that merely restate the chosen hook so the two don't echo.

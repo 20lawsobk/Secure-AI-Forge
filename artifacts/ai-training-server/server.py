@@ -4613,7 +4613,7 @@ def _job_update(job_id: str, updates: dict) -> None:
 
 # -- Request models ------------------------------------------------------------
 
-class ApiGenerateContentRequest(BaseModel):
+class ApiGenerateContentRequest(_AwarenessMixin):
     platform: str
     topic: str
     tone: str
@@ -4862,27 +4862,44 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
                 f"Crafted for {req.target_audience or brief.audience}.")
         cta  = brief.suggested_cta
 
+        # ── Awareness bridge input ─────────────────────────────────────────
+        # The awareness channel is the designed bridge spanning the gap between
+        # external generative capability and the (still-training) in-house
+        # model: it feeds BOTH the model's conditioning prefix AND, on
+        # garble/failure, the awareness-composed fallback. Two sources are
+        # merged, user direction FIRST so it outranks generic trend context:
+        #   1. the caller's creative direction for THIS post (instruction /
+        #      extra_context / themes), serialised into signal lines by
+        #      `awareness_from_direction` — the narrative is lead-in-stripped
+        #      first (the parser strips nothing itself) and themes go in as a
+        #      bullet, never as #hashtags (the distribution agent harvests
+        #      awareness hashtags into a persistent, platform-shared pool);
+        #   2. genuine external awareness (client-supplied live trend data),
+        #      which only reaches this handler now that the request model
+        #      extends _AwarenessMixin — before that it was silently dropped,
+        #      so this path never actually fed the bridge.
+        # `brief.directives` are deliberately excluded: they are internal
+        # prompt-engineering instructions the parser would quote verbatim.
+        _direction = " ".join(filter(None, [req.instruction, req.extra_context]))
+        _merged_awareness = "\n".join(p for p in [
+            ri.awareness_from_direction(_direction, req.content_themes),
+            (getattr(req, "awareness", "") or "").strip(),
+        ] if p)
+
         if _model_ready and _script_agent:
             from ai_model.agents.script_agent import ScriptRequest
             from ai_model.agents.distribution_agent import DistributionRequest
 
             def _infer():
-                # `idea` is templated raw into hook/body text (e.g. "Playlist
-                # editors are watching — here's {idea}") — it must stay a
-                # clean topic string. The richer intent/audience/theme
-                # context from `brief.augmented_idea` is routed through
-                # `awareness` instead, not concatenated into `idea` where it
-                # would corrupt the visible caption (mirrors the video path).
-                # NOTE: `brief.directives` are internal prompt-engineering
-                # instructions (e.g. "Optimise for: X", "Open with a hook")
-                # meant to steer generation, not real-world context — the
-                # script agent's awareness parser treats any bulleted line
-                # as a quotable signal, so feeding directives in here would
-                # leak them verbatim into the caption. Only genuine external
-                # awareness (client-supplied trend data) belongs here.
+                # `idea` stays a clean topic string — it is templated raw into
+                # hook/body text, so richer context must NOT be concatenated
+                # here. All of it flows through `_merged_awareness` (built
+                # above): the user's own creative direction plus external trend
+                # data, both driving the model's conditioning and the
+                # awareness-composed fallback. This mirrors the video path.
                 _sr = _script_agent.run(ScriptRequest(
                     idea=topic, platform=platform, goal=goal, tone=brief.tone,
-                    awareness=getattr(req, "awareness", "") or "",
+                    awareness=_merged_awareness,
                 ))
                 _distribution_agent.run(DistributionRequest(script=f"{_sr.hook}\n{_sr.body}\n{_sr.cta}", platform=platform, goal=goal))
                 return _sr
