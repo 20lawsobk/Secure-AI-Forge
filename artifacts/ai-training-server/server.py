@@ -4776,6 +4776,23 @@ class ApiGenerateAudioRequest(_AwarenessMixin):
     instruction: Optional[str] = None
     extra_context: Optional[str] = None
     content_themes: Optional[List[str]] = None
+    # ── Producer-grade controls (what real artists/producers ask for) ─────────
+    # Exact musical targets: when set, the rendered clip is pitch-shifted /
+    # time-stretched to actually HIT these, not just pick the nearest sample.
+    target_bpm: Optional[float] = None
+    target_key: Optional[str] = None
+    # Reproducibility: same seed + same request → same result (fixes the
+    # "great result I can't reproduce" complaint).
+    seed: Optional[int] = None
+    # Studio export: "wav" (lossless) or "mp3"; sample rate / bit depth; and an
+    # EBU-R128 loudness target in LUFS (or a preset name: streaming/club/…).
+    format: Optional[str] = None
+    sample_rate: Optional[int] = None
+    bit_depth: Optional[int] = None
+    loudness_lufs: Optional[float] = None
+    loudness_preset: Optional[str] = None
+    # Remix-ready stems (drums / bass / melody), time-aligned WAVs.
+    stems: Optional[bool] = False
 
 
 class SceneOverride(BaseModel):
@@ -5820,20 +5837,34 @@ def _render_audio_clip(job_id: str, bpm: float, key: str,
 
 
 def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
-                               duration_sec: float) -> str:
+                               duration_sec: float,
+                               opts: Optional[dict] = None) -> dict:
     """Render an audio clip from REAL dataset samples stored in pdim.
 
     Selects the stored real-music sample whose key/tempo best matches the
-    requested ``(key, bpm)``, then loops/trims it to the requested duration and
-    re-encodes to MP3. Raises explicitly if no real audio dataset is available
-    so the job reports an error rather than silently synthesizing a fallback.
+    requested ``(key, bpm)``, then applies the requested producer controls:
 
-    Returns the served relative URL of the produced MP3.
+    * **Exact key & tempo** — pitch-shift + time-stretch the source so the clip
+      actually lands on ``target_key`` / ``target_bpm`` (rubberband), instead of
+      merely picking the nearest sample.
+    * **Loop / trim** to the requested duration with fades.
+    * **ARC spectral cleanup** (opt-in via env, unchanged).
+    * **Master & export** — optional EBU-R128 loudness target, and WAV/MP3 at a
+      chosen sample-rate / bit-depth.
+    * **Stems** — optional drums/bass/melody split for remixing.
+
+    Raises explicitly if no real audio dataset is available so the job reports an
+    error rather than silently synthesizing a fallback.
+
+    Returns a dict describing the produced asset(s): ``url``, applied
+    ``bpm``/``key``, ``format``, ``loudness_lufs``, and ``stems`` (url map).
     """
     import base64 as _b64
     from storage_client import get_storage
     from ai_model.video.ffmpeg_util import run_ffmpeg
+    from ai_model.audio import producer_tools as _pt
 
+    opts = opts or {}
     storage = get_storage()
     meta = storage.get("mb:dataset:audio:meta")
     if not meta or int(meta.get("num_chunks", 0)) <= 0:
@@ -5847,12 +5878,16 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
         {"idx": i} for i in range(int(meta["num_chunks"]))
     ]
 
+    # ── Producer targets: exact key/BPM the output must LAND on ───────────────
+    target_bpm = float(opts.get("target_bpm") or bpm or 0.0)
+    target_key = opts.get("target_key") or key
+
     # ── Select best match: same key first, then closest tempo ─────────────
     def _norm_key(k: Any) -> str:
         return str(k or "").strip().lower()
 
-    want_key = _norm_key(key)
-    want_bpm = float(bpm or 0.0)
+    want_key = _norm_key(target_key)
+    want_bpm = float(target_bpm or 0.0)
 
     def _bpm_dist(entry: dict) -> float:
         b = float(entry.get("bpm") or 0.0)
@@ -5862,6 +5897,8 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
     pool = key_matches or index
     best = min(pool, key=lambda e: (_bpm_dist(e), int(e.get("idx", 0))))
     best_idx = int(best.get("idx", 0))
+    src_bpm = float(best.get("bpm") or 0.0)
+    src_key = best.get("key")
 
     sample = storage.get(f"mb:dataset:audio:chunk:{best_idx}")
     if not sample or not sample.get("b64"):
@@ -5871,53 +5908,134 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
 
     raw = _b64.b64decode(sample["b64"])
     src_path = _UPLOADS_PATH / f"audio_src_{job_id}.mp3"
-    mp3_path = _UPLOADS_PATH / f"audio_{job_id}.mp3"
+    src_wav = _UPLOADS_PATH / f"audio_srcwav_{job_id}.wav"
+    tuned_wav = _UPLOADS_PATH / f"audio_tuned_{job_id}.wav"
+    looped_wav = _UPLOADS_PATH / f"audio_loop_{job_id}.wav"
     src_path.write_bytes(raw)
 
-    fade_out_start = max(0.0, float(duration_sec) - 0.3)
+    # Export target format (default MP3 for quick sharing; WAV for the studio).
+    fmt = (opts.get("format") or "mp3").lower()
+    if fmt not in ("mp3", "wav"):
+        fmt = "mp3"
+    sample_rate = int(opts.get("sample_rate") or 44100)
+    bit_depth = int(opts.get("bit_depth") or 24)
+    loudness_lufs = opts.get("loudness_lufs")
+    if loudness_lufs is not None:
+        loudness_lufs = float(loudness_lufs)
+    out_ext = "wav" if fmt == "wav" else "mp3"
+    out_path = _UPLOADS_PATH / f"audio_{job_id}.{out_ext}"
+
+    applied_bpm = float(target_bpm or src_bpm or 0.0)
+    applied_key = target_key or src_key
+    _tmp = [src_path, src_wav, tuned_wav, looped_wav]
     try:
-        result = run_ffmpeg(
-            ["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(src_path),
+        # 1) Decode source → mono WAV (dataset samples are mono 44.1 kHz).
+        r0 = run_ffmpeg(["ffmpeg", "-y", "-i", str(src_path), "-ac", "1",
+                         "-ar", str(sample_rate), str(src_wav)], timeout=60)
+        if r0.returncode != 0 or not src_wav.exists():
+            raise RuntimeError(f"source decode failed rc={r0.returncode}")
+
+        # 2) Retune + retime so the clip HITS the requested key & BPM.
+        stage_in = src_wav
+        semis = _pt.nearest_semitones(src_key, target_key)
+        tempo_ratio = (target_bpm / src_bpm) if (src_bpm > 0 and target_bpm > 0) else 1.0
+        try:
+            if _pt.retune_retime(src_wav, tuned_wav, semitones=semis,
+                                 tempo_ratio=tempo_ratio):
+                stage_in = tuned_wav
+                # Report the level we actually landed on after clamping.
+                _clamped = max(0.5, min(2.0, tempo_ratio))
+                if src_bpm > 0:
+                    applied_bpm = round(src_bpm * _clamped, 1)
+                print(f"[Producer] retune/retime audio_{job_id}: "
+                      f"{semis:+d} semitones, tempo x{_clamped:.3f} "
+                      f"({src_key}@{src_bpm}→{applied_key}@{applied_bpm})",
+                      flush=True)
+        except Exception as _rr_err:
+            # Honest fallback: keep the untransformed source and report the
+            # source's own key/BPM rather than a level we did not achieve.
+            applied_bpm, applied_key = src_bpm, src_key
+            print(f"[Producer] retune/retime skipped (serving source key/bpm): "
+                  f"{_rr_err}", flush=True)
+
+        # 3) Loop / trim to the requested duration with fades.
+        fade_out_start = max(0.0, float(duration_sec) - 0.3)
+        r1 = run_ffmpeg(
+            ["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(stage_in),
              "-t", f"{float(duration_sec):.2f}",
              "-af", (f"afade=t=in:st=0:d=0.05,"
                      f"afade=t=out:st={fade_out_start:.2f}:d=0.3"),
-             "-codec:a", "libmp3lame", "-q:a", "4", str(mp3_path)],
+             str(looped_wav)],
             timeout=60,
         )
-        if result.returncode != 0 or not mp3_path.exists():
+        if r1.returncode != 0 or not looped_wav.exists():
             raise RuntimeError(
-                f"ffmpeg assemble failed (rc={result.returncode}): "
-                f"{result.stderr[-300:]}"
+                f"ffmpeg assemble failed (rc={r1.returncode}): "
+                f"{r1.stderr[-300:]}"
             )
+
+        # 4) RTA-1 ARC spectral restoration (opt-in, env-gated) ───────────────
+        if os.environ.get("RTA_AUDIO_SPECTRAL") == "1":
+            try:
+                _arc_spectral_clean_file(looped_wav)
+                print(f"[RTA] ARC spectral clean applied to audio_{job_id}",
+                      flush=True)
+            except Exception as _arc_err:
+                print(f"[RTA] ARC spectral clean skipped (serving base clip): "
+                      f"{_arc_err}", flush=True)
+
+        # 5) Optional stems (drums / bass / melody) BEFORE mastering, so each
+        #    stem is a clean isolation of the produced clip.
+        stem_urls: dict = {}
+        if opts.get("stems"):
+            try:
+                stems = _pt.separate_stems(
+                    looped_wav, _UPLOADS_PATH, f"audio_{job_id}",
+                    bit_depth=bit_depth)
+                stem_urls = {name: f"/uploads/{p.name}"
+                             for name, p in stems.items()}
+                print(f"[Producer] stems for audio_{job_id}: "
+                      f"{', '.join(stem_urls)}", flush=True)
+            except Exception as _st_err:
+                print(f"[Producer] stems skipped: {_st_err}", flush=True)
+
+        # 6) Master (optional LUFS) + export to the requested format.
+        _pt.master_export(looped_wav, out_path, fmt=fmt,
+                          sample_rate=sample_rate, bit_depth=bit_depth,
+                          loudness_lufs=loudness_lufs)
     finally:
-        try:
-            src_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        for _p in _tmp:
+            try:
+                _p.unlink(missing_ok=True)
+            except OSError:
+                pass
 
-    # ── RTA-1 ARC spectral restoration (opt-in) ──────────────────────────────
-    # Runs an STFT noise-gate (DFT forward/inverse as GEMMs on the self-contained
-    # Digital GPU) over the rendered clip before serving. Opt-in via env because
-    # denoising already-clean dataset music is a creative choice, not a default.
-    if os.environ.get("RTA_AUDIO_SPECTRAL") == "1":
-        try:
-            _arc_spectral_clean_file(mp3_path)
-            print(f"[RTA] ARC spectral clean applied to audio_{job_id}.mp3", flush=True)
-        except Exception as _arc_err:
-            # Honest fallback: spectral failure is logged and the un-cleaned
-            # base clip (already on disk) is still served — never a broken file.
-            print(f"[RTA] ARC spectral clean skipped (serving base clip): {_arc_err}", flush=True)
-
-    return f"/uploads/audio_{job_id}.mp3"
+    return {
+        "url": f"/uploads/{out_path.name}",
+        "bpm": applied_bpm,
+        "key": applied_key,
+        "format": fmt,
+        "sample_rate": sample_rate,
+        "bit_depth": bit_depth if fmt == "wav" else None,
+        "loudness_lufs": loudness_lufs,
+        "stems": stem_urls,
+        "source_sample": {"idx": best_idx, "bpm": src_bpm, "key": src_key},
+    }
 
 
-def _arc_spectral_clean_file(mp3_path) -> None:
-    """Decode → RTA ARC spectral denoise → re-encode the given MP3 in place."""
+def _arc_spectral_clean_file(audio_path) -> None:
+    """Decode → RTA ARC spectral denoise → re-encode the file in place.
+
+    Format-preserving: a ``.wav`` input is written back as PCM WAV, anything
+    else (``.mp3``) is re-encoded with libmp3lame.
+    """
     import wave
     import numpy as _np
     from ai_model.video.ffmpeg_util import run_ffmpeg
     from ai_model import rta as _rta
 
+    mp3_path = audio_path
+    is_wav = str(audio_path).lower().endswith(".wav")
     wav_in = mp3_path.with_suffix(".arc_in.wav")
     wav_out = mp3_path.with_suffix(".arc_out.wav")
     try:
@@ -5937,8 +6055,12 @@ def _arc_spectral_clean_file(mp3_path) -> None:
             wf.setsampwidth(2)
             wf.setframerate(sr)
             wf.writeframes(out16.tobytes())
-        r2 = run_ffmpeg(["ffmpeg", "-y", "-i", str(wav_out), "-codec:a",
-                         "libmp3lame", "-q:a", "4", str(mp3_path)], timeout=60)
+        if is_wav:
+            r2 = run_ffmpeg(["ffmpeg", "-y", "-i", str(wav_out), "-codec:a",
+                             "pcm_s16le", str(mp3_path)], timeout=60)
+        else:
+            r2 = run_ffmpeg(["ffmpeg", "-y", "-i", str(wav_out), "-codec:a",
+                             "libmp3lame", "-q:a", "4", str(mp3_path)], timeout=60)
         if r2.returncode != 0:
             raise RuntimeError(f"re-encode failed rc={r2.returncode}")
     finally:
@@ -6005,6 +6127,10 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         import numpy as _np2
         _t.sleep(2)
         fp  = req.style_fingerprint
+        # Reproducibility: an explicit seed makes BPM/key derivation (and thus
+        # the whole render) deterministic, fixing the classic "great result I
+        # can't reproduce" complaint.
+        _seed_base = req.seed if req.seed is not None else abs(hash(audio_concept or job_id)) % (2**31)
         # BPM derived from style fingerprint (deterministic if provided, else seeded)
         if fp and len(fp) >= 4:
             bpm = round(float(_np2.mean(fp[:4]) * 100 + 80), 1)
@@ -6018,7 +6144,7 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
                       "medium": (100.0, 116.0), "steady": (84.0, 98.0),
                       "slow": (76.0, 90.0)}
             _lo, _hi = _bands.get((brief.tempo or "").lower(), (96.0, 120.0))
-            rng = _np2.random.default_rng(abs(hash(audio_concept or job_id)) % (2**31))
+            rng = _np2.random.default_rng(_seed_base)
             bpm = round(float(rng.uniform(_lo, _hi)), 1)
         # Key derived from fingerprint tail
         keys_list = ["C major", "A minor", "G major", "E minor", "D major",
@@ -6026,28 +6152,68 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         if fp and len(fp) >= 8:
             key = keys_list[int(fp[7] * 10) % len(keys_list)]
         else:
-            rng2 = _np2.random.default_rng(abs(hash(bpm)) % (2**31))
+            rng2 = _np2.random.default_rng((_seed_base + 7919) % (2**31))
             key  = keys_list[int(rng2.integers(0, len(keys_list)))]
-        # Render an actual in-house MP3 (key/tempo-conditioned synthesis) and
-        # serve it; only mark "done" once the file exists on disk.
+        # Producer targets override the derived values (exact key/BPM the output
+        # must LAND on, via pitch-shift + time-stretch in the render).
+        target_bpm = float(req.target_bpm) if req.target_bpm else bpm
+        # Clamp to a musically sane range so bad input can't produce misleading
+        # metadata or an avoidable ffmpeg failure (retune ratio is clamped too).
+        target_bpm = max(40.0, min(300.0, float(target_bpm)))
+        target_key = req.target_key or key
+        # Validate export params against what ffmpeg/PCM actually support; fall
+        # back to safe studio defaults rather than failing the whole render.
+        _fmt = (req.format or "mp3").lower()
+        _fmt = _fmt if _fmt in ("mp3", "wav") else "mp3"
+        _srate = int(req.sample_rate) if req.sample_rate else 44100
+        if _srate not in (22050, 32000, 44100, 48000, 88200, 96000):
+            _srate = 44100
+        _bits = int(req.bit_depth) if req.bit_depth else 24
+        if _bits not in (16, 24, 32):
+            _bits = 24
+        # Resolve a LUFS loudness preset name into a numeric target if given.
+        from ai_model.audio import producer_tools as _pt_presets
+        _lufs = req.loudness_lufs
+        if _lufs is None and req.loudness_preset:
+            _lufs = _pt_presets.LUFS_PRESETS.get(str(req.loudness_preset).lower())
+        if _lufs is not None:
+            _lufs = max(-40.0, min(0.0, float(_lufs)))
+        opts = {
+            "target_bpm":    target_bpm,
+            "target_key":    target_key,
+            "format":        _fmt,
+            "sample_rate":   _srate,
+            "bit_depth":     _bits,
+            "loudness_lufs": _lufs,
+            "stems":         bool(req.stems),
+        }
+        # Render an actual in-house clip (key/tempo-conditioned) and serve it;
+        # only mark "done" once the file exists on disk.
         duration_sec = max(4.0, min(float(req.duration or 30), 60.0))
         try:
-            audio_url = _render_audio_from_dataset(job_id, bpm, key, duration_sec)
+            render = _render_audio_from_dataset(job_id, target_bpm, target_key,
+                                                duration_sec, opts)
         except Exception as exc:  # explicit failure — never claim a missing file
             _job_update(job_id, {
                 "status": "error",
                 "url":    None,
-                "bpm":    bpm,
-                "key":    key,
+                "bpm":    target_bpm,
+                "key":    target_key,
                 "error":  f"audio render failed: {exc}",
             })
             return
         _job_update(job_id, {
             "status":        "done",
-            "url":           audio_url,
+            "url":           render["url"],
             "duration":      int(duration_sec),
-            "bpm":           bpm,
-            "key":           key,
+            "bpm":           render.get("bpm", target_bpm),
+            "key":           render.get("key", target_key),
+            "format":        render.get("format"),
+            "sample_rate":   render.get("sample_rate"),
+            "bit_depth":     render.get("bit_depth"),
+            "loudness_lufs": render.get("loudness_lufs"),
+            "stems":         render.get("stems") or {},
+            "seed":          _seed_base,
             "concept":       audio_concept,
             "style_hook":    style_hook,
             "source":        model_source,
@@ -6541,6 +6707,12 @@ async def api_poll_audio_job(job_id: str, _key=Depends(require_scope("read"))):
             "duration":  job["duration"],
             "bpm":       job["bpm"],
             "key":       job["key"],
+            "format":        job.get("format"),
+            "sample_rate":   job.get("sample_rate"),
+            "bit_depth":     job.get("bit_depth"),
+            "loudness_lufs": job.get("loudness_lufs"),
+            "stems":         job.get("stems") or {},
+            "seed":          job.get("seed"),
             "concept":   job.get("concept"),
             "style_hook": job.get("style_hook"),
             "source":    job.get("source", "heuristic"),
