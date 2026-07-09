@@ -71,6 +71,9 @@ class ImageRequest:
     # same request always yields identical pixels — used by the retrieval pipeline
     # for idempotent anchor/seed assets. Default None keeps legacy random behavior.
     seed: Optional[int] = None
+    # Export container: "png" (default, lossless), "jpg"/"jpeg", or "webp".
+    # Unknown values fall back to PNG. Drives both the file extension and encoder.
+    img_format: str = "png"
     # Short, display-only text drawn as the on-image headline. `prompt` is the
     # (potentially long, brief-laden) generation/style description used for
     # meta/logging — it is never drawn onto the canvas directly. When empty,
@@ -214,7 +217,11 @@ def _key_lock(key: str) -> threading.Lock:
 
 
 def _valid_png(path: Path) -> bool:
-    """True only if ``path`` is an existing, non-empty, decodable PNG. Never raises."""
+    """True only if ``path`` is an existing, non-empty, decodable image. Never raises.
+
+    Named for its original PNG-only use; now format-agnostic (PIL sniffs the
+    encoding), so it also validates seeded JPEG/WebP reuse.
+    """
     try:
         if not path.exists() or path.stat().st_size <= 0:
             return False
@@ -226,6 +233,22 @@ def _valid_png(path: Path) -> bool:
         return False
 
 
+# Map a requested export format to (PIL format, file extension, save kwargs).
+# JPEG/WebP are the two other formats social platforms actually accept; anything
+# unknown falls back to PNG so a bad `format` value can never fail a render.
+_IMG_FORMATS: dict[str, tuple] = {
+    "png":  ("PNG",  "png",  {"optimize": True}),
+    "jpg":  ("JPEG", "jpg",  {"quality": 92, "optimize": True}),
+    "jpeg": ("JPEG", "jpg",  {"quality": 92, "optimize": True}),
+    "webp": ("WEBP", "webp", {"quality": 92, "method": 4}),
+}
+
+
+def _img_format_spec(fmt: Optional[str]) -> tuple:
+    """Resolve a format string to (pil_format, ext, save_kwargs); defaults to PNG."""
+    return _IMG_FORMATS.get((fmt or "png").lower().strip(), _IMG_FORMATS["png"])
+
+
 class ImageEngine:
     def __init__(self):
         _UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
@@ -233,11 +256,13 @@ class ImageEngine:
     @staticmethod
     def _seeded_fname(req: "ImageRequest") -> str:
         """Deterministic filename for a seeded request — identical req → identical file."""
+        _pil_fmt, _ext, _ = _img_format_spec(req.img_format)
         key = "|".join([
             req.prompt, req.color_scheme, req.layout, req.platform,
             req.artist_name, req.intent, ",".join(req.style_tags), str(req.seed),
+            _ext,
         ])
-        return f"seed_{hashlib.blake2b(key.encode(), digest_size=12).hexdigest()}.png"
+        return f"seed_{hashlib.blake2b(key.encode(), digest_size=12).hexdigest()}.{_ext}"
 
     def render(self, req: ImageRequest) -> ImageResult:
         if not _PIL_OK:
@@ -262,7 +287,8 @@ class ImageEngine:
                 if not _valid_png(out_path):
                     self._render_to_path(req, w, h, out_path)
         else:
-            fname = f"img_{uuid.uuid4().hex[:16]}.png"
+            _pil_fmt, _ext, _ = _img_format_spec(req.img_format)
+            fname = f"img_{uuid.uuid4().hex[:16]}.{_ext}"
             out_path = _UPLOADS_DIR / fname
             self._render_to_path(req, w, h, out_path)
 
@@ -394,9 +420,10 @@ class ImageEngine:
 
         # ── Save (atomic: write to a temp sibling, then rename into place so a
         # concurrent reader or a crash never observes a partial/zero-byte file) ──
+        pil_fmt, _ext, save_kwargs = _img_format_spec(req.img_format)
         tmp_path = out_path.with_name(f".{out_path.stem}.{uuid.uuid4().hex[:8]}.tmp")
         try:
-            img.save(str(tmp_path), "PNG", optimize=True)
+            img.save(str(tmp_path), pil_fmt, **save_kwargs)
             os.replace(str(tmp_path), str(out_path))
         except Exception:
             try:

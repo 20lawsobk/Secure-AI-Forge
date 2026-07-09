@@ -1073,6 +1073,7 @@ def compose_caption(
     agent_hook: str = "",
     agent_body: str = "",
     agent_cta: str = "",
+    variants: int = 1,
 ) -> Dict[str, Any]:
     """Compose the best caption FROM the brief's intelligence.
 
@@ -1126,13 +1127,33 @@ def compose_caption(
 
     ctas = _cta_candidates(topic, brief, agent_cta=agent_cta)
 
-    best: Tuple[str, str, str, float] = ("", "", "", -1.0)
+    # Score every complete hook/body/CTA combination, keep them all ranked.
+    scored: List[Tuple[str, str, str, float]] = []
     for body in bodies:
         for cta in ctas:
             caption = f"{hook}\n\n{body}\n\n{cta}"
             s = score_candidate(caption, brief)
-            if s > best[3]:
-                best = (caption, body, cta, s)
+            scored.append((caption, body, cta, s))
+    # Deterministic ordering: score desc, then caption text as a stable tiebreak.
+    scored.sort(key=lambda t: (-t[3], t[0]))
+    best: Tuple[str, str, str, float] = scored[0] if scored else ("", "", "", -1.0)
+
+    # Build up to `variants` distinct alternatives (by body text) for callers who
+    # want A/B/C options. variant[0] is always the winner. Deterministic.
+    variant_list: List[Dict[str, Any]] = []
+    seen_bodies: set = set()
+    want = max(1, int(variants or 1))
+    for cap, body, cta, s in scored:
+        skel = _skel(body)
+        if skel in seen_bodies:
+            continue
+        seen_bodies.add(skel)
+        variant_list.append({
+            "caption": cap, "hook": hook, "body": body, "cta": cta,
+            "score": round(s, 2), "char_count": len(cap),
+        })
+        if len(variant_list) >= want:
+            break
 
     return {
         "caption": best[0],
@@ -1144,4 +1165,5 @@ def compose_caption(
         "hooks_considered": hooks_considered,
         "bodies_considered": len(bodies),
         "ctas_considered": len(ctas),
+        "variants": variant_list,
     }

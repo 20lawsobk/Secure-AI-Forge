@@ -4663,6 +4663,17 @@ class ApiGenerateContentRequest(_AwarenessMixin):
     # so it is captured instead of silently dropped, then woven into copy.
     instruction: Optional[str] = None
     extra_context: Optional[str] = None
+    # ── Creator controls (research-driven, additive) ───────────────────────────
+    # variants: return N ranked caption alternatives (A/B/C) instead of just the
+    #   winner. The composer already scores many candidates internally; this
+    #   surfaces the top distinct ones. Deterministic (composition has no RNG).
+    variants: Optional[int] = None
+    # max_chars: hard platform character budget — the caption is trimmed on a
+    #   word boundary to fit and char_count is always reported.
+    max_chars: Optional[int] = None
+    # Toggle the trailing hashtag block / CTA line off for clean-copy platforms.
+    include_hashtags: Optional[bool] = True
+    include_cta: Optional[bool] = True
 
 
 class ApiGenerateTextRequest(_AwarenessMixin):
@@ -4878,6 +4889,20 @@ def _api_hashtags(topic: str, genre: Optional[str], platform: str) -> List[str]:
     return list(dict.fromkeys(tags))[:6]
 
 
+def _trim_to_chars(text: str, limit: int) -> str:
+    """Trim text to at most `limit` chars on a word boundary (keeps whole words).
+
+    Falls back to a hard cut only when the very first word already exceeds the
+    budget. Never raises; used to enforce platform character caps on captions.
+    """
+    if limit <= 0 or len(text) <= limit:
+        return text
+    cut = text[:limit]
+    sp = cut.rfind(" ")
+    trimmed = cut[:sp] if sp > 0 else cut
+    return trimmed.rstrip()
+
+
 def _api_model_state(domain: str) -> dict:
     from datetime import datetime as _dt
     return {
@@ -4984,23 +5009,50 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
         # build the body/CTA instead of echoing the raw topic back, ranks
         # the agent's parts against brief-composed candidates, and scores
         # every complete caption (structure-aware) to pick the winner.
+        _variants_want = max(1, int(req.variants)) if req.variants else 1
         composed = ri.compose_caption(
             topic, artist, brief,
             genre=req.genre, brand_voice=req.brand_voice,
             agent_hook=hook, agent_body=body, agent_cta=cta,
+            variants=_variants_want,
         )
-        caption = composed["caption"]
+
+        # ── Creator controls: CTA toggle → rebuild caption without the CTA line;
+        # char budget → trim on a word boundary. Applied to every variant so the
+        # winner and the alternatives stay consistent. ──────────────────────────
+        def _apply_controls(v: dict) -> dict:
+            cap = v["caption"]
+            if req.include_cta is False:
+                cap = f"{v['hook']}\n\n{v['body']}".strip()
+            if req.max_chars and len(cap) > int(req.max_chars):
+                cap = _trim_to_chars(cap, int(req.max_chars))
+            return {**v, "caption": cap, "char_count": len(cap)}
+
+        variant_objs = [_apply_controls(v) for v in composed.get("variants", [])]
+        # Guarantee at least one variant even if the composer returned none.
+        if not variant_objs:
+            variant_objs = [_apply_controls({
+                "caption": composed["caption"], "hook": composed["hook"],
+                "body": composed["body"], "cta": composed["cta"],
+                "score": composed["caption_score"],
+            })]
+        caption = variant_objs[0]["caption"]
 
         hashtags = (req.preferred_hashtags or []) + _api_hashtags(topic, req.genre, req.platform)
         hashtag_cap = min(10, max(brief.hashtags_target, len(req.preferred_hashtags or [])))
+        if req.include_hashtags is False:
+            hashtags = []
+            hashtag_cap = 0
         quality  = composed["caption_score"]
         score    = _api_heuristic_score(caption, req.platform)
         return {
             "caption":    caption,
-            "hook":       composed["hook"],
-            "body":       composed["body"],
-            "cta":        composed["cta"],
-            "hashtags":   list(dict.fromkeys(hashtags))[:hashtag_cap],
+            "char_count": len(caption),
+            "variants":   variant_objs,
+            "hook":       variant_objs[0]["hook"],
+            "body":       variant_objs[0]["body"],
+            "cta":        variant_objs[0]["cta"] if req.include_cta is not False else "",
+            "hashtags":   list(dict.fromkeys(hashtags))[:hashtag_cap] if hashtag_cap else [],
             "confidence": round(max(quality, score) / 100, 3),
             "quality_score": quality,
             "intelligence": {
