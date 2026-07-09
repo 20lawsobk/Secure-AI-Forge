@@ -4630,6 +4630,10 @@ class ApiGenerateContentRequest(BaseModel):
     artist: Optional[str] = None
     goal: Optional[str] = None
     title: Optional[str] = None
+    # Freeform creative directive for THIS post (the narrative brief). Declared
+    # so it is captured instead of silently dropped, then woven into copy.
+    instruction: Optional[str] = None
+    extra_context: Optional[str] = None
 
 
 class ApiGenerateTextRequest(BaseModel):
@@ -4840,10 +4844,16 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
     def _build(_request=None):
         # ── Request intelligence: analyse intent, audience & strategy up front ──
         from ai_model import request_intelligence as ri
+        _narrative = " ".join(
+            filter(None, [req.instruction, req.extra_context, req.artist_bio])
+        )
         brief = ri.build_brief(
             modality="content", platform=platform, topic=topic, goal=goal,
             tone=req.tone, genre=req.genre, artist=artist,
             extra=" ".join(filter(None, [req.brand_voice, req.target_audience])),
+            narrative=_narrative,
+            track=req.title or topic,
+            themes=req.content_themes,
         )
 
         hook = f"🎵 {artist} just dropped something you need to hear — {topic}"

@@ -20,3 +20,9 @@ Only ONE process actually loads the model and runs `_init_storage` (workers + Co
 
 # Auth for endpoint verification
 Protected Python endpoints accept an `X-Api-Key` header. Any key in `_ENV_BYPASS_KEYS` (the env admin keys) authenticates with full scopes — convenient for curl checks. NEVER echo the key value into shell output/logs; pass it via a shell variable only.
+
+# Two traps that make edits look "not live" even after a restart
+**1. Lock ownership hops, so `WorkflowsRestart` can miss the live process entirely.** Restarting a workflow only reloads server.py if that workflow currently OWNS the running process. Ownership ping-pongs between the two api-server workflows across restarts, so you can restart the "right" workflow twice and still be talking to the old process. Symptom: a fresh-looking result mixed with stale behavior (e.g. new `request_intelligence.py` output but old `server.py` handler behavior — because the live process predates your edit).
+- Reliable fix: `ps -eo pid,ppid,etimes,cmd | rg 'python3 .*server\.py'`, confirm `etimes` is large (old), then `kill -TERM <uv-pid> <python-pid>` directly. A monitor respawns it fresh from disk within seconds (`etimes` resets). This beats guessing which workflow owns it.
+
+**2. The content dedup cache is disk-backed and SURVIVES process restarts.** `/api/generate/content` (and other gen paths) go through the PDIM dedup cache keyed on request fields. An identical payload you ran under the OLD code returns the OLD cached caption even after a correct reload — making a real fix look broken. Always verify code changes with a NOVEL topic string (e.g. append a random token) to bust the cache; never re-use a payload you sent pre-change.

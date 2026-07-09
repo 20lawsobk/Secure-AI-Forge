@@ -210,6 +210,12 @@ class GenerationBrief:
     temperature: float
     directives: List[str]
     augmented_idea: str
+    # Distinctive-copy inputs: the freeform narrative directive plus the
+    # artist-specific facts used to make copy unmistakably about THIS release.
+    narrative: str = ""
+    artist: str = ""
+    track: str = ""
+    themes: List[str] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -371,6 +377,9 @@ def build_brief(
     genre: Optional[str] = None,
     artist: Optional[str] = None,
     extra: Optional[str] = None,
+    narrative: Optional[str] = None,
+    track: Optional[str] = None,
+    themes: Optional[List[str]] = None,
 ) -> GenerationBrief:
     """Analyse a request and produce a structured GenerationBrief.
 
@@ -379,10 +388,19 @@ def build_brief(
     platform = _norm(platform) or "general"
     topic = _norm(topic)
     extra_text = _norm(extra)
+    narrative_text = _norm(narrative)
+    # Strip the imperative lead-in ("write a caption about …") BEFORE mining
+    # keywords, or instruction verbs ("write", "caption") pollute the themes.
+    narrative_clean = _narrative_clause(narrative_text)
+    explicit_themes = [_norm(t) for t in (themes or []) if _norm(t)]
 
     profile = _profile_for(platform)
     intent, confidence = classify_intent(goal or "", topic, extra_text)
-    keywords = extract_keywords(" ".join([topic, extra_text]))
+    keywords = extract_keywords(
+        " ".join([topic, extra_text, narrative_clean, " ".join(explicit_themes)])
+    )
+    # Caller-supplied themes are authoritative; extracted keywords fill the rest.
+    merged_themes = list(dict.fromkeys([*explicit_themes, *keywords]))
     audience = infer_audience(genre, platform, intent)
     resolved_tone = _resolve_tone(tone, platform, intent)
 
@@ -448,6 +466,10 @@ def build_brief(
         temperature=float(profile["temperature"]),
         directives=directives,
         augmented_idea=augmented_idea,
+        narrative=narrative_text,
+        artist=_norm(artist),
+        track=_norm(track) or topic,
+        themes=merged_themes,
         notes=notes,
     )
 
@@ -559,6 +581,19 @@ def hook_variants(topic: str, artist: str, brief: GenerationBrief) -> List[str]:
             out.append(tpl.format(artist=artist, topic=topic))
         except (KeyError, IndexError):
             continue
+
+    # Request-specific hooks: reference the actual story/track/themes so the
+    # hook can only belong to THIS release (Option B distinctiveness). These
+    # compete in the same ranking as the stylistic templates.
+    track = _norm(brief.track) or topic
+    themes = [t for t in (brief.themes or []) if _norm(t)][:2]
+    clause = _narrative_clause(brief.narrative, limit=70)
+    if clause:
+        out.append(f"{clause}?")
+        if track:
+            out.append(f"{clause} — and then came {track}.")
+    if themes and artist.lower() != "the artist":
+        out.append(f"Nobody turns {themes[0]} into a record like {artist}.")
     return out
 
 
@@ -717,6 +752,110 @@ def deterministic_candidate(topic: str, artist: str, brief: GenerationBrief) -> 
 # Intelligence-driven caption composer
 # ---------------------------------------------------------------------------
 
+# Vocabulary for stripping imperative lead-ins from a creative directive. A
+# procedural stripper (below) is used instead of one big regex because real
+# directives phrase the lead-in many ways — with a connector ("write a caption
+# ABOUT x"), with a gerund ("write a caption HYPING x"), or with neither
+# ("hype the new single x") — and a single pattern reliably handles only the
+# first form. Leaking the imperative verbatim into a caption is the failure
+# this exists to prevent.
+_LEADIN_PREAMBLE = {
+    "please", "kindly", "can", "could", "would", "you", "i", "to", "help",
+    "me", "us", "lets", "let", "let's", "'d", "d", "just", "now",
+}
+_IMPERATIVE_VERBS = {
+    "write", "create", "make", "generate", "draft", "compose", "craft",
+    "produce", "tell", "share", "describe", "hype", "announce", "promote",
+    "introduce", "tease", "post", "caption", "give", "need", "want", "cook",
+    "whip", "put",
+}
+_LEADIN_DETERMINERS = {"a", "an", "the", "some", "me", "us", "my", "your", "up"}
+_ARTIFACT_NOUNS = {
+    "caption", "captions", "post", "posts", "tweet", "tweets", "copy",
+    "content", "blurb", "hook", "hooks", "line", "lines", "bio", "description",
+    "message", "thread", "piece", "something", "one", "text", "words",
+}
+_LEADIN_CONNECTORS = {
+    "about", "for", "on", "that", "which", "to", "of", "around", "regarding",
+    "hyping", "celebrating", "announcing", "promoting", "introducing",
+    "teasing", "describing", "explaining", "highlighting", "showcasing",
+    "spotlighting", "covering", "detailing", "capturing",
+}
+
+
+def _leadin_norm(token: str) -> str:
+    return re.sub(r"[^a-z']", "", token.lower())
+
+
+def _strip_instruction_leadin(s: str) -> str:
+    """Remove a leading imperative directive clause, keeping the actual content.
+
+    Handles connector lead-ins ("write a caption about X"), gerund lead-ins
+    ("write an IG caption hyping X"), and connector-less ones ("hype the new
+    single X"). Returns the input unchanged when it does not begin with an
+    imperative directive (so genuine narrative prose is never mangled).
+    """
+    tokens = s.split()
+    n = len(tokens)
+    i = 0
+    while i < n and _leadin_norm(tokens[i]) in _LEADIN_PREAMBLE:
+        i += 1
+    if i >= n or _leadin_norm(tokens[i]) not in _IMPERATIVE_VERBS:
+        return s  # not an imperative directive — leave narrative prose intact
+    j = i + 1
+    while j < n and _leadin_norm(tokens[j]) in _LEADIN_DETERMINERS:
+        j += 1
+    # Scan a short window for an artifact noun or connector; cut just past it.
+    cut = None
+    for k in range(j, min(n, j + 5)):
+        w = _leadin_norm(tokens[k])
+        if w in _LEADIN_CONNECTORS:
+            cut = k + 1
+            break
+        if w in _ARTIFACT_NOUNS:
+            cut = k + 1
+            if cut < n and _leadin_norm(tokens[cut]) in _LEADIN_CONNECTORS:
+                cut += 1
+            break
+    if cut is None:
+        cut = j  # no artifact/connector — drop just the verb + determiners
+    remainder = " ".join(tokens[cut:]).strip(" ,:;-–—")
+    return remainder or s
+
+
+def _narrative_clause(narrative: str, limit: int = 140) -> str:
+    """Turn a freeform creative directive into a usable subject clause.
+
+    Strips imperative lead-ins ("write a caption about ...", "make a post
+    hyping ...", "hype the new single ...") so the directive's *content* — not
+    the instruction addressed to the model — is what gets woven into copy, then
+    trims to a clean clause boundary. Returns "" when nothing usable remains.
+    """
+    s = _norm(narrative)
+    if not s:
+        return ""
+    # Strip repeatedly (max 2) in case of a stacked directive ("please write a
+    # caption. make it about ...").
+    for _ in range(2):
+        stripped = _strip_instruction_leadin(s)
+        if stripped == s:
+            break
+        s = stripped
+    s = s or _norm(narrative)
+    if len(s) > limit:
+        cut = s[:limit]
+        for sep in (". ", "; ", ", ", " — ", " - "):
+            idx = cut.rfind(sep)
+            if idx > limit * 0.5:
+                cut = cut[:idx]
+                break
+        s = cut
+    s = s.strip(" ,;.—-")
+    if not s:
+        return ""
+    return s[:1].upper() + s[1:]
+
+
 def _body_candidates(
     topic: str,
     brief: GenerationBrief,
@@ -742,23 +881,60 @@ def _body_candidates(
     if agent_n and _skeleton(agent_n) != _skeleton(topic_n):
         out.append(agent_n)
 
-    # Keyword-woven value line (the brief's own reading of the request).
-    kws = [k for k in brief.keywords if k][:2]
-    if len(kws) == 2:
+    # ── Distinctive candidates (preferred) ────────────────────────────────────
+    # Weave the freeform narrative directive + artist-specific facts (name,
+    # track, themes) so the body is unmistakably about THIS release rather than
+    # any track with the title swapped in. These are emitted first and, when
+    # present, they SUPPRESS the generic keyword/audience templates below — the
+    # generic "Every second of this leans into X and Y" line is exactly the
+    # placeholder-feel copy this weave exists to replace, so it must not be
+    # allowed to out-score genuine, release-specific material.
+    artist = _norm(brief.artist)
+    has_artist = bool(artist) and artist.lower() != "the artist"
+    track = _norm(brief.track) or topic_n
+    narrative = _narrative_clause(brief.narrative)
+    themes = [t for t in (brief.themes or []) if _norm(t)][:3]
+
+    if narrative:
+        anchor = track or "this one"
+        out.append(f"{narrative} — that's {anchor}.")
+        if has_artist:
+            lowered = narrative[:1].lower() + narrative[1:]
+            out.append(f"{artist} put everything into this: {lowered}.")
+        elif len(themes) >= 2:
+            out.append(f"{narrative}. {themes[0].capitalize()}, {themes[1]}, no filler.")
+    if has_artist and track:
+        if len(themes) >= 2:
+            out.append(
+                f"{track} is {artist} at their most {themes[0]} — {themes[1]} in every bar."
+            )
+        else:
+            out.append(f"{track} is the {artist} record you didn't know you needed.")
+    if len(themes) >= 2:
         out.append(
-            f"Every second of this leans into {kws[0]} and {kws[1]} — "
-            f"{tone} from the first bar."
+            f"{themes[0].capitalize()} meets {themes[1]} — {tone} {genre_n} for {brief.audience}."
         )
-    elif len(kws) == 1:
-        out.append(f"Built around one thing: {kws[0]} — {tone}, no filler.")
 
-    # Audience-targeted value line from the brief's strategy.
-    out.append(
-        f"{tone.capitalize()} {genre_n} made for {brief.audience} — "
-        f"no skips, all intent."
-    )
+    has_distinctive = bool(out) and (bool(narrative) or (has_artist and bool(track))
+                                     or len(themes) >= 2)
 
-    # Brand voice as copy, when the caller supplied one.
+    if not has_distinctive:
+        # Fallback: generic brief-reading lines for sparse requests (no
+        # narrative, no artist/track, no themes to anchor on).
+        kws = [k for k in brief.keywords if k][:2]
+        if len(kws) == 2:
+            out.append(
+                f"Every second of this leans into {kws[0]} and {kws[1]} — "
+                f"{tone} from the first bar."
+            )
+        elif len(kws) == 1:
+            out.append(f"Built around one thing: {kws[0]} — {tone}, no filler.")
+        out.append(
+            f"{tone.capitalize()} {genre_n} made for {brief.audience} — "
+            f"no skips, all intent."
+        )
+
+    # Brand voice as copy, when the caller supplied one (competes in both modes).
     bv = _norm(brand_voice)
     if bv:
         out.append(f"{bv.rstrip('.')}. This is what that sounds like.")
@@ -808,6 +984,38 @@ def compose_caption(
 
     bodies = _body_candidates(topic, brief, genre=genre,
                               brand_voice=brand_voice, agent_body=agent_body)
+
+    # The narrative clause can surface in both the hook and a body candidate;
+    # drop bodies that merely restate the chosen hook so the two don't echo.
+    # Compare on shared skeleton prefix length (the two sentences diverge only
+    # after the common opening clause), not exact-prefix equality.
+    def _skel(s: str) -> str:
+        return "".join(ch for ch in s.lower() if ch.isalnum())
+
+    def _shared_prefix(a: str, b: str) -> int:
+        n = min(len(a), len(b))
+        i = 0
+        while i < n and a[i] == b[i]:
+            i += 1
+        return i
+
+    _hook_skel = _skel(hook)
+    _narr_skel = _skel(_narrative_clause(brief.narrative))
+    _narr_in_hook = bool(_narr_skel) and _narr_skel in _hook_skel
+
+    def _echoes_hook(b: str) -> bool:
+        bs = _skel(b)
+        if _hook_skel and _shared_prefix(bs, _hook_skel) >= 30:
+            return True
+        # If the narrative clause is already in the hook, don't repeat it in the
+        # body — force a different distinctive candidate (artist/track/theme).
+        if _narr_in_hook and _narr_skel in bs:
+            return True
+        return False
+
+    _deduped = [b for b in bodies if not _echoes_hook(b)]
+    bodies = _deduped or bodies
+
     ctas = _cta_candidates(topic, brief, agent_cta=agent_cta)
 
     best: Tuple[str, str, str, float] = ("", "", "", -1.0)
