@@ -7,6 +7,8 @@ Pure NumPy + the self-contained Digital GPU. Renders real lit geometry with:
     products ``D·C`` and ``O·C`` are batched GEMMs on the Digital GPU),
   * Lambertian surfaces with cosine-weighted importance sampling,
   * emissive area lights + an environment (sky) term for global illumination,
+  * next-event estimation (direct light sampling with shadow rays) so emitters
+    are sampled explicitly each bounce instead of by chance — far lower variance,
   * multi-bounce indirect lighting (colour bleeding, soft shadows),
   * a filmic (ACES-approx) tonemap.
 
@@ -182,6 +184,83 @@ class PathTracer:
         env = (1.0 - t)[:, None] * hor[None, :] + t[:, None] * top[None, :]
         return env * scene.sky_intensity
 
+    # ── next-event estimation (direct light sampling) ────────────────────────
+    def _direct_light(self, scene: Scene, P: np.ndarray, N: np.ndarray,
+                      alb: np.ndarray, tp: np.ndarray, lights: list,
+                      rng: np.random.Generator) -> np.ndarray:
+        """Next-event estimation: sample each emitter directly with a shadow ray.
+
+        Instead of hoping a diffuse bounce randomly strikes an emitter, we sample
+        a direction toward each area light per shading point and cast an explicit
+        shadow ray. This slashes Monte-Carlo variance, so far fewer samples reach
+        the same (or cleaner) result.
+
+        Cone / solid-angle importance sampling of each emitter *sphere*: we sample
+        uniformly within the cone the sphere subtends from ``P``. With a uniform
+        cone pdf ``1/(2π(1-cosθmax))`` the Lambertian estimate collapses to
+
+            L_direct = albedo · Lᵉ · cosθ_surface · 2·(1-cosθmax) · V
+
+        where ``V`` is the shadow-ray visibility (the ray's first hit must be the
+        light itself). No 1/dist² geometry term is needed — it is folded into the
+        solid-angle pdf. Returns the direct radiance ``[K,3]`` for these K hits.
+        """
+        K = P.shape[0]
+        out = np.zeros((K, 3), dtype=np.float64)
+        if K == 0 or not lights:
+            return out
+
+        Osh_base = P + N * _EPS                            # shadow-ray origins
+        s_O, s_wi, s_owner, s_gid, s_contrib = [], [], [], [], []
+        for gid, center, radius, emit in lights:
+            w = center[None, :] - P                        # toward light centre
+            dc2 = np.sum(w * w, axis=1)
+            outside = dc2 > (radius + _EPS) ** 2            # skip pts inside light
+            sin2 = np.clip((radius * radius) / np.maximum(dc2, 1e-12), 0.0, 1.0)
+            cos_tmax = np.sqrt(np.maximum(0.0, 1.0 - sin2))    # cone half-angle
+            u1 = rng.random(K)
+            u2 = rng.random(K)
+            cos_t = 1.0 - u1 * (1.0 - cos_tmax)
+            sin_t = np.sqrt(np.maximum(0.0, 1.0 - cos_t * cos_t))
+            phi = 2.0 * np.pi * u2
+            wdir = _normalize_rows(w)                       # cone axis
+            helper = np.tile(np.array([1.0, 0.0, 0.0]), (K, 1))
+            helper[np.abs(wdir[:, 0]) > 0.9] = np.array([0.0, 1.0, 0.0])
+            tang = _normalize_rows(np.cross(helper, wdir))
+            bitang = np.cross(wdir, tang)
+            wi = _normalize_rows(
+                tang * (np.cos(phi) * sin_t)[:, None]
+                + bitang * (np.sin(phi) * sin_t)[:, None]
+                + wdir * cos_t[:, None]
+            )
+            cos_surf = np.sum(N * wi, axis=1)
+            # solid-angle pdf = 1/(2π(1-cosθmax)) ⇒ f·cos/pdf = albedo·cos·2·(1-cosθmax)
+            weight = cos_surf * 2.0 * (1.0 - cos_tmax)
+            valid = outside & (cos_surf > 0.0) & ((1.0 - cos_tmax) > 1e-7)
+            if not valid.any():
+                continue
+            vi = np.where(valid)[0]
+            s_O.append(Osh_base[vi])
+            s_wi.append(wi[vi])
+            s_owner.append(vi)
+            s_gid.append(np.full(vi.size, gid, dtype=np.int64))
+            s_contrib.append(tp[vi] * alb[vi] * emit[None, :] * weight[vi][:, None])
+
+        if not s_O:
+            return out
+        # One batched shadow-ray intersection for every (point, light) pair — the
+        # sample counts only if that ray's first hit is its own light.
+        O_all = np.concatenate(s_O)
+        wi_all = np.concatenate(s_wi)
+        owner = np.concatenate(s_owner)
+        gid_all = np.concatenate(s_gid)
+        contrib = np.concatenate(s_contrib)
+        _t_s, id_s = self._intersect(scene, O_all, wi_all)
+        lit = id_s == gid_all
+        if lit.any():
+            np.add.at(out, owner[lit], contrib[lit])
+        return out
+
     # ── main render ─────────────────────────────────────────────────────────
     def render(self, scene: Scene, width: int = 256, height: int = 256,
                samples: int = 4, max_bounces: int = 2, seed: int = 0,
@@ -202,6 +281,18 @@ class PathTracer:
         emissions = np.array([s.material.emission for s in spheres], dtype=np.float64) if n_sph else np.zeros((0, 3))
         plane_albedo = np.array(scene.plane.material.albedo, dtype=np.float64) if scene.plane else None
         plane_emission = np.array(scene.plane.material.emission, dtype=np.float64) if scene.plane else None
+
+        # Emitters for next-event estimation: (global_id, center, radius, emission)
+        # for every sphere with non-zero emission. NEE samples these directly so
+        # we don't rely on diffuse bounces randomly hitting them.
+        lights = []
+        if n_sph:
+            emissive = np.any(emissions > 1e-6, axis=1)
+            for i in np.where(emissive)[0]:
+                lights.append((int(i),
+                               np.array(spheres[i].center, dtype=np.float64),
+                               float(spheres[i].radius),
+                               emissions[i]))
 
         accum = np.zeros((width * height, 3), dtype=np.float64)
 
@@ -258,7 +349,17 @@ class PathTracer:
 
                 idx_active = np.where(active)[0]
                 hit_global = idx_active[hit]
-                radiance[hit_global] += throughput[hit_global] * emit
+
+                # Emission: only counted on the primary (camera) ray so a light
+                # visible directly still shows. For deeper bounces the emitter's
+                # contribution is already captured by NEE at the previous surface,
+                # so adding it here would double-count.
+                if _bounce == 0:
+                    radiance[hit_global] += throughput[hit_global] * emit
+
+                # Direct lighting via next-event estimation (shadow rays).
+                radiance[hit_global] += self._direct_light(
+                    scene, P, normals, alb, throughput[hit_global], lights, rng)
 
                 # continue diffuse bounce
                 new_dir = self._cosine_hemisphere(normals, rng)

@@ -5633,9 +5633,12 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
                     _bh, _bw = _base, max(64, int(round(_base * _pw / _ph)))
                 _seed = _rta.image.scene_builder.stable_seed(str(topic), platform, color_scheme)
                 _mood = style_tags[0] if style_tags else "cinematic"
+                # NEE (direct light sampling) in the path tracer cuts variance
+                # hard, so 6 spp now reads cleaner than the old 20-spp brute force
+                # at a fraction of the render time.
                 _rta_bg = await _in_thread(lambda: _rta.api.render_image(
                     color_scheme=color_scheme, mood=_mood,
-                    width=_bw, height=_bh, samples=20, max_bounces=3, seed=_seed,
+                    width=_bw, height=_bh, samples=6, max_bounces=3, seed=_seed,
                 ))
             except Exception as _rta_err:
                 print(f"[RTA] path-trace bg failed, falling back to PIL: {_rta_err}")
