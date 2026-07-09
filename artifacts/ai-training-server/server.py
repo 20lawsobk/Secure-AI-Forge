@@ -2576,6 +2576,48 @@ async def get_curriculum(user_id: str, limit: int = 50, _key = Depends(verify_ap
     }
 
 
+class ArtistProfileRequest(BaseModel):
+    artist_name: Optional[str] = None
+    current_single: Optional[str] = None
+    current_album: Optional[str] = None
+    audience_age: Optional[str] = None
+    audience_geo: Optional[str] = None
+
+
+class ArtistReleaseRequest(BaseModel):
+    title: str
+    kind: str = "single"          # single | album | ep
+    release_date: Optional[str] = None
+    streaming_url: Optional[str] = None
+    status: str = "released"      # released | upcoming
+    platforms: List[str] = []
+
+
+@app.get("/storage/artist/{profile_id}")
+async def get_artist_profile(profile_id: str, _key = Depends(verify_api_key)):
+    """Return the artist profile + release catalog for generation enrichment."""
+    from storage_client import get_artist_client
+    return get_artist_client().get_enrichment(profile_id)
+
+
+@app.post("/storage/artist/{profile_id}")
+async def save_artist_profile(profile_id: str, profile: ArtistProfileRequest,
+                              _key = Depends(verify_api_key)):
+    """Create or merge-update an artist profile (name, single/album, audience)."""
+    from storage_client import get_artist_client
+    saved = get_artist_client().save_profile(profile_id, profile.model_dump())
+    return {"status": "saved", "profile": saved}
+
+
+@app.post("/storage/artist/{profile_id}/releases")
+async def add_artist_release(profile_id: str, release: ArtistReleaseRequest,
+                             _key = Depends(verify_api_key)):
+    """Append a release / streaming record to the artist's catalog."""
+    from storage_client import get_artist_client
+    rec = get_artist_client().add_release(profile_id, release.model_dump())
+    return {"status": "added", "release": rec}
+
+
 @app.get("/storage/datasets")
 async def list_datasets(_key = Depends(verify_api_key)):
     from storage_client import get_dataset_client
@@ -3281,6 +3323,7 @@ class MaxcoreAnalyzeRequest(BaseModel):
     artistProfileId: Optional[str] = None
     platforms: List[str] = []
     intent: Optional[str] = None
+    awareness: str = ""
 
 
 class MaxcoreTextRequest(BaseModel):
@@ -3289,11 +3332,13 @@ class MaxcoreTextRequest(BaseModel):
     input: dict = {}        # used by mode='planner'
     step: dict = {}         # used by mode='content'
     inputs: dict = {}       # used by mode='content'
+    awareness: str = ""     # enrichment + live signals; conditions the script agent
 
 
 class MaxcoreMediaRequest(BaseModel):
     step: dict = {}
     inputs: dict = {}
+    awareness: str = ""     # enrichment + live signals; conditions the media agents
 
 
 @app.post("/analyze")
@@ -3338,6 +3383,7 @@ async def maxcore_analyze(req: MaxcoreAnalyzeRequest, _key = Depends(require_sco
                 platform=normalize_platform(first_platform),
                 goal=intent_hint,
                 tone="authentic",
+                awareness=req.awareness or "",
             )))
             normalized["semantic"]["hook"] = result.hook
             normalized["semantic"]["core_message"] = result.body
@@ -3432,6 +3478,7 @@ async def maxcore_generate_text(req: MaxcoreTextRequest, _key = Depends(require_
                 from ai_model.agents.distribution_agent import DistributionRequest
                 script = await _in_thread(lambda: _script_agent.run(ScriptRequest(
                     idea=topic, platform=platform, goal=intent, tone=tone,
+                    awareness=req.awareness or "",
                 )))
                 hook_line = getattr(script, "hook", "") or ""
                 body_line = getattr(script, "body", "") or ""
@@ -3510,7 +3557,7 @@ async def maxcore_generate_image(req: MaxcoreMediaRequest, _key = Depends(requir
                     idea=topic,
                     platform=normalize_platform(platform),
                     tone=style_tags[0] if style_tags else "cinematic",
-                    awareness=getattr(req, "awareness", ""),
+                    awareness=req.awareness or "",
                 )))
                 concept = getattr(vis, "thumbnail_concept", concept) or concept
             except Exception:
@@ -3570,6 +3617,7 @@ async def maxcore_generate_audio(req: MaxcoreMediaRequest, _key = Depends(requir
                     platform=normalize_platform(platform),
                     goal="engagement",
                     tone=style,
+                    awareness=req.awareness or "",
                 )))
                 script_text = res.hook
             except Exception:
@@ -3639,6 +3687,7 @@ async def maxcore_generate_video(req: MaxcoreMediaRequest, _key = Depends(requir
                     platform=normalize_platform(platform),
                     goal="engagement",
                     tone=tone,
+                    awareness=req.awareness or "",
                 )))
                 hook_line = res.hook or hook_line
                 body_line = getattr(res, "body", "") or ""

@@ -6,10 +6,13 @@ import {
   contentAwarenessService,
   type ContentAwarenessContext,
 } from "../services/contentAwarenessService.js";
+import {
+  buildGenerationEnrichment,
+  type GenerationEnrichment,
+} from "../services/autoPostGenerator.js";
+import { MAXCORE_URL, MAXCORE_API_KEY } from "../config/maxcore.js";
 
 const router: IRouter = Router();
-
-const MAXCORE_URL = `http://localhost:${process.env.MODEL_API_PORT || "9878"}`;
 
 // ─── Model connection pool ──────────────────────────────────────────────────
 // Multimodal generation fans out to several upstream model calls per request
@@ -27,9 +30,6 @@ const _modelPool = new Agent({
   headersTimeout: 900_000,
   bodyTimeout: 900_000,
 });
-const MAXCORE_API_KEY =
-  process.env.ADMIN_KEY ||
-  "mbs_8a3edbac97ff333dda5068410227267e6d85b14a4c9caee279fbb18ddfb47edc";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -398,13 +398,19 @@ async function maxcorePost(path: string, body: unknown): Promise<unknown> {
 
 // ─── Step 1: Normalize input via maxcore /analyze ─────────────────────────────
 
-async function normalizeInput(req: GenerationRequest): Promise<unknown> {
+async function normalizeInput(
+  req: GenerationRequest,
+  enrichment: GenerationEnrichment,
+): Promise<unknown> {
   return maxcorePost("/analyze", {
     modality: req.input.modality,
     payload: req.input.payload,
     artistProfileId: req.artistProfileId,
     platforms: req.platforms,
     intent: req.intent,
+    ...(enrichment.awarenessBlock
+      ? { awareness: enrichment.awarenessBlock }
+      : {}),
   });
 }
 
@@ -473,7 +479,8 @@ function buildFallbackPlan(
 
 // ─── Workers ──────────────────────────────────────────────────────────────────
 
-type WorkerAwareness = ContentAwarenessContext | null;
+// The final awareness string sent to MaxCore (enrichment block + live signals).
+type WorkerAwareness = string | null;
 
 const textWorker = {
   async run(
@@ -485,9 +492,7 @@ const textWorker = {
       mode: "content",
       step,
       inputs,
-      ...(awareness?.contextString
-        ? { awareness: awareness.contextString }
-        : {}),
+      ...(awareness ? { awareness } : {}),
     })) as {
       outputs: Array<{
         text: string;
@@ -517,9 +522,7 @@ const imageWorker = {
     const result = (await maxcorePost("/generate/image", {
       step,
       inputs,
-      ...(awareness?.contextString
-        ? { awareness: awareness.contextString }
-        : {}),
+      ...(awareness ? { awareness } : {}),
     })) as {
       outputs: Array<{
         url: string;
@@ -549,9 +552,7 @@ const audioWorker = {
     const result = (await maxcorePost("/generate/audio", {
       step,
       inputs,
-      ...(awareness?.contextString
-        ? { awareness: awareness.contextString }
-        : {}),
+      ...(awareness ? { awareness } : {}),
     })) as {
       outputs: Array<{
         url: string;
@@ -581,9 +582,7 @@ const videoWorker = {
     const result = (await maxcorePost("/generate/video", {
       step,
       inputs,
-      ...(awareness?.contextString
-        ? { awareness: awareness.contextString }
-        : {}),
+      ...(awareness ? { awareness } : {}),
     })) as {
       outputs: Array<{
         url: string;
@@ -625,7 +624,19 @@ const workers: Record<
 async function handleGeneration(
   req: GenerationRequest,
 ): Promise<MultimodalPackage> {
-  const normalized = await normalizeInput(req);
+  // Assemble generation-time enrichment (artist profile, releases, proven hook
+  // patterns, trending) from the platform data layer. Guarded so it never
+  // blocks or fails the pipeline; absent data is simply omitted.
+  const enrichment = await buildGenerationEnrichment({
+    userId: req.userId,
+    artistProfileId: req.artistProfileId,
+    platforms: req.platforms,
+  }).catch<GenerationEnrichment>(() => ({
+    awarenessBlock: "",
+    hasData: false,
+  }));
+
+  const normalized = await normalizeInput(req, enrichment);
   const plan = await planTasks(normalized, req);
 
   // Fetch per-modality awareness contexts in parallel, racing against a 3 s
@@ -657,11 +668,24 @@ async function handleGeneration(
       ),
     ]);
 
+  // Merge the enrichment block with live per-modality awareness into a single
+  // awareness string per worker. Enrichment leads so artist/release/hook
+  // context is the first signal the model conditions on.
+  const mergeAwareness = (
+    ctx: ContentAwarenessContext | null,
+  ): WorkerAwareness => {
+    const ctxStr = ctx?.confidence ? ctx.contextString : "";
+    const merged = [enrichment.awarenessBlock, ctxStr]
+      .filter(Boolean)
+      .join("\n\n");
+    return merged || null;
+  };
+
   const awarenessMap: Record<string, WorkerAwareness> = {
-    text: textAwareness?.confidence ? textAwareness : null,
-    image: imageAwareness?.confidence ? imageAwareness : null,
-    audio: audioAwareness?.confidence ? audioAwareness : null,
-    video: videoAwareness?.confidence ? videoAwareness : null,
+    text: mergeAwareness(textAwareness),
+    image: mergeAwareness(imageAwareness),
+    audio: mergeAwareness(audioAwareness),
+    video: mergeAwareness(videoAwareness),
   };
 
   const stepOutputs = new Map<string, GeneratedAsset[]>();

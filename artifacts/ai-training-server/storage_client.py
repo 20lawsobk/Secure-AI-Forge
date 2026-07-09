@@ -877,6 +877,59 @@ class AdsClient:
         return None
 
 
+class ArtistProfileClient:
+    """Per-artist profile + release catalog used for generation-time enrichment.
+
+    Storage keys:
+      mb:artist:{profile_id}            — profile dict (artist_name, current_single,
+                                          current_album, audience_age, audience_geo)
+      mb:artist:{profile_id}:releases   — list of release dicts (title, kind,
+                                          release_date, streaming_url, status, platforms)
+    """
+
+    PROFILE_FIELDS = (
+        "artist_name", "current_single", "current_album",
+        "audience_age", "audience_geo",
+    )
+
+    def __init__(self, storage: StorageClient):
+        self.storage = storage
+
+    def save_profile(self, profile_id: str, profile: dict) -> dict:
+        """Merge-update the artist profile; only non-null fields overwrite."""
+        existing = self.storage.get(f"mb:artist:{profile_id}") or {}
+        merged = dict(existing)
+        for k in self.PROFILE_FIELDS:
+            v = profile.get(k)
+            if v is not None:
+                merged[k] = v
+        merged["profile_id"] = profile_id
+        merged["updated_at"] = time.time()
+        self.storage.set(f"mb:artist:{profile_id}", merged)
+        return merged
+
+    def get_profile(self, profile_id: str) -> Optional[dict]:
+        return self.storage.get(f"mb:artist:{profile_id}")
+
+    def add_release(self, profile_id: str, release: dict) -> dict:
+        record = dict(release)
+        record.setdefault("added_at", time.time())
+        self.storage.lpush(f"mb:artist:{profile_id}:releases", record)
+        self.storage.ltrim(f"mb:artist:{profile_id}:releases", 0, 99)
+        return record
+
+    def get_releases(self, profile_id: str, limit: int = 20) -> list[dict]:
+        return self.storage.lrange(f"mb:artist:{profile_id}:releases", 0, limit - 1)
+
+    def get_enrichment(self, profile_id: str) -> dict:
+        """Bundle profile + releases for the generation-time enrichment fetch."""
+        return {
+            "profile_id": profile_id,
+            "profile": self.get_profile(profile_id) or {},
+            "releases": self.get_releases(profile_id, limit=20),
+        }
+
+
 # ─── Singletons ──────────────────────────────────────────────────────────────
 
 _storage_client: Optional[StorageClient] = None
@@ -885,6 +938,7 @@ _checkpoint_client: Optional[ModelCheckpointClient] = None
 _curriculum_client: Optional[CurriculumStateClient] = None
 _pipeline: Optional[TrainingDataPipeline] = None
 _ads_client: Optional[AdsClient] = None
+_artist_client: Optional["ArtistProfileClient"] = None
 
 
 def get_storage() -> StorageClient:
@@ -927,3 +981,10 @@ def get_ads_client() -> AdsClient:
     if _ads_client is None:
         _ads_client = AdsClient(get_storage())
     return _ads_client
+
+
+def get_artist_client() -> ArtistProfileClient:
+    global _artist_client
+    if _artist_client is None:
+        _artist_client = ArtistProfileClient(get_storage())
+    return _artist_client
