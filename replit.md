@@ -1,5 +1,7 @@
 # MaxBooster (MaxCore AI)
 
+> Setup note: after import, run `pnpm install` (requires Node.js 22 — installed via the nodejs-22 module) and restart the `Start application` workflow. The Python AI training server auto-installs its deps into `.pythonlibs` on first boot (~30s) and then serves `/health` on port 9878. All required secrets (`DATABASE_URL`, `ADMIN_KEY`, `STORAGE_*`, `AI_TRAINING_KEY_PROD`, `SESSION_SECRET`) were already present in this environment.
+
 A production-grade AI content generation and training platform for music artists that generates multi-platform social media content (text, images, video) powered by a custom in-house Transformer model.
 
 ## Run & Operate
