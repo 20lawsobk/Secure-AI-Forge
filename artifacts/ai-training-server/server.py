@@ -2611,6 +2611,16 @@ class ArtistProfileRequest(BaseModel):
     current_album: Optional[str] = None
     audience_age: Optional[str] = None
     audience_geo: Optional[str] = None
+    # ── Brand Voice (research-driven, see storage_client.ArtistProfileClient) ──
+    # Saved once, then pulled automatically into text/image/video generation so
+    # output "sounds like the brand" instead of generic AI copy, and so the
+    # artist controls whether generated content discloses AI assistance.
+    genre: Optional[str] = None
+    tone: Optional[str] = None
+    vocabulary: Optional[List[str]] = None
+    avoid_words: Optional[List[str]] = None
+    palette: Optional[List[str]] = None
+    ai_disclosure: Optional[bool] = None
 
 
 class ArtistReleaseRequest(BaseModel):
@@ -4659,6 +4669,10 @@ class ApiGenerateContentRequest(_AwarenessMixin):
     artist: Optional[str] = None
     goal: Optional[str] = None
     title: Optional[str] = None
+    # Persistent Brand Voice profile (see storage_client.ArtistProfileClient) —
+    # when set, its saved tone/genre/vocabulary/disclosure preferences are
+    # pulled in as fallbacks so repeat generations sound consistently on-brand.
+    artistProfileId: Optional[str] = None
     # Freeform creative directive for THIS post (the narrative brief). Declared
     # so it is captured instead of silently dropped, then woven into copy.
     instruction: Optional[str] = None
@@ -4674,6 +4688,14 @@ class ApiGenerateContentRequest(_AwarenessMixin):
     # Toggle the trailing hashtag block / CTA line off for clean-copy platforms.
     include_hashtags: Optional[bool] = True
     include_cta: Optional[bool] = True
+    # ── Producer-metadata steering (what producers ask for: real use of
+    # genre/mood/BPM/key, not just a label) ────────────────────────────────
+    mood: Optional[str] = None
+    bpm: Optional[float] = None
+    key: Optional[str] = None
+    # ── Cross-platform generation: when set, return one adapted variant per
+    # platform in a single call instead of requiring N separate requests. ──
+    platforms: Optional[List[str]] = None
 
 
 class ApiGenerateTextRequest(_AwarenessMixin):
@@ -4769,6 +4791,12 @@ class ApiGenerateImageRequest(_AwarenessMixin):
     instruction: Optional[str] = None
     extra_context: Optional[str] = None
     content_themes: Optional[List[str]] = None
+    # ── Producer-metadata steering (genre/mood/BPM/key now shape the visual
+    # style, not just video/audio) ──────────────────────────────────────────
+    genre: Optional[str] = None
+    mood: Optional[str] = None
+    bpm: Optional[float] = None
+    key: Optional[str] = None
 
 
 class ApiGenerateAudioRequest(_AwarenessMixin):
@@ -4837,6 +4865,10 @@ class ApiGenerateVideoRequest(_AwarenessMixin):
     content_themes: Optional[List[str]] = None
     energy: Optional[float] = None
     bpm: Optional[float] = None
+    mood: Optional[str] = None
+    key: Optional[str] = None
+    # Persistent Brand Voice profile (see storage_client.ArtistProfileClient).
+    artistProfileId: Optional[str] = None
 
 
 class ApiAudioAnalyzeRequest(BaseModel):
@@ -4932,19 +4964,22 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
     topic    = req.topic or req.title or ""
     goal     = req.goal or "engagement"
 
-    def _build(_request=None):
+    def _build(_request=None, _platform=None):
         # ── Request intelligence: analyse intent, audience & strategy up front ──
         from ai_model import request_intelligence as ri
+        _plat = _platform or platform
         _narrative = " ".join(
             filter(None, [req.instruction, req.extra_context, req.artist_bio])
         )
         brief = ri.build_brief(
-            modality="content", platform=platform, topic=topic, goal=goal,
+            modality="content", platform=_plat, topic=topic, goal=goal,
             tone=req.tone, genre=req.genre, artist=artist,
             extra=" ".join(filter(None, [req.brand_voice, req.target_audience])),
             narrative=_narrative,
             track=req.title or topic,
             themes=req.content_themes,
+            mood=req.mood, bpm=req.bpm, key=req.key,
+            artist_profile_id=req.artistProfileId,
         )
 
         hook = f"🎵 {artist} just dropped something you need to hear — {topic}"
@@ -4985,10 +5020,10 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
                 # data, both driving the model's conditioning and the
                 # awareness-composed fallback. This mirrors the video path.
                 _sr = _script_agent.run(ScriptRequest(
-                    idea=topic, platform=platform, goal=goal, tone=brief.tone,
+                    idea=topic, platform=_plat, goal=goal, tone=brief.tone,
                     awareness=_merged_awareness,
                 ))
-                _distribution_agent.run(DistributionRequest(script=f"{_sr.hook}\n{_sr.body}\n{_sr.cta}", platform=platform, goal=goal))
+                _distribution_agent.run(DistributionRequest(script=f"{_sr.hook}\n{_sr.body}\n{_sr.cta}", platform=_plat, goal=goal))
                 return _sr
 
             try:
@@ -5036,15 +5071,21 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
                 "body": composed["body"], "cta": composed["cta"],
                 "score": composed["caption_score"],
             })]
-        caption = variant_objs[0]["caption"]
+        # Disclosure is opt-in (Brand Voice profile). Applied after trimming,
+        # then re-checked against max_chars: if appending the label would blow
+        # the caller's explicit character budget, the label is dropped rather
+        # than silently exceeding a hard platform limit.
+        caption = ri.apply_disclosure(variant_objs[0]["caption"], brief)
+        if req.max_chars and len(caption) > int(req.max_chars):
+            caption = variant_objs[0]["caption"]
 
-        hashtags = (req.preferred_hashtags or []) + _api_hashtags(topic, req.genre, req.platform)
+        hashtags = (req.preferred_hashtags or []) + _api_hashtags(topic, req.genre, _plat)
         hashtag_cap = min(10, max(brief.hashtags_target, len(req.preferred_hashtags or [])))
         if req.include_hashtags is False:
             hashtags = []
             hashtag_cap = 0
         quality  = composed["caption_score"]
-        score    = _api_heuristic_score(caption, req.platform)
+        score    = _api_heuristic_score(caption, _plat)
         return {
             "caption":    caption,
             "char_count": len(caption),
@@ -5055,6 +5096,8 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
             "hashtags":   list(dict.fromkeys(hashtags))[:hashtag_cap] if hashtag_cap else [],
             "confidence": round(max(quality, score) / 100, 3),
             "quality_score": quality,
+            "ai_disclosure": brief.ai_disclosure,
+            "platform": _plat,
             "intelligence": {
                 **brief.to_dict(),
                 "hook_score": composed["hook_score"],
@@ -5066,10 +5109,32 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
             },
         }
 
+    # ── Cross-platform generation: one call → one adapted variant per
+    # requested platform (aspect ratio / copy length / hook style each follow
+    # that platform's profile), instead of forcing N separate requests. ─────
+    if req.platforms:
+        _plats = [normalize_platform(p) for p in req.platforms if p]
+        _by_platform = {p: _build(_platform=p) for p in dict.fromkeys(_plats)}
+        if _by_platform:
+            first = next(iter(_by_platform.values()))
+            return {
+                **first,
+                "platform_variants": _by_platform,
+                "processing_time_ms": round((time.time() - start) * 1000, 1),
+            }
+        # `platforms` was present but contained no usable entries (e.g. [""])
+        # — fall through to the normal single-platform path below instead of
+        # crashing on an empty dict.
+
     # ── Default content-gen path: dedup + single-flight via PDIM orchestrator ──
     # Concurrent identical requests collapse to ONE compute; the rest share it.
     # Only the model path is cached — heuristic-only output stays uncached, as before.
-    if _model_ready:
+    # Brand-voice requests bypass the cache entirely: the cache key is derived
+    # from the request payload only, but build_brief() also reads the artist's
+    # stored profile (tone/genre/vocabulary/ai_disclosure) — an identical
+    # request could otherwise replay a stale caption/disclosure after the
+    # artist edits their profile.
+    if _model_ready and not req.artistProfileId:
         _orch = _get_pdim_orchestrator()
         _out = await _in_thread(lambda: _orch.compute(req, _build, namespace="api_content"))
         result = dict(_out["result"])
@@ -5635,20 +5700,19 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
     artist_name = req.artistProfileId or "MaxBooster"
 
     # ── Request intelligence: analyse intent/audience & visual strategy ────
+    # A brief is built PER SLOT (not once globally) so that when a caller
+    # requests multiple slots on different platforms, each gets its own
+    # platform-adapted aspect ratio / hook style / tempo in one call — the
+    # cross-platform generation producers ask for, mirroring what video
+    # already does per-platform via PLATFORM_RATIOS.
     from ai_model import request_intelligence as ri
-    _first_plat = raw_slots[0].get("platform") if isinstance(raw_slots[0], dict) else str(raw_slots[0])
-    brief = ri.build_brief(
-        modality="image", platform=normalize_platform(_first_plat or "instagram"),
-        topic=str(topic), goal=intent,
-        tone=style_tags[0] if style_tags else None,
-        extra=" ".join(str(s) for s in style_tags),
-    )
     # Awareness bridge (identical to content route, personalised by this
     # request's own direction fields) → drives the VisualSpecAgent's layout /
     # colour / prompt, which the PIL render then consumes.
     _img_awareness = _merged_awareness_for(req)
 
     outputs = []
+    brief = None  # last-built brief, surfaced at top level for back-compat
     for slot in raw_slots:
         if isinstance(slot, str):
             slot = {"id": slot, "platform": slot}
@@ -5656,10 +5720,31 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
         slot_id   = slot.get("id", "default")
         purpose   = slot.get("purpose", intent)
 
+        brief = ri.build_brief(
+            modality="image", platform=normalize_platform(platform or "instagram"),
+            topic=str(topic), goal=intent,
+            tone=style_tags[0] if style_tags else None,
+            genre=req.genre,
+            extra=" ".join(str(s) for s in style_tags),
+            mood=req.mood, bpm=req.bpm, key=req.key,
+            artist_profile_id=req.artistProfileId,
+        )
+
         # ── Determine layout and color scheme via VisualSpecAgent ─────────────
         layout       = brief.layout
         color_scheme = "dark_neon"
-        prompt       = f"Eye-catching {style_tags[0] if style_tags else 'cinematic'} visual for: {topic}"
+        # Slot-local copy — each slot/platform gets its own derived tags, so
+        # one slot's producer-metadata tags never bleed into the next slot's
+        # render (the shared `style_tags` list from constraints/step is the
+        # base; only this slot's working copy is extended below).
+        slot_style_tags = list(style_tags)
+        prompt       = f"Eye-catching {slot_style_tags[0] if slot_style_tags else 'cinematic'} visual for: {topic}"
+        # Producer-metadata steering: genre/mood/BPM shift the style tags used
+        # to render, so the same topic looks different for a 90-BPM ballad
+        # vs. a 140-BPM drop instead of always defaulting to "cinematic".
+        for _mtag in ri.visual_style_from_brief(brief):
+            if _mtag not in slot_style_tags:
+                slot_style_tags.append(_mtag)
 
         if _visual_spec_agent:
             try:
@@ -5673,7 +5758,7 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
                 vis = await _in_thread(lambda: _visual_spec_agent.run(VisualSpecRequest(
                     idea=str(topic),
                     platform=normalize_platform(platform),
-                    tone=style_tags[0] if style_tags else brief.tone,
+                    tone=slot_style_tags[0] if slot_style_tags else brief.tone,
                     awareness=_img_awareness,
                 )))
                 layout       = vis.layout or layout
@@ -5713,7 +5798,7 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
                 else:
                     _bh, _bw = _base, max(64, int(round(_base * _pw / _ph)))
                 _seed = _rta.image.scene_builder.stable_seed(str(topic), platform, color_scheme)
-                _mood = style_tags[0] if style_tags else "cinematic"
+                _mood = slot_style_tags[0] if slot_style_tags else "cinematic"
                 # NEE (direct light sampling) in the path tracer cuts variance
                 # hard, so 6 spp now reads cleaner than the old 20-spp brute force
                 # at a fraction of the render time.
@@ -5738,7 +5823,7 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
                     platform=platform,
                     artist_name=artist_name,
                     intent=purpose,
-                    style_tags=style_tags,
+                    style_tags=slot_style_tags,
                     background=_rta_bg,
                 )
                 result = await _in_thread(lambda r=_req: _image_engine.render(r))
@@ -5772,9 +5857,10 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
                     "color_scheme": result.color_scheme,
                     "layout":       result.layout,
                     "prompt_used":  result.prompt_used,
-                    "style_tags":   style_tags,
+                    "style_tags":   slot_style_tags,
                     "engine":       ("rta-irc-pathtraced-v1" if _rta_bg is not None
                                      else "maxbooster-pil-v1"),
+                    "ai_disclosure": brief.ai_disclosure,
                 },
             })
         else:
@@ -5795,9 +5881,10 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
                     "color_scheme": color_scheme,
                     "layout":       layout,
                     "prompt_used":  prompt,
-                    "style_tags":   style_tags,
+                    "style_tags":   slot_style_tags,
                     "engine":       "maxbooster-pil-v1",
                     "status":       "engine_not_ready",
+                    "ai_disclosure": brief.ai_disclosure,
                 },
             })
 
@@ -5809,6 +5896,7 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
         "image_url": first_url,
         "path":      first_url,
         "intelligence": brief.to_dict(),
+        "ai_disclosure": brief.ai_disclosure if brief else False,
         "processing_time_ms": round((_t.time() - start) * 1000, 1),
     }
 
@@ -6304,6 +6392,8 @@ async def api_generate_video(req: ApiGenerateVideoRequest, _key=Depends(require_
         topic=req.topic or req.idea, goal=req.goal, tone=req.tone, genre=req.genre,
         artist=req.artist_name,
         extra=" ".join(filter(None, [req.hook, req.body, req.cta])),
+        mood=req.mood, bpm=req.bpm, key=req.key,
+        artist_profile_id=req.artistProfileId,
     )
 
     job_id = str(uuid.uuid4())
@@ -6323,6 +6413,7 @@ async def api_generate_video(req: ApiGenerateVideoRequest, _key=Depends(require_
         "render_ms":       None,
         "error":           None,
         "intelligence":    brief.to_dict(),
+        "ai_disclosure":   brief.ai_disclosure,
     })
 
     def _plan_and_render():
@@ -6465,6 +6556,9 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
     brief = ri.build_brief(
         modality="video", platform=normalize_platform(platform),
         topic=idea, goal=goal, tone=tone, genre=genre, artist=artist_name,
+        mood=str(body.get("mood") or "") or None,
+        bpm=body.get("bpm"), key=str(body.get("key") or "") or None,
+        artist_profile_id=str(body.get("artistProfileId") or "") or None,
     )
 
     from ai_model.video.video_agent import VideoAgent as _VA, VideoAgentRequest

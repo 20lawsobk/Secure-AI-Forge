@@ -217,6 +217,14 @@ class GenerationBrief:
     track: str = ""
     themes: List[str] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
+    # ── Producer-metadata steering (genre/mood/bpm/key now shape text & image
+    # too, not just video/audio) ────────────────────────────────────────────
+    mood: str = ""
+    bpm: Optional[float] = None
+    key: str = ""
+    energy: float = 0.5
+    # ── Brand Voice (persistent per-artist profile; see storage_client) ────
+    ai_disclosure: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         """Compact, transparent representation returned to API callers."""
@@ -243,6 +251,13 @@ class GenerationBrief:
             "directives": self.directives,
             "suggested_cta": self.suggested_cta,
             "notes": self.notes,
+            "producer_metadata": {
+                "mood": self.mood,
+                "bpm": self.bpm,
+                "key": self.key,
+                "energy": round(self.energy, 3),
+            },
+            "ai_disclosure": self.ai_disclosure,
         }
 
 
@@ -368,6 +383,91 @@ def _build_directives(brief_bits: Dict[str, Any]) -> List[str]:
     return directives
 
 
+def load_brand_voice(profile_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Fetch the artist's persistent Brand Voice profile (genre/tone/
+    vocabulary/palette/ai_disclosure), saved once via
+    POST /storage/artist/{profile_id} and pulled automatically into every
+    generation request for that artist so output "sounds like the brand"
+    instead of generic AI copy. Never-raise: returns None on any failure or
+    when no profile has been saved, so callers keep working with no profile.
+    """
+    pid = _norm(profile_id)
+    if not pid:
+        return None
+    try:
+        from storage_client import get_artist_client
+        profile = get_artist_client().get_profile(pid)
+        return profile or None
+    except Exception:  # noqa: BLE001 - brand voice must never break generation
+        return None
+
+
+# Coarse genre → base energy/warmth, mirroring ai_model/video/ai_scene_builder's
+# _GENRE_DNA so text/image generation lean the same direction video already
+# does for a given genre, instead of treating genre as decorative metadata.
+_GENRE_ENERGY: Dict[str, float] = {
+    "edm": 0.9, "dance": 0.9, "electronic": 0.85, "hip_hop": 0.8, "hip-hop": 0.8,
+    "rap": 0.8, "pop": 0.7, "rock": 0.75, "trap": 0.8, "reggaeton": 0.8,
+    "afrobeat": 0.75, "drill": 0.85, "house": 0.85, "techno": 0.9,
+    "rnb": 0.5, "r&b": 0.5, "soul": 0.45, "jazz": 0.4, "lofi": 0.3,
+    "acoustic": 0.35, "ballad": 0.3, "ambient": 0.25, "classical": 0.35,
+    "country": 0.55, "indie": 0.55, "folk": 0.4,
+}
+_MOOD_ENERGY: Dict[str, float] = {
+    "hype": 0.9, "energetic": 0.85, "aggressive": 0.85, "excited": 0.8,
+    "confident": 0.7, "playful": 0.65, "romantic": 0.45, "nostalgic": 0.4,
+    "chill": 0.3, "mellow": 0.3, "sad": 0.25, "somber": 0.2, "dreamy": 0.35,
+    "cinematic": 0.55, "dark": 0.5, "moody": 0.45,
+}
+
+
+def _producer_energy(genre: Optional[str], mood: Optional[str],
+                     bpm: Optional[float]) -> float:
+    """Blend genre/mood/BPM into one 0-1 energy score. Never-raise."""
+    signals: List[float] = []
+    g = _norm(genre).lower().replace("-", "_").replace(" ", "_")
+    if g in _GENRE_ENERGY:
+        signals.append(_GENRE_ENERGY[g])
+    m = _norm(mood).lower()
+    if m in _MOOD_ENERGY:
+        signals.append(_MOOD_ENERGY[m])
+    if bpm:
+        try:
+            b = float(bpm)
+            signals.append(max(0.0, min(1.0, (b - 60.0) / 120.0)))
+        except (TypeError, ValueError):
+            pass
+    if not signals:
+        return 0.5
+    return sum(signals) / len(signals)
+
+
+def visual_style_from_brief(brief: "GenerationBrief") -> List[str]:
+    """Style tags derived from producer metadata (genre/mood/bpm), so image
+    generation's look measurably shifts with the track instead of always
+    defaulting to "cinematic". Never-raise; returns [] on no signal."""
+    tags: List[str] = []
+    if brief.energy >= 0.75:
+        tags.append("high_energy")
+    elif brief.energy <= 0.3:
+        tags.append("moody")
+    if brief.key:
+        tags.append("minor_key" if "min" in brief.key.lower() else "major_key")
+    return tags
+
+
+def apply_disclosure(text: str, brief: "GenerationBrief") -> str:
+    """Append a short AI-assistance disclosure line when the artist's Brand
+    Voice profile has opted into it. Never-raise; returns `text` unchanged
+    otherwise (disclosure defaults to off — it is explicitly opt-in)."""
+    if not getattr(brief, "ai_disclosure", False):
+        return text
+    label = "✨ Crafted with AI-assisted creative tools."
+    if label in text:
+        return text
+    return f"{text}\n\n{label}"
+
+
 def build_brief(
     modality: str,
     platform: str,
@@ -380,10 +480,18 @@ def build_brief(
     narrative: Optional[str] = None,
     track: Optional[str] = None,
     themes: Optional[List[str]] = None,
+    mood: Optional[str] = None,
+    bpm: Optional[float] = None,
+    key: Optional[str] = None,
+    artist_profile_id: Optional[str] = None,
 ) -> GenerationBrief:
     """Analyse a request and produce a structured GenerationBrief.
 
     `platform` should already be normalised by the caller (normalize_platform).
+    `artist_profile_id`, when given, pulls the artist's saved Brand Voice
+    (tone/genre fallback, favored/avoided vocabulary, AI-disclosure toggle) —
+    see `load_brand_voice`. Never raises: an absent/unreachable profile just
+    means no brand-voice fallback, identical to today's behaviour.
     """
     platform = _norm(platform) or "general"
     topic = _norm(topic)
@@ -393,6 +501,14 @@ def build_brief(
     # keywords, or instruction verbs ("write", "caption") pollute the themes.
     narrative_clean = _narrative_clause(narrative_text)
     explicit_themes = [_norm(t) for t in (themes or []) if _norm(t)]
+
+    # ── Brand Voice fallback (persistent per-artist profile) ───────────────
+    brand = load_brand_voice(artist_profile_id) or {}
+    tone = tone or brand.get("tone")
+    genre = genre or brand.get("genre")
+    disclosure = bool(brand.get("ai_disclosure", False))
+    vocabulary = [str(v) for v in (brand.get("vocabulary") or []) if v]
+    avoid_words = [str(v) for v in (brand.get("avoid_words") or []) if v]
 
     profile = _profile_for(platform)
     intent, confidence = classify_intent(goal or "", topic, extra_text)
@@ -404,15 +520,49 @@ def build_brief(
     audience = infer_audience(genre, platform, intent)
     resolved_tone = _resolve_tone(tone, platform, intent)
 
+    # Coerce BPM once, safely — this route can be reached from untyped raw-JSON
+    # endpoints where BPM may arrive as a string ("140") or garbage; never raise.
+    bpm_val: Optional[float] = None
+    if bpm is not None:
+        try:
+            bpm_val = float(bpm)
+        except (TypeError, ValueError):
+            bpm_val = None
+    bpm = bpm_val
+
+    # ── Producer-metadata steering: genre/mood/BPM now shape hook energy and
+    # pacing for text & image too (previously only video/audio used them). ──
+    energy = _producer_energy(genre, mood, bpm)
+    resolved_tempo = profile["tempo"]
+    resolved_hook_style = profile["hook_style"]
+    if energy >= 0.75:
+        resolved_tempo = "fast"
+        resolved_hook_style = "pattern_interrupt"
+    elif energy <= 0.3:
+        resolved_tempo = "slow"
+        resolved_hook_style = "aesthetic_curiosity"
+
     directive_bits = {
         "intent": intent,
-        "tempo": profile["tempo"],
-        "hook_style": profile["hook_style"],
+        "tempo": resolved_tempo,
+        "hook_style": resolved_hook_style,
         "cta_style": profile["cta_style"],
         "word_count": profile["word_count"],
         "keywords": keywords,
     }
     directives = _build_directives(directive_bits)
+    if mood or bpm or key:
+        _bits = [b for b in [
+            f"{mood} mood" if mood else "",
+            f"~{bpm:.0f} BPM" if bpm else "",
+            f"key of {key}" if key else "",
+        ] if b]
+        if _bits:
+            directives.append("Match the track's " + ", ".join(_bits))
+    if vocabulary:
+        directives.append("Favor this artist's vocabulary: " + ", ".join(vocabulary[:6]))
+    if avoid_words:
+        directives.append("Avoid these words/phrases: " + ", ".join(avoid_words[:6]))
 
     # ── Quality awareness buffer (temporary, self-retiring) ────────────────
     # World-studied chart/content patterns blended in while the own pdim
@@ -456,12 +606,12 @@ def build_brief(
         keywords=keywords,
         aspect_ratio=profile["aspect_ratio"],
         layout=profile["layout"],
-        hook_style=profile["hook_style"],
+        hook_style=resolved_hook_style,
         cta_style=profile["cta_style"],
         suggested_cta=CTA_LIBRARY.get(intent, CTA_LIBRARY["build_awareness"]),
         word_count_target=tuple(profile["word_count"]),
         hashtags_target=int(profile["hashtags"]),
-        tempo=profile["tempo"],
+        tempo=resolved_tempo,
         candidate_count=candidate_count,
         temperature=float(profile["temperature"]),
         directives=directives,
@@ -471,6 +621,11 @@ def build_brief(
         track=_norm(track) or topic,
         themes=merged_themes,
         notes=notes,
+        mood=_norm(mood),
+        bpm=float(bpm) if bpm else None,
+        key=_norm(key),
+        energy=energy,
+        ai_disclosure=disclosure,
     )
 
 

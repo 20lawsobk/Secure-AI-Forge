@@ -882,14 +882,28 @@ class ArtistProfileClient:
 
     Storage keys:
       mb:artist:{profile_id}            — profile dict (artist_name, current_single,
-                                          current_album, audience_age, audience_geo)
+                                          current_album, audience_age, audience_geo,
+                                          plus the Brand Voice fields below)
       mb:artist:{profile_id}:releases   — list of release dicts (title, kind,
                                           release_date, streaming_url, status, platforms)
+
+    Brand Voice fields (research-driven — see .agents/memory/brand-voice-profile.md):
+    artists consistently ask for output that "sounds like their brand" instead
+    of generic AI copy/art, and for control over AI-disclosure. Saved once,
+    then pulled automatically into every text/image/video generation request
+    for that artist via request_intelligence.load_brand_voice().
+      genre         — primary genre, used as a fallback when a request omits one
+      tone          — default tone/voice, used as a fallback when a request omits one
+      vocabulary    — list of words/phrases generation should favor
+      avoid_words   — list of words/phrases generation should avoid
+      palette       — list of hex colors for on-brand visual generation
+      ai_disclosure — bool; when true, generated output is labeled AI-assisted
     """
 
     PROFILE_FIELDS = (
         "artist_name", "current_single", "current_album",
         "audience_age", "audience_geo",
+        "genre", "tone", "vocabulary", "avoid_words", "palette", "ai_disclosure",
     )
 
     def __init__(self, storage: StorageClient):
