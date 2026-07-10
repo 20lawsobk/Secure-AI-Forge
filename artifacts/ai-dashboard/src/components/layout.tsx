@@ -11,6 +11,7 @@ import {
   Lock,
   LogOut,
   ChevronRight,
+  Mic2,
 } from "lucide-react";
 import { useState, useCallback, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -34,6 +35,7 @@ const navItems = [
   { href: "/gpu", label: "GPU Cluster", icon: Cpu },
   { href: "/content", label: "Generators", icon: PenTool },
   { href: "/video", label: "Video Studio", icon: Film },
+  { href: "/artist-settings", label: "Brand Voice", icon: Mic2 },
   { href: "/model", label: "Model Status", icon: Settings },
 ];
 

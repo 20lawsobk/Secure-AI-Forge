@@ -532,6 +532,22 @@ router.get("/storage/pipeline/status", async (req, res) => {
   await proxyRequest(req, res, "/storage/pipeline/status");
 });
 
+router.get("/storage/artist/:profileId", async (req, res) => {
+  await proxyRequest(
+    req,
+    res,
+    `/storage/artist/${encodeURIComponent(req.params.profileId)}`,
+  );
+});
+
+router.post("/storage/artist/:profileId", async (req, res) => {
+  await proxyRequest(
+    req,
+    res,
+    `/storage/artist/${encodeURIComponent(req.params.profileId)}`,
+  );
+});
+
 router.post("/training/start-from-storage", async (req, res) => {
   await proxyRequest(req, res, "/training/start-from-storage");
 });

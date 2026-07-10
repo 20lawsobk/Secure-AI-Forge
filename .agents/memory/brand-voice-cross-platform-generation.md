@@ -46,6 +46,13 @@ list mutated in a loop bled across slots). Content generation added an explicit
 `platforms: List[str]` request field that loops `_build(_platform=p)` and returns
 `platform_variants` keyed by platform, guarding the empty-list case before indexing.
 
+**The settings-screen "clear a field" trap.** `ArtistProfileClient.save_profile()`
+merge-updates: any field that is `None` in the incoming payload is left untouched
+rather than cleared. A settings UI must send `""` (empty string) for a blanked text
+field, never `null`/omit it, or the user's "clear" action silently no-ops and the old
+value persists forever. List fields (vocabulary/avoid_words/palette) don't have this
+problem since an empty list is not `None`.
+
 **PDIM response caching must be bypassed when a request depends on external mutable
 state.** `/api/generate/content`'s PDIM cache key is derived from the request payload
 only; once `build_brief()` started reading the artist's stored profile, an unchanged

@@ -14,6 +14,7 @@ const GpuStatus = lazy(() => import("@/pages/gpu"));
 const ContentGenerator = lazy(() => import("@/pages/content"));
 const ModelStatus = lazy(() => import("@/pages/model"));
 const VideoStudio = lazy(() => import("@/pages/video-studio"));
+const ArtistSettings = lazy(() => import("@/pages/artist-settings"));
 const NotFound = lazy(() => import("@/pages/not-found"));
 
 const queryClient = new QueryClient({
@@ -82,6 +83,11 @@ function Router() {
           <Route path="/video">
             <ErrorBoundary fallbackLabel="Video studio error">
               <VideoStudio />
+            </ErrorBoundary>
+          </Route>
+          <Route path="/artist-settings">
+            <ErrorBoundary fallbackLabel="Brand Voice settings error">
+              <ArtistSettings />
             </ErrorBoundary>
           </Route>
           <Route component={NotFound} />
