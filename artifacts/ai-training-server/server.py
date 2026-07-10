@@ -4869,6 +4869,12 @@ class ApiGenerateVideoRequest(_AwarenessMixin):
     key: Optional[str] = None
     # Persistent Brand Voice profile (see storage_client.ArtistProfileClient).
     artistProfileId: Optional[str] = None
+    # ── Cross-platform generation: when set, kick off one render job per
+    # platform in a single call instead of requiring N separate requests.
+    # Each platform reuses the existing PLATFORM_RATIOS / _PLATFORM_SPECS
+    # aspect-ratio + duration logic in VideoAgent — identical to calling the
+    # endpoint once per platform, just batched.
+    platforms: Optional[List[str]] = None
 
 
 class ApiAudioAnalyzeRequest(BaseModel):
@@ -6376,19 +6382,17 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
     return {"job_id": job_id, "status": "processing", "intelligence": brief.to_dict()}
 
 
-@app.post("/api/generate-video")
-async def api_generate_video(req: ApiGenerateVideoRequest, _key=Depends(require_scope("generate"))):
+def _start_video_job(req: ApiGenerateVideoRequest, platform: str) -> tuple[str, Any]:
     """
-    Kick off a fully AI-driven async video render job.
-    Returns job_id immediately; planning + rendering happen in a background thread.
+    Kick off a single fully AI-driven async video render job for ``platform``.
+    Returns (job_id, intelligence_brief). Planning + rendering happen in a
+    background thread. Shared by the single-platform and cross-platform
+    (``platforms`` list) paths of /api/generate-video.
     """
-    if not _model_ready or _script_agent is None or _visual_spec_agent is None or _creative_model is None:
-        raise HTTPException(status_code=503, detail="AI model is still initialising — try again shortly")
-
     # ── Request intelligence: analyse intent & cinematic strategy up front ─
     from ai_model import request_intelligence as ri
     brief = ri.build_brief(
-        modality="video", platform=normalize_platform(req.platform),
+        modality="video", platform=normalize_platform(platform),
         topic=req.topic or req.idea, goal=req.goal, tone=req.tone, genre=req.genre,
         artist=req.artist_name,
         extra=" ".join(filter(None, [req.hook, req.body, req.cta])),
@@ -6400,7 +6404,7 @@ async def api_generate_video(req: ApiGenerateVideoRequest, _key=Depends(require_
     _job_write(job_id, {
         "status":          "pending",
         "created_at":      datetime.utcnow().isoformat() + "Z",
-        "platform":        req.platform,
+        "platform":        platform,
         "genre_detected":  req.genre or "",
         "tone_used":       req.tone,
         "duration":        req.duration or 0,
@@ -6433,7 +6437,7 @@ async def api_generate_video(req: ApiGenerateVideoRequest, _key=Depends(require_
             # not concatenated into `idea` where it would corrupt templates.
             agent_req = VideoAgentRequest(
                 idea=req.idea or brief.augmented_idea,
-                platform=req.platform,
+                platform=platform,
                 goal=req.goal,
                 tone=req.tone or brief.tone,
                 genre=req.genre or "",
@@ -6506,6 +6510,44 @@ async def api_generate_video(req: ApiGenerateVideoRequest, _key=Depends(require_
             })
 
     threading.Thread(target=_plan_and_render, daemon=True, name=f"ApiVideoJob-{job_id}").start()
+    return job_id, brief
+
+
+@app.post("/api/generate-video")
+async def api_generate_video(req: ApiGenerateVideoRequest, _key=Depends(require_scope("generate"))):
+    """
+    Kick off a fully AI-driven async video render job.
+
+    Single-platform (default): returns job_id immediately; unchanged behavior
+    when ``platforms`` is omitted.
+
+    Cross-platform: when ``platforms`` is set, kicks off one independent
+    render job per platform (each with its own aspect ratio / duration via
+    the existing PLATFORM_RATIOS / _PLATFORM_SPECS logic in VideoAgent) and
+    returns all job_ids in a single response instead of requiring N calls.
+    """
+    if not _model_ready or _script_agent is None or _visual_spec_agent is None or _creative_model is None:
+        raise HTTPException(status_code=503, detail="AI model is still initialising — try again shortly")
+
+    if req.platforms:
+        _plats = [normalize_platform(p) for p in req.platforms if p]
+        _plats = list(dict.fromkeys(_plats))
+        if _plats:
+            jobs: dict[str, Any] = {}
+            for _plat in _plats:
+                _jid, _brief = _start_video_job(req, _plat)
+                jobs[_plat] = {"job_id": _jid, "intelligence": _brief.to_dict()}
+            first = next(iter(jobs.values()))
+            return {
+                "job_id": first["job_id"],
+                "status": "processing",
+                "intelligence": first["intelligence"],
+                "platform_jobs": jobs,
+            }
+        # `platforms` present but contained no usable entries (e.g. [""]) —
+        # fall through to the normal single-platform path below.
+
+    job_id, brief = _start_video_job(req, req.platform)
     return {"job_id": job_id, "status": "processing", "intelligence": brief.to_dict()}
 
 
