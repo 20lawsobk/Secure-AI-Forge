@@ -11,7 +11,8 @@ The rule: the quality buffer is a TEMPORARY dataset of world-studied patterns fr
 
 **How to apply:**
 - Blending must be never-raise + TTL-cached — it can never break or slow generation. Retirement check first.
-- GRADUATION is required in EVERY path that consumes the buffer (video sampler AND text hook ranking): a used buffer pick pushes its raw TEMPLATE (not topic-filled text) into the own corpus — otherwise retirement stalls for traffic mixes that skip that path. Architect flagged this as the key gap on first review.
+- GRADUATION is required in EVERY path that consumes the buffer (video sampler, text hook ranking, AND image headline ranking): a used buffer pick pushes its raw TEMPLATE (not topic-filled text) into the own corpus — otherwise retirement stalls for traffic mixes that skip that path. Architect flagged this as the key gap on first review.
+- Each modality graduates into its OWN corpus key (`phrases:hook` for text, `phrases:image_headline` for image, video's per-scene-type keys) even though they draw candidates from the same borrowed `scene_phrases("hook")` bank — keeps graduation counting real usage per modality instead of double-crediting one corpus.
 - Study, don't republish: generation reads only derived templates/stats, never raw exemplar text.
 - Staleness: a buffer older than `MB_AWARENESS_MAX_AGE_H` (default 24h) triggers a background replace-harvest while still serving the old doc.
 - Storage-key gotcha reconfirmed: storage client `keys()` pattern is NOT namespaced but `llen()/get()/set()` ARE — strip the namespace prefix from keys() results before llen.

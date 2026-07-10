@@ -6,6 +6,9 @@ stored in pdim and blends it into generation:
 
   * scene_phrases()    — extra phrase templates for the video scene sampler
   * hook_candidates()  — extra hook candidates ranked by the intelligence layer
+  * image_headline_candidates() — extra on-image headline candidates, same
+    idea as hook_candidates() but with its own graduation corpus so image
+    generation independently contributes to buffer retirement
   * brief_enrichment() — an extra directive + note for every GenerationBrief
 
 Self-sufficiency & retirement
@@ -48,6 +51,12 @@ _state: Dict[str, Any] = {
 # TEMPLATE (not the topic-specific text) into the own corpus. Bounded.
 _recent_hooks: Dict[str, str] = {}
 _RECENT_HOOKS_MAX = 200
+
+# Same idea as _recent_hooks, but for on-image headlines. Kept as a separate
+# map/corpus so image generation's graduation is independent of text's —
+# each modality progresses retirement from its own real usage.
+_recent_image_headlines: Dict[str, str] = {}
+_RECENT_IMAGE_HEADLINES_MAX = 200
 
 
 def _max_age_seconds() -> float:
@@ -225,19 +234,52 @@ def graduate_hook(winner: str) -> bool:
     TEMPLATE into the own corpus (mb:phrases:hook) — text-generation's
     contribution to self-sufficiency, mirroring the video sampler's
     graduation. Never-raise; returns True when a graduation happened."""
+    return _graduate(_recent_hooks, winner, "phrases:hook")
+
+
+def image_headline_candidates(topic: str, artist: str) -> List[str]:
+    """Formatted on-image headline candidates for the intelligence layer's
+    ranking. Draws from the same borrowed 'hook' bank as text/video (short,
+    punchy templates suit an on-image headline too), tracked separately so a
+    winning pick graduates into its own corpus rather than text's."""
+    out: List[str] = []
+    for tpl in scene_phrases("hook"):
+        try:
+            formatted = tpl.format(idea=topic or "this drop",
+                                   artist=artist or "the artist")
+        except (KeyError, IndexError, ValueError):
+            continue
+        out.append(formatted)
+        with _lock:
+            if len(_recent_image_headlines) >= _RECENT_IMAGE_HEADLINES_MAX:
+                _recent_image_headlines.pop(next(iter(_recent_image_headlines)))
+            _recent_image_headlines[formatted] = tpl
+    return out
+
+
+def graduate_image_headline(winner: str) -> bool:
+    """Mirrors graduate_hook for image generation: a winning buffer headline
+    graduates its raw TEMPLATE into mb:phrases:image_headline, so image
+    generation also contributes real usage toward buffer retirement."""
+    return _graduate(_recent_image_headlines, winner, "phrases:image_headline")
+
+
+def _graduate(recent: Dict[str, str], winner: str, corpus_key: str) -> bool:
+    """Shared graduation logic: push `recent[winner]`'s raw template into the
+    named own-corpus list, deduped, bounded, never-raise."""
     with _lock:
-        tpl = _recent_hooks.get(winner)
+        tpl = recent.get(winner)
     if not tpl:
         return False
     store = _store()
     if store is None:
         return False
     try:
-        existing = store.lrange("phrases:hook", 0, -1)
+        existing = store.lrange(corpus_key, 0, -1)
         if tpl in existing:
             return False
-        store.lpush("phrases:hook", tpl)
-        store.ltrim("phrases:hook", 0, 499)
+        store.lpush(corpus_key, tpl)
+        store.ltrim(corpus_key, 0, 499)
         with _lock:
             _state["own_at"] = 0.0  # own corpus changed — re-measure
         return True

@@ -5687,6 +5687,18 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
         if brief.keywords:
             prompt = f"{prompt}. Focus: {', '.join(brief.keywords[:4])}"
 
+        # ── Quality-buffer headline ranking (mirrors best_hook for text and
+        # the scene sampler's tier-1 blend for video) — the agent's own topic
+        # string competes against borrowed-knowledge candidates; a winning
+        # buffer pick graduates into image generation's own corpus. ─────────
+        headline_text = str(topic)
+        try:
+            headline_text, _hl_score, _hl_n = ri.best_image_headline(
+                str(topic), artist_name, str(topic), brief,
+            )
+        except Exception:
+            pass
+
         # ── RTA-1 IRC path-traced background (opt-in, explicit fallback) ──────
         _rta_bg = None
         _engine_choice = (req.render_engine or os.environ.get("RTA_IMAGE_ENGINE") or "").lower()
@@ -5720,7 +5732,7 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
                 from ai_model.image.image_engine import ImageRequest
                 _req = ImageRequest(
                     prompt=prompt,
-                    headline=str(topic),
+                    headline=headline_text,
                     color_scheme=color_scheme,
                     layout=layout,
                     platform=platform,

@@ -657,6 +657,44 @@ def best_hook(
     return ranked[0][0], ranked[0][1], len(ranked)
 
 
+def best_image_headline(
+    topic: str,
+    artist: str,
+    agent_headline: str,
+    brief: GenerationBrief,
+) -> Tuple[str, float, int]:
+    """Pick the best on-image headline among the agent's headline + the
+    quality-buffer's candidates — mirrors best_hook (text) and the video
+    scene sampler's tier-1 buffer blend, so image generation runs the same
+    "borrowed knowledge competes, winner graduates" pattern as the other
+    two modalities.
+
+    Returns (headline_text, score, num_candidates_considered).
+    """
+    candidates = []
+    if _norm(agent_headline):
+        candidates.append(agent_headline)
+    # Quality-buffer headlines compete in the same ranking (empty once
+    # retired) — same borrowed pool as text hooks, tracked separately so
+    # graduation counts toward image generation's own corpus.
+    try:
+        from ai_model.quality_awareness import image_headline_candidates as _qa_headlines
+        candidates.extend(_qa_headlines(topic, artist))
+    except Exception:
+        pass
+    ranked = rank_candidates(candidates, brief)
+    if not ranked:
+        return agent_headline, 0.0, 0
+    # If a quality-buffer headline wins, its template graduates into image
+    # generation's own corpus so it also progresses buffer retirement.
+    try:
+        from ai_model.quality_awareness import graduate_image_headline
+        graduate_image_headline(ranked[0][0])
+    except Exception:
+        pass
+    return ranked[0][0], ranked[0][1], len(ranked)
+
+
 def score_scene_phrase(
     phrase: str,
     scene_type: str,
