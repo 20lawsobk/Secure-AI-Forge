@@ -360,6 +360,106 @@ async function proxyBinary(
   }
 }
 
+// ─── Streamed binary proxy (large files) ────────────────────────────────────
+// Used for rendered video downloads, which can be tens of MB and must not be
+// fully buffered into memory or subjected to the short 45s abort window that
+// `proxyBinary` uses for small previews. Pipes the upstream body straight
+// through to the response and preserves Content-Type/Content-Length/
+// Content-Disposition so download filename semantics survive the proxy hop.
+
+async function proxyBinaryStream(
+  req: Request,
+  res: Response,
+  path: string,
+): Promise<void> {
+  if (_cbIsOpen()) {
+    const retryIn = Math.ceil(
+      (CB_RECOVERY_MS - (Date.now() - (_cbOpenSince ?? Date.now()))) / 1000,
+    );
+    res.status(503).json({
+      error: "AI model server temporarily unavailable",
+      detail: `Circuit breaker open — retry in ~${retryIn}s.`,
+    });
+    return;
+  }
+
+  try {
+    const url = `${MODEL_API_BASE}${path}`;
+    const controller = new AbortController();
+    // Large video files can take a while to transfer; only abort on true
+    // inactivity (no bytes for 5 minutes), not on total transfer time.
+    let idleTimer: NodeJS.Timeout = setTimeout(() => {}, 0);
+    const bumpIdleTimer = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => controller.abort(), 300_000);
+    };
+    bumpIdleTimer();
+
+    const headers: Record<string, string> = {};
+    if (req.headers["x-admin-key"]) {
+      headers["X-Admin-Key"] = req.headers["x-admin-key"] as string;
+    } else if (req.headers["x-api-key"]) {
+      headers["X-Api-Key"] = req.headers["x-api-key"] as string;
+    } else if (_SERVER_FALLBACK_KEY) {
+      headers["X-Api-Key"] = _SERVER_FALLBACK_KEY;
+    }
+
+    let upstreamRes: Awaited<ReturnType<typeof undiciRequest>>;
+    try {
+      upstreamRes = await undiciRequest(url, {
+        method: req.method as any,
+        signal: controller.signal,
+        dispatcher: _keepAlivePool,
+        headers,
+        headersTimeout: 0,
+        bodyTimeout: 0,
+      });
+    } catch (err) {
+      clearTimeout(idleTimer);
+      throw err;
+    }
+
+    if (upstreamRes.statusCode >= 500) {
+      _cbRecordFailure();
+    } else {
+      _cbRecordSuccess();
+    }
+
+    if (upstreamRes.statusCode !== 200) {
+      clearTimeout(idleTimer);
+      const text = await upstreamRes.body.text();
+      try {
+        res.status(upstreamRes.statusCode).json(JSON.parse(text));
+      } catch {
+        res.status(upstreamRes.statusCode).send(text);
+      }
+      return;
+    }
+
+    const contentType =
+      (upstreamRes.headers["content-type"] as string | undefined) ??
+      "application/octet-stream";
+    res.setHeader("Content-Type", contentType);
+    const contentLength = upstreamRes.headers["content-length"];
+    if (contentLength) res.setHeader("Content-Length", contentLength as string);
+    const disposition = upstreamRes.headers["content-disposition"];
+    if (disposition)
+      res.setHeader("Content-Disposition", disposition as string);
+    res.status(200);
+
+    for await (const chunk of upstreamRes.body) {
+      bumpIdleTimer();
+      if (!res.write(chunk)) {
+        await new Promise((resolve) => res.once("drain", resolve));
+      }
+    }
+    clearTimeout(idleTimer);
+    res.end();
+  } catch (err) {
+    handleProxyNetworkError(err, res, path);
+  }
+}
+
 // ─── Routes ─────────────────────────────────────────────────────────────────
 
 router.get("/health", async (req, res) => {
@@ -548,6 +648,14 @@ router.post("/storage/artist/:profileId", async (req, res) => {
   );
 });
 
+router.post("/storage/artist/:profileId/releases", async (req, res) => {
+  await proxyRequest(
+    req,
+    res,
+    `/storage/artist/${encodeURIComponent(req.params.profileId)}/releases`,
+  );
+});
+
 router.post("/training/start-from-storage", async (req, res) => {
   await proxyRequest(req, res, "/training/start-from-storage");
 });
@@ -615,6 +723,22 @@ router.get("/platform/ads/performance/:userId", async (req, res) => {
 router.post("/platform/ads/optimize", async (req, res) => {
   await enrichWithAwareness(req, "ad_copy");
   await proxyRequest(req, res, "/platform/ads/optimize");
+});
+
+// ─── Safety, Audio Analysis & Scoring ───────────────────────────────────────
+
+router.post("/safety/screen", async (req, res) => {
+  await proxyRequest(req, res, "/api/safety/screen");
+});
+
+router.post("/infer/viral-score", async (req, res) => {
+  await proxyRequest(req, res, "/api/infer/viral-score");
+});
+
+// Beat/structure analysis for beat-synced video generation — distinct from
+// the general "/analyze/audio" sentiment-style endpoint above.
+router.post("/audio/analyze", async (req, res) => {
+  await proxyRequest(req, res, "/api/audio/analyze");
 });
 
 // ─── Watchdog ──────────────────────────────────────────────────────────────
@@ -722,6 +846,35 @@ router.get("/video-job/:jobId/preview/:sceneIdx", async (req, res) => {
     req,
     res,
     `/api/video-job/${req.params.jobId}/preview/${req.params.sceneIdx}`,
+  );
+});
+
+// Rendered MP4 download — the Python server registers this same handler under
+// three aliased paths (download/file/video); we mirror all three so callers
+// can use whichever they already reference. Uses the streamed binary proxy
+// (not proxyBinary) since these files can be tens of MB — no full buffering,
+// no short abort timer.
+router.get("/video-job/:jobId/download", async (req, res) => {
+  await proxyBinaryStream(
+    req,
+    res,
+    `/api/video-job/${encodeURIComponent(req.params.jobId)}/download`,
+  );
+});
+
+router.get("/video-job/:jobId/file", async (req, res) => {
+  await proxyBinaryStream(
+    req,
+    res,
+    `/api/video-job/${encodeURIComponent(req.params.jobId)}/file`,
+  );
+});
+
+router.get("/video-job/:jobId/video", async (req, res) => {
+  await proxyBinaryStream(
+    req,
+    res,
+    `/api/video-job/${encodeURIComponent(req.params.jobId)}/video`,
   );
 });
 
