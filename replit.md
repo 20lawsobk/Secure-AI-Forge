@@ -53,6 +53,10 @@ Required env vars: `DATABASE_URL`, `PORT`, `MODEL_API_PORT`, `ADMIN_KEY`, `STORA
 
 _Populate as you build_
 
+## Setup notes
+
+- Imported from GitHub; first run requires `pnpm install` (node_modules aren't checked in) and lets the Python server auto-provision its venv (torch, etc. — takes ~1 min on cold start). Both are now done and the `Start application` workflow runs cleanly.
+
 ## Gotchas
 
 - Always use `pnpm` (not npm/yarn) — the preinstall script enforces this
