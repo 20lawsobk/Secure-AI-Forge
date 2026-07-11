@@ -34,3 +34,18 @@ speed of the *host* is unchanged (still numpy/BLAS on CPU).
 **How to apply:** guard all four with `ai_model/gpu/tests/test_kernels.py`
 (cross-attention Tk≠Tq, T%block≠0, causal, block_size clamp, conv dtype). Kernel
 edits need a model-server reload to go live.
+
+**Rejected: Winograd F(2,3) 3x3 conv.** Measured on this CPU it is 11-18x SLOWER
+than im2col+BLAS (vectorized ~552ms, per-tile ~870ms vs im2col ~49ms), despite
+2.25x fewer theoretical multiplies. Fewer FLOPs ≠ faster: a single large BLAS
+GEMM already saturates the CPU, and Winograd's 4 transform passes add memory
+traffic that dominates. Winograd only wins on hardware where multiplies dominate
+AND transforms are fused (GPU/DSP/hand-tuned). Do NOT integrate it here.
+
+**Accepted: fused row-dot via einsum.** `np.einsum("ij,ij->i", A, B)` is ~3.5x
+faster than `np.sum(A*B, axis=1)` (and `np.dot` ~4.6x faster than `np.sum(x*y)`
+for 1D) because it skips the temporary and hits a fused/BLAS reduction. Applied
+to the path tracer's per-bounce batched dot products (ai_model/rta/image).
+**Why:** the temp array + separate reduction is pure overhead; einsum fuses them.
+**How to apply:** use it for hot batched dot products; it's numerically identical
+(RTA render-contract determinism test still byte-identical).
