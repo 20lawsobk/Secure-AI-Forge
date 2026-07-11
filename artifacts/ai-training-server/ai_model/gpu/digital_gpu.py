@@ -15,6 +15,22 @@ class TypeErrorGPU(GPUError):
     pass
 
 
+class ShapeMismatchError(ShapeError):
+    """Shapes are incompatible for the requested op. Subclass of ShapeError so
+    existing ``except ShapeError`` handlers still catch it."""
+    pass
+
+
+class InvalidOpcodeError(GPUError):
+    """An unknown opcode was requested (see opcode_spec.OPCODES)."""
+    pass
+
+
+class OOMError(GPUError):
+    """A digital VRAM allocation exceeded the configured byte budget."""
+    pass
+
+
 class VRAM:
     def __init__(self):
         self._store = {}
