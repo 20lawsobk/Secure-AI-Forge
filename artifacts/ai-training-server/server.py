@@ -5326,6 +5326,147 @@ async def api_generate_campaign(req: ApiGenerateCampaignRequest, _key=Depends(re
     return plan
 
 
+# ── Campaign scheduling: persist a generated rollout as an editable calendar ───
+# The generate endpoint above returns a plan the artist must post manually. These
+# endpoints let an artist SAVE that plan per-artist, retrieve it as a by-date
+# calendar, edit copy / move dates / mark posts scheduled|posted, and hand posts
+# off to the distribution agent to queue on their target dates.
+
+class CampaignSaveRequest(BaseModel):
+    profile_id: str                           # per-artist calendar partition
+    plan: dict                                # a /api/generate/campaign result
+    name: Optional[str] = None
+
+
+class CampaignPostPatch(BaseModel):
+    profile_id: str
+    hook: Optional[str] = None
+    body: Optional[str] = None
+    cta: Optional[str] = None
+    caption: Optional[str] = None
+    hashtags: Optional[List[str]] = None
+    date: Optional[str] = None                 # move the post to a new date
+    platform: Optional[str] = None
+    format: Optional[str] = None
+    brief: Optional[str] = None
+    status: Optional[str] = None               # draft | scheduled | posted
+
+
+class CampaignScheduleRequest(BaseModel):
+    profile_id: str
+    post_ids: Optional[List[str]] = None       # default: every not-yet-posted post
+    handoff: bool = True                       # use the distribution agent
+
+
+def _campaign_view(doc: dict) -> dict:
+    """Attach a by-date calendar view to a stored campaign doc."""
+    from storage_client import get_campaign_client
+    out = dict(doc)
+    out["calendar"] = get_campaign_client().calendar(doc)
+    return out
+
+
+@app.post("/api/campaigns")
+async def api_campaign_save(req: CampaignSaveRequest,
+                            _key=Depends(require_scope("generate"))):
+    """Persist a generated campaign plan as an editable, schedulable calendar."""
+    from storage_client import get_campaign_client
+    doc = get_campaign_client().save_campaign(
+        req.profile_id, req.plan, name=req.name,
+    )
+    return {"status": "saved", "campaign": _campaign_view(doc)}
+
+
+@app.get("/api/campaigns")
+async def api_campaign_list(profile_id: str,
+                            _key=Depends(require_scope("read"))):
+    """List an artist's saved campaigns (summaries with per-status counts)."""
+    from storage_client import get_campaign_client
+    return {"campaigns": get_campaign_client().list_campaigns(profile_id)}
+
+
+@app.get("/api/campaigns/{campaign_id}")
+async def api_campaign_get(campaign_id: str, profile_id: str,
+                           _key=Depends(require_scope("read"))):
+    """Retrieve one saved campaign with its by-date calendar."""
+    from storage_client import get_campaign_client
+    doc = get_campaign_client().get_campaign(profile_id, campaign_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    return {"campaign": _campaign_view(doc)}
+
+
+@app.delete("/api/campaigns/{campaign_id}")
+async def api_campaign_delete(campaign_id: str, profile_id: str,
+                              _key=Depends(require_scope("generate"))):
+    """Delete a saved campaign."""
+    from storage_client import get_campaign_client
+    ok = get_campaign_client().delete_campaign(profile_id, campaign_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    return {"status": "deleted", "campaign_id": campaign_id}
+
+
+@app.patch("/api/campaigns/{campaign_id}/posts/{post_id}")
+async def api_campaign_edit_post(campaign_id: str, post_id: str,
+                                 patch: CampaignPostPatch,
+                                 _key=Depends(require_scope("generate"))):
+    """Edit a single post — swap copy, move its date, retarget the platform, or
+    mark it scheduled/posted."""
+    from storage_client import get_campaign_client
+    updated = get_campaign_client().update_post(
+        patch.profile_id, campaign_id, post_id,
+        patch.model_dump(exclude={"profile_id"}, exclude_none=True),
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="campaign or post not found")
+    return {"status": "updated", "post": updated}
+
+
+@app.post("/api/campaigns/{campaign_id}/schedule")
+async def api_campaign_schedule(campaign_id: str, req: CampaignScheduleRequest,
+                                _key=Depends(require_scope("generate"))):
+    """Hand posts off to the distribution layer to queue on their target dates.
+
+    Marks the targeted posts ``scheduled`` and — when ``handoff`` is set and the
+    distribution agent is available — attaches the agent's recommended posting
+    time + pitch per post so the calendar carries a real distribution plan, not
+    just a flag. Never fails on a single post's hand-off."""
+    from storage_client import get_campaign_client
+
+    dist_fn = None
+    if req.handoff and _model_ready and _distribution_agent is not None:
+        from ai_model.agents.distribution_agent import DistributionRequest
+
+        def dist_fn(post: dict) -> Optional[dict]:
+            plat = normalize_platform(post.get("platform", "instagram"))
+            script = post.get("hook") or post.get("caption") or plat
+            d = _distribution_agent.run(DistributionRequest(
+                script=script, platform=plat, goal=post.get("goal", "awareness"),
+            ))
+            return {
+                "queued": True,
+                "platform": plat,
+                "target_date": post.get("date"),
+                "posting_time": getattr(d, "posting_time", None),
+                "pitch": getattr(d, "caption", None),
+                "source": getattr(d, "source", "model"),
+                "queued_at": time.time(),
+            }
+
+    doc = await _in_thread(lambda: get_campaign_client().mark_scheduled(
+        req.profile_id, campaign_id, post_ids=req.post_ids, distribution_fn=dist_fn,
+    ))
+    if doc is None:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    return {
+        "status": "scheduled",
+        "scheduled_count": doc.get("last_scheduled_count", 0),
+        "handoff": bool(dist_fn),
+        "campaign": _campaign_view(doc),
+    }
+
+
 @app.post("/api/generate/text")
 async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_scope("generate"))):
     """Two-mode text generation — planner or content."""

@@ -772,6 +772,65 @@ router.post("/content/score", async (req, res) => {
   await proxyRequest(req, res, "/api/content/score");
 });
 
+// ─── Release Campaigns ─────────────────────────────────────────────────────
+// One song → a full multi-week rollout, then persisted per-artist as an
+// editable, schedulable calendar (save / list / edit posts / hand off to the
+// distribution layer to queue on target dates).
+
+router.post("/generate/campaign", async (req, res) => {
+  await enrichWithAwareness(req, "content");
+  await proxyRequest(req, res, "/api/generate/campaign");
+});
+
+router.post("/campaigns", async (req, res) => {
+  await proxyRequest(req, res, "/api/campaigns");
+});
+
+router.get("/campaigns", async (req, res) => {
+  const qs = new URLSearchParams(
+    req.query as Record<string, string>,
+  ).toString();
+  await proxyRequest(req, res, `/api/campaigns${qs ? `?${qs}` : ""}`);
+});
+
+router.get("/campaigns/:id", async (req, res) => {
+  const qs = new URLSearchParams(
+    req.query as Record<string, string>,
+  ).toString();
+  await proxyRequest(
+    req,
+    res,
+    `/api/campaigns/${encodeURIComponent(req.params.id)}${qs ? `?${qs}` : ""}`,
+  );
+});
+
+router.delete("/campaigns/:id", async (req, res) => {
+  const qs = new URLSearchParams(
+    req.query as Record<string, string>,
+  ).toString();
+  await proxyRequest(
+    req,
+    res,
+    `/api/campaigns/${encodeURIComponent(req.params.id)}${qs ? `?${qs}` : ""}`,
+  );
+});
+
+router.patch("/campaigns/:id/posts/:postId", async (req, res) => {
+  await proxyRequest(
+    req,
+    res,
+    `/api/campaigns/${encodeURIComponent(req.params.id)}/posts/${encodeURIComponent(req.params.postId)}`,
+  );
+});
+
+router.post("/campaigns/:id/schedule", async (req, res) => {
+  await proxyRequest(
+    req,
+    res,
+    `/api/campaigns/${encodeURIComponent(req.params.id)}/schedule`,
+  );
+});
+
 // ─── Analysis ──────────────────────────────────────────────────────────────
 
 router.post("/analyze", async (req, res) => {

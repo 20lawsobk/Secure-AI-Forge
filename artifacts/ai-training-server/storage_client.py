@@ -9,6 +9,7 @@ API format: POST /exec  body: {"cmd": "SET", "args": ["key", "value"]}
 import os
 import json
 import time
+import uuid
 import logging
 import threading
 from typing import Any, Optional
@@ -944,6 +945,241 @@ class ArtistProfileClient:
         }
 
 
+class CampaignClient:
+    """Persist generated release-rollout campaigns per artist as an editable,
+    schedulable calendar.
+
+    Turns the plan returned by ``ai_model.generation.build_campaign`` (grouped by
+    phase) into a stored, flat list of posts — each with a stable ``post_id`` and
+    a ``status`` (``draft`` → ``scheduled`` → ``posted``) — so the artist can
+    retrieve the rollout as a by-date calendar, edit copy, move dates, and hand
+    posts off to the distribution layer for queuing on their target dates.
+
+    Storage keys:
+      mb:campaign:{profile_id}:ids            — list of campaign_ids (newest first)
+      mb:campaign:{profile_id}:{campaign_id}  — the full campaign doc (see below)
+
+    Campaign doc:
+      campaign_id, profile_id, artist, title, genre, release_date, weeks,
+      platforms, art_direction, created_at, updated_at, name, notes,
+      posts: [ flat post dicts with post_id / phase / status ]
+    """
+
+    # Fields on a post that the artist may edit (swap copy, move dates, retarget).
+    EDITABLE_POST_FIELDS = (
+        "hook", "body", "cta", "caption", "hashtags",
+        "date", "platform", "format", "brief",
+    )
+    _STATUSES = ("draft", "scheduled", "posted")
+
+    def __init__(self, storage: StorageClient):
+        self.storage = storage
+
+    # ── keys ──────────────────────────────────────────────────────────────────
+    def _ids_key(self, profile_id: str) -> str:
+        return f"mb:campaign:{profile_id}:ids"
+
+    def _doc_key(self, profile_id: str, campaign_id: str) -> str:
+        return f"mb:campaign:{profile_id}:{campaign_id}"
+
+    # ── plan → flat posts ───────────────────────────────────────────────────────
+    @staticmethod
+    def flatten_plan(plan: dict) -> list[dict]:
+        """Flatten a ``build_campaign`` plan (phases → posts) into a flat list of
+        editable/schedulable post records, preserving phase + adding post_id +
+        default status."""
+        posts: list[dict] = []
+        for phase in (plan or {}).get("phases", []) or []:
+            phase_key = phase.get("phase", "")
+            phase_label = phase.get("label", "")
+            for p in phase.get("posts", []) or []:
+                rec = dict(p)
+                rec["post_id"] = uuid.uuid4().hex[:12]
+                rec["phase"] = phase_key
+                rec["phase_label"] = phase_label
+                rec.setdefault("status", "draft")
+                rec.setdefault("scheduled_at", None)
+                rec.setdefault("posted_at", None)
+                rec.setdefault("distribution", None)
+                posts.append(rec)
+        return posts
+
+    @staticmethod
+    def _summary(doc: dict) -> dict:
+        posts = doc.get("posts", []) or []
+        by_status: dict[str, int] = {}
+        for p in posts:
+            s = p.get("status", "draft")
+            by_status[s] = by_status.get(s, 0) + 1
+        dates = [p.get("date") for p in posts if p.get("date")]
+        return {
+            "campaign_id": doc.get("campaign_id"),
+            "name": doc.get("name"),
+            "artist": doc.get("artist"),
+            "title": doc.get("title"),
+            "genre": doc.get("genre"),
+            "release_date": doc.get("release_date"),
+            "platforms": doc.get("platforms", []),
+            "created_at": doc.get("created_at"),
+            "updated_at": doc.get("updated_at"),
+            "total_posts": len(posts),
+            "by_status": by_status,
+            "first_date": min(dates) if dates else None,
+            "last_date": max(dates) if dates else None,
+        }
+
+    # ── CRUD ────────────────────────────────────────────────────────────────────
+    def save_campaign(self, profile_id: str, plan: dict,
+                      name: Optional[str] = None) -> dict:
+        """Persist a freshly generated plan as a new campaign for this artist."""
+        release = (plan or {}).get("release", {}) or {}
+        campaign_id = uuid.uuid4().hex[:12]
+        now = time.time()
+        doc = {
+            "campaign_id": campaign_id,
+            "profile_id": profile_id,
+            "name": name or release.get("title") or "Release campaign",
+            "artist": release.get("artist"),
+            "title": release.get("title"),
+            "genre": release.get("genre"),
+            "release_date": release.get("release_date"),
+            "weeks": release.get("weeks"),
+            "platforms": release.get("platforms", []),
+            "art_direction": (plan or {}).get("art_direction"),
+            "notes": (plan or {}).get("notes", []),
+            "created_at": now,
+            "updated_at": now,
+            "posts": self.flatten_plan(plan),
+        }
+        self.storage.set(self._doc_key(profile_id, campaign_id), doc)
+        ids = self.storage.get(self._ids_key(profile_id)) or []
+        if not isinstance(ids, list):
+            ids = []
+        ids = [campaign_id] + [i for i in ids if i != campaign_id]
+        self.storage.set(self._ids_key(profile_id), ids)
+        return doc
+
+    def get_campaign(self, profile_id: str, campaign_id: str) -> Optional[dict]:
+        return self.storage.get(self._doc_key(profile_id, campaign_id))
+
+    def list_campaigns(self, profile_id: str) -> list[dict]:
+        ids = self.storage.get(self._ids_key(profile_id)) or []
+        if not isinstance(ids, list):
+            return []
+        out: list[dict] = []
+        for cid in ids:
+            doc = self.get_campaign(profile_id, cid)
+            if doc:
+                out.append(self._summary(doc))
+        return out
+
+    def delete_campaign(self, profile_id: str, campaign_id: str) -> bool:
+        existed = self.storage.exists(self._doc_key(profile_id, campaign_id))
+        self.storage.delete(self._doc_key(profile_id, campaign_id))
+        ids = self.storage.get(self._ids_key(profile_id)) or []
+        if isinstance(ids, list) and campaign_id in ids:
+            self.storage.set(self._ids_key(profile_id),
+                             [i for i in ids if i != campaign_id])
+        return bool(existed)
+
+    def _save_doc(self, doc: dict) -> dict:
+        doc["updated_at"] = time.time()
+        self.storage.set(self._doc_key(doc["profile_id"], doc["campaign_id"]), doc)
+        return doc
+
+    @staticmethod
+    def calendar(doc: dict) -> list[dict]:
+        """Return the campaign's posts ordered by date (undated posts fall back to
+        day_offset ordering, placed last)."""
+        posts = list(doc.get("posts", []) or [])
+        posts.sort(key=lambda p: (
+            p.get("date") is None,
+            p.get("date") or "",
+            p.get("day_offset", 0),
+        ))
+        return posts
+
+    # ── edits ────────────────────────────────────────────────────────────────────
+    def update_post(self, profile_id: str, campaign_id: str, post_id: str,
+                    patch: dict) -> Optional[dict]:
+        """Edit a single post — swap copy, move its date, retarget the platform,
+        or change its status (draft/scheduled/posted). Returns the updated post,
+        or ``None`` if the campaign/post does not exist."""
+        doc = self.get_campaign(profile_id, campaign_id)
+        if not doc:
+            return None
+        target = None
+        for p in doc.get("posts", []) or []:
+            if p.get("post_id") == post_id:
+                target = p
+                break
+        if target is None:
+            return None
+
+        for k in self.EDITABLE_POST_FIELDS:
+            if k in patch and patch[k] is not None:
+                target[k] = patch[k]
+
+        # Recompute caption if the parts changed but no explicit caption given.
+        if any(k in patch for k in ("hook", "body", "cta")) and "caption" not in patch:
+            parts = [target.get("hook", ""), target.get("body", ""),
+                     target.get("cta", "")]
+            target["caption"] = "\n\n".join(x for x in parts if x).strip()
+
+        if "caption" in patch and patch["caption"] is not None:
+            target["caption"] = patch["caption"]
+        target["char_count"] = len(target.get("caption", "") or "")
+
+        # Status transitions (draft → scheduled → posted) with timestamps.
+        status = patch.get("status")
+        if status in self._STATUSES:
+            target["status"] = status
+            if status == "scheduled":
+                target["scheduled_at"] = time.time()
+            elif status == "posted":
+                target["posted_at"] = time.time()
+            elif status == "draft":
+                target["scheduled_at"] = None
+                target["posted_at"] = None
+
+        self._save_doc(doc)
+        return target
+
+    def mark_scheduled(self, profile_id: str, campaign_id: str,
+                       post_ids: Optional[list[str]] = None,
+                       distribution_fn: Optional[Any] = None) -> Optional[dict]:
+        """Hand posts off for queuing on their target dates.
+
+        Marks each targeted post ``scheduled`` and, when a ``distribution_fn`` is
+        supplied (the server wires in the distribution agent), attaches the
+        computed posting metadata (optimal time, pitch) for that post's platform.
+        ``post_ids=None`` schedules every not-yet-posted post. Never raises on a
+        single post's distribution failure. Returns the updated campaign doc."""
+        doc = self.get_campaign(profile_id, campaign_id)
+        if not doc:
+            return None
+        wanted = set(post_ids) if post_ids else None
+        scheduled = 0
+        for p in doc.get("posts", []) or []:
+            if wanted is not None and p.get("post_id") not in wanted:
+                continue
+            if wanted is None and p.get("status") == "posted":
+                continue
+            if distribution_fn is not None:
+                try:
+                    info = distribution_fn(p)
+                    if info:
+                        p["distribution"] = info
+                except Exception:
+                    pass
+            p["status"] = "scheduled"
+            p["scheduled_at"] = time.time()
+            scheduled += 1
+        doc["last_scheduled_count"] = scheduled
+        self._save_doc(doc)
+        return doc
+
+
 # ─── Singletons ──────────────────────────────────────────────────────────────
 
 _storage_client: Optional[StorageClient] = None
@@ -953,6 +1189,7 @@ _curriculum_client: Optional[CurriculumStateClient] = None
 _pipeline: Optional[TrainingDataPipeline] = None
 _ads_client: Optional[AdsClient] = None
 _artist_client: Optional["ArtistProfileClient"] = None
+_campaign_client: Optional["CampaignClient"] = None
 
 
 def get_storage() -> StorageClient:
@@ -1002,3 +1239,10 @@ def get_artist_client() -> ArtistProfileClient:
     if _artist_client is None:
         _artist_client = ArtistProfileClient(get_storage())
     return _artist_client
+
+
+def get_campaign_client() -> "CampaignClient":
+    global _campaign_client
+    if _campaign_client is None:
+        _campaign_client = CampaignClient(get_storage())
+    return _campaign_client

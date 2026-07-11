@@ -12,6 +12,7 @@ const ApiKeys = lazy(() => import("@/pages/api-keys"));
 const Training = lazy(() => import("@/pages/training"));
 const GpuStatus = lazy(() => import("@/pages/gpu"));
 const ContentGenerator = lazy(() => import("@/pages/content"));
+const CampaignCalendar = lazy(() => import("@/pages/campaign-calendar"));
 const ModelStatus = lazy(() => import("@/pages/model"));
 const VideoStudio = lazy(() => import("@/pages/video-studio"));
 const ArtistSettings = lazy(() => import("@/pages/artist-settings"));
@@ -73,6 +74,11 @@ function Router() {
           <Route path="/content">
             <ErrorBoundary fallbackLabel="Content generator error">
               <ContentGenerator />
+            </ErrorBoundary>
+          </Route>
+          <Route path="/campaigns">
+            <ErrorBoundary fallbackLabel="Campaign calendar error">
+              <CampaignCalendar />
             </ErrorBoundary>
           </Route>
           <Route path="/model">
