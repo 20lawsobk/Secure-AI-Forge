@@ -126,10 +126,12 @@ def seed(storage: Any, count: int = 12, *, replace: bool = False) -> dict[str, A
     caller fails explicitly instead of writing to the non-persistent in-process
     fallback.
     """
-    if not getattr(storage, "is_available", False):
+    pdim_up = getattr(storage, "is_available", False)
+    disk_up = getattr(storage, "disk_store_available", False)
+    if not pdim_up and not disk_up:
         raise RuntimeError(
             "storage backend unavailable — refusing to seed audio into the "
-            "non-persistent fallback"
+            "non-persistent in-memory fallback (pdim offline, disk store also unavailable)"
         )
 
     start_idx = 0

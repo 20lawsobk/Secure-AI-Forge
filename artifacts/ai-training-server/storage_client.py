@@ -11,7 +11,9 @@ import json
 import time
 import uuid
 import logging
+import sqlite3
 import threading
+from pathlib import Path
 from typing import Any, Optional
 from urllib.error import URLError, HTTPError
 
@@ -55,11 +57,115 @@ def _get_pool() -> Any:
     return _pool_manager
 
 
+class _DiskStore:
+    """SQLite-backed persistent key-value store.
+
+    Used as a durable fallback when the remote pdim storage is offline.
+    Handles large values (e.g. base64 audio chunks) via BLOB storage.
+    Thread-safe: each operation opens its own short-lived connection via
+    check_same_thread=False + WAL mode.
+    """
+
+    _DB_PATH = Path(__file__).parent / "data" / "local_kv.db"
+
+    def __init__(self) -> None:
+        self._path = self._DB_PATH
+        self._lock = threading.Lock()
+        self._ok = False
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            con = self._conn()
+            con.execute(
+                "CREATE TABLE IF NOT EXISTS kv "
+                "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            )
+            con.commit()
+            con.close()
+            self._ok = True
+        except Exception as exc:
+            logger.warning("[DiskStore] init failed: %s", exc)
+
+    def _conn(self) -> sqlite3.Connection:
+        con = sqlite3.connect(str(self._path), check_same_thread=False, timeout=10)
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA synchronous=NORMAL")
+        return con
+
+    @property
+    def available(self) -> bool:
+        return self._ok
+
+    def set(self, key: str, value: Any) -> bool:
+        if not self._ok:
+            return False
+        try:
+            serialized = json.dumps(value) if not isinstance(value, str) else value
+            with self._lock:
+                con = self._conn()
+                con.execute(
+                    "INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)",
+                    (key, serialized),
+                )
+                con.commit()
+                con.close()
+            return True
+        except Exception as exc:
+            logger.debug("[DiskStore] set %s failed: %s", key, exc)
+            return False
+
+    def get(self, key: str) -> Optional[Any]:
+        if not self._ok:
+            return None
+        try:
+            with self._lock:
+                con = self._conn()
+                row = con.execute(
+                    "SELECT value FROM kv WHERE key = ?", (key,)
+                ).fetchone()
+                con.close()
+            if row is None:
+                return None
+            try:
+                return json.loads(row[0])
+            except (json.JSONDecodeError, TypeError):
+                return row[0]
+        except Exception as exc:
+            logger.debug("[DiskStore] get %s failed: %s", key, exc)
+            return None
+
+    def exists(self, key: str) -> bool:
+        if not self._ok:
+            return False
+        try:
+            with self._lock:
+                con = self._conn()
+                row = con.execute(
+                    "SELECT 1 FROM kv WHERE key = ?", (key,)
+                ).fetchone()
+                con.close()
+            return row is not None
+        except Exception:
+            return False
+
+    def all_keys(self) -> list:
+        if not self._ok:
+            return []
+        try:
+            with self._lock:
+                con = self._conn()
+                rows = con.execute("SELECT key FROM kv").fetchall()
+                con.close()
+            return [r[0] for r in rows]
+        except Exception:
+            return []
+
+
 class StorageClient:
     """
     Redis-like storage client for the MaxBooster storage server.
     Uses HTTP exec API: {"cmd": "SET", "args": ["key", "value"]}
-    Falls back to an in-process dict if unreachable.
+    Falls back to a disk-backed SQLite store (durable) and then an
+    in-process dict when the remote pdim storage is unreachable.
     """
 
     def __init__(self):
@@ -68,6 +174,7 @@ class StorageClient:
         self._available: Optional[bool] = None
         self._lock = threading.Lock()
         self._fallback: dict[str, Any] = {}
+        self._disk = _DiskStore()
         self._check_thread = threading.Thread(
             target=self._periodic_health_check, daemon=True
         )
@@ -183,9 +290,15 @@ class StorageClient:
             time.sleep(30)
 
     def _flush_fallback_to_storage(self) -> None:
-        """Re-sync in-memory fallback data to storage after reconnect."""
+        """Re-sync in-memory and disk fallback data to pdim after reconnect."""
         with self._lock:
             snapshot = dict(self._fallback)
+        # Also include any keys that are only on disk (survived restarts)
+        for disk_key in self._disk.all_keys():
+            if disk_key not in snapshot:
+                val = self._disk.get(disk_key)
+                if val is not None:
+                    snapshot[disk_key] = val
         if not snapshot:
             return
         flushed = 0
@@ -208,6 +321,15 @@ class StorageClient:
             self._available = self.ping()
         return bool(self._available)
 
+    @property
+    def disk_store_available(self) -> bool:
+        """True when the on-disk SQLite fallback is operational.
+
+        Callers that need a durable (restart-safe) store but can tolerate
+        pdim being offline should check ``is_available or disk_store_available``.
+        """
+        return self._disk.available
+
     def set(self, key: str, value: Any, ex: Optional[int] = None) -> bool:
         serialized = json.dumps(value) if not isinstance(value, str) else value
         ns_key = self._ns(key)
@@ -217,16 +339,17 @@ class StorageClient:
             else:
                 result = self._exec("SET", ns_key, serialized)
             if result is not None:
-                # Write-through: mirror to fallback even on pdim success so that
-                # a transient GET failure on a subsequent request (common under
-                # heavy concurrent load) can still be served from the local dict
-                # rather than falling through to a cache miss and recompute.
+                # Write-through: mirror to disk + fallback so a transient GET
+                # failure can still be served locally (common under heavy load).
+                self._disk.set(ns_key, value)
                 with self._lock:
                     self._fallback[ns_key] = value
                 return True
+        # pdim unavailable — write to durable disk store + in-memory fallback
+        self._disk.set(ns_key, value)
         with self._lock:
             self._fallback[ns_key] = value
-        return False
+        return self._disk.available
 
     def get(self, key: str) -> Optional[Any]:
         ns_key = self._ns(key)
@@ -237,8 +360,15 @@ class StorageClient:
                     return json.loads(result) if isinstance(result, str) else result
                 except (json.JSONDecodeError, TypeError):
                     return result
+        # Try in-memory first (fast path), then disk store
         with self._lock:
-            return self._fallback.get(ns_key)
+            if ns_key in self._fallback:
+                return self._fallback[ns_key]
+        disk_val = self._disk.get(ns_key)
+        if disk_val is not None:
+            with self._lock:
+                self._fallback[ns_key] = disk_val  # warm the in-memory cache
+        return disk_val
 
     def delete(self, *keys: str) -> int:
         ns_keys = [self._ns(k) for k in keys]
@@ -255,7 +385,9 @@ class StorageClient:
             result = self._exec("EXISTS", ns_key)
             return bool(result)
         with self._lock:
-            return ns_key in self._fallback
+            if ns_key in self._fallback:
+                return True
+        return self._disk.exists(ns_key)
 
     def lpush(self, key: str, *values: Any) -> int:
         ns_key = self._ns(key)
@@ -372,6 +504,7 @@ class StorageClient:
             "instance": STORAGE_INSTANCE,
             "url_configured": bool(self._url),
             "available": self.is_available,
+            "disk_store_available": self.disk_store_available,
             "fallback_keys": len(self._fallback),
         }
 

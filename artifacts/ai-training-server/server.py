@@ -2688,7 +2688,7 @@ async def seed_audio_dataset(count: int = 12, replace: bool = False,
     from workers import seed_audio_dataset as _seed
 
     storage = get_storage()
-    if not storage.is_available:
+    if not storage.is_available and not getattr(storage, "disk_store_available", False):
         raise HTTPException(
             status_code=503,
             detail="storage backend unavailable — cannot seed audio dataset",
