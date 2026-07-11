@@ -23,6 +23,22 @@ CPU and report itself as a GPU. So:
 - `device="cpu"` runs the *identical* code path on torch-CPU, which is how the
   GPU kernels are validated against `CPUBackend` without a GPU present.
 
+**Backend auto-selection (`registry.select_backend`).** Honest chooser: walks a
+preference tuple (default `("gpu","cpu")`), returns the first backend whose
+`is_available()` is True, with a guaranteed no-kwargs CPU fallback. Only skips
+*expected* construction errors (`ValueError` unknown name, `TypeError` kwarg
+mismatch); a raise from an availability probe PROPAGATES — a real fault must not
+be masked as "no hardware here." On this CPU-only host it returns `CPUBackend`.
+
+**Digital backend name-dispatch (`DigitalGPUBackend.run_kernel`).** `run_kernel`
+maps a lowercased name against a fixed `_KERNELS` whitelist, then `getattr`s the
+real numpy op (whitelist check BEFORE getattr = no arbitrary attribute reach).
+Hardware-implying names (`*_fp8`, `*_sm102`, tensor-core) are REFUSED with a clear
+error, never aliased to plain numpy. `alloc(size)` makes a real uint8 VRAM buffer
+and rejects fractional sizes (no silent `int()` truncation).
+**Why:** the "no fake hardware" rule extends to naming — running numpy under an
+fp8/tensor-core name would be a lie even if it computes.
+
 **How to apply:**
 - To actually run on a GPU, deploy on a CUDA host; the same code executes on the
   device with numerics matching `CPUBackend` within ~1e-3. This is the only lever

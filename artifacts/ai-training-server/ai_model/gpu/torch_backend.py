@@ -184,9 +184,68 @@ class DigitalGPUSoftmax(nn.Module):
 
 
 class DigitalGPUBackend:
+    # Real numpy kernels this backend can dispatch by name via run_kernel().
+    # Each maps to an actual DigitalGPU op that computes on numpy. There is
+    # deliberately NO fp8 / tensor-core / sm_102 kernel here — those need real
+    # silicon, so requesting one raises instead of masquerading plain numpy
+    # under a hardware-implying name.
+    _KERNELS = ("gemm", "add", "softmax", "attention", "gemm_bias_relu")
+
     def __init__(self, lanes=32, silicon=None):
         self.gpu = DigitalGPU(lanes=lanes, silicon=silicon)
         self._profile_history = []
+
+    # ── raw allocation (byte-sized handles, like a device allocator) ──────────
+    def alloc(self, size: int) -> int:
+        """Allocate ``size`` bytes of digital VRAM and return an integer handle.
+
+        This is a *real* allocation — a numpy byte buffer tracked in VRAM — not a
+        simulated counter. Free it with ``free(handle)``. (For typed data, prefer
+        the array-based ops directly; this exists so a device-style caller that
+        thinks in byte sizes and handles has a working allocator.)
+        """
+        # Strict integer bytes — never silently truncate a fractional size.
+        if isinstance(size, bool):
+            raise TypeError("alloc size must be an int number of bytes, not bool")
+        if isinstance(size, float):
+            if not size.is_integer():
+                raise ValueError(
+                    f"alloc size must be a whole number of bytes, got {size}")
+            size = int(size)
+        if not isinstance(size, (int, np.integer)):
+            raise TypeError(
+                f"alloc size must be an int, got {type(size).__name__}")
+        n = int(size)
+        if n < 0:
+            raise ValueError(f"alloc size must be non-negative, got {size}")
+        return self.gpu.vram.alloc(np.zeros(n, dtype=np.uint8))
+
+    def free(self, handle: int) -> None:
+        """Free a handle previously returned by ``alloc`` (or any VRAM handle)."""
+        self.gpu.vram.free(handle)
+
+    # ── named-kernel dispatch to the real numpy ops ──────────────────────────
+    def run_kernel(self, name: str, *args, **kwargs):
+        """Dispatch a named kernel to its real numpy implementation on the
+        digital GPU and return the actual result array.
+
+        Only genuine ops are supported (see ``_KERNELS``); e.g.
+        ``run_kernel("gemm", A, B)`` or
+        ``run_kernel("attention", Q, K, V, causal=True)``. A name implying
+        hardware this backend doesn't have (``*_fp8``, ``*_sm102``, tensor-core
+        variants, ...) raises a clear error rather than quietly running plain
+        numpy and reporting it as an FP8/tensor-core kernel.
+        """
+        key = str(name).lower()
+        if key not in self._KERNELS:
+            raise ValueError(
+                f"digital GPU has no kernel named {name!r}. Supported numpy "
+                f"kernels: {list(self._KERNELS)}. There is no FP8 / tensor-core "
+                f"/ sm_102 kernel on this backend — that requires real silicon; "
+                f"use the numpy op (e.g. 'attention', 'gemm') here, or the torch "
+                f"GPUBackend on an actual CUDA host."
+            )
+        return getattr(self.gpu, key)(*args, **kwargs)
 
     def silicon_report(self):
         """Estimated (NOT measured) cycle/time budget from the attached silicon
