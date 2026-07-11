@@ -4715,6 +4715,14 @@ class ApiGenerateCampaignRequest(_AwarenessMixin):
     bpm: Optional[float] = None
     key: Optional[str] = None
     artistProfileId: Optional[str] = None
+    # ── Optional auto-generated visuals (opt-in; text-only plan stays fast by
+    # default). ``generate_images`` pairs every post with an on-brand image;
+    # ``generate_teasers`` additionally queues a short video teaser for
+    # reel/video slots. Both are conditioned on the campaign's shared
+    # ``art_direction`` so the whole rollout looks like one release. Images
+    # render inline; teasers are async render jobs (poll /api/video-job/{id}).
+    generate_images: bool = False
+    generate_teasers: bool = False
 
 
 class ApiGenerateTextRequest(_AwarenessMixin):
@@ -5176,6 +5184,18 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
     return result
 
 
+# Default still-image layout per (normalized) platform for campaign artwork.
+# Reel/story slots override this to vertical regardless of platform.
+_CAMPAIGN_LAYOUT_BY_PLATFORM: dict[str, str] = {
+    "instagram": "square_1_1",
+    "facebook":  "square_1_1",
+    "tiktok":    "vertical_9_16",
+    "youtube":   "landscape_16_9",
+    "twitter":   "landscape_16_9",
+    "linkedin":  "landscape_16_9",
+}
+
+
 @app.post("/api/generate/campaign")
 async def api_generate_campaign(req: ApiGenerateCampaignRequest, _key=Depends(require_scope("generate"))):
     """Turn one release into a full rollout campaign.
@@ -5192,23 +5212,116 @@ async def api_generate_campaign(req: ApiGenerateCampaignRequest, _key=Depends(re
     from ai_model.generation import build_campaign
 
     artist = req.artist_name or req.artist or "the artist"
-    plan = build_campaign(
-        artist=artist,
-        title=req.title,
-        genre=req.genre,
-        tone=req.tone,
-        brand_voice=req.brand_voice,
-        target_audience=req.target_audience,
-        platforms=req.platforms,
-        weeks=req.weeks or 6,
-        mood=req.mood,
-        bpm=req.bpm,
-        key=req.key,
-        release_date=req.release_date,
-        hashtag_fn=_api_hashtags,
-        normalize_platform_fn=normalize_platform,
-        seed=abs(hash(f"{artist}|{req.title}")) % 100000,
-    )
+
+    # ── Optional per-post asset generators (opt-in) ───────────────────────────
+    # Reuse the existing in-house image engine and video render pipeline, but
+    # condition every asset on the campaign's SHARED art_direction (palette +
+    # mood) so the whole rollout looks like one release. Both are never-raise:
+    # a failed asset just leaves that post text-only.
+    def _campaign_image_fn(*, topic, headline, platform, fmt, purpose, art_direction):
+        """Render one on-brand still image via the ImageEngine (/api/generate/image
+        engine), forced onto the campaign's shared palette/mood. Runs inline."""
+        if not _image_engine:
+            return None
+        try:
+            from ai_model.image.image_engine import ImageRequest
+            _plat = normalize_platform(platform)
+            # Reels/stories are vertical; feed posts follow the platform default.
+            layout = "vertical_9_16" if fmt in ("reel", "story") \
+                else _CAMPAIGN_LAYOUT_BY_PLATFORM.get(_plat, "square_1_1")
+            ad = art_direction or {}
+            color_scheme = ad.get("color_scheme") or "dark_neon"
+            mood = ad.get("mood")
+            style_tags = [t for t in [mood] if t] or ["cinematic"]
+            prompt = f"{mood or 'cinematic'} promotional visual for: {topic}"
+            # Deterministic seed → cohesive, reproducible campaign artwork.
+            seed = abs(hash((artist, topic, _plat, fmt, headline))) % (2 ** 31)
+            _req = ImageRequest(
+                prompt=prompt, headline=str(headline or topic),
+                color_scheme=color_scheme, layout=layout, platform=_plat,
+                artist_name=artist, intent=purpose or "promotional",
+                style_tags=style_tags, seed=seed,
+            )
+            res = _image_engine.render(_req)
+            if not (res and res.success):
+                return None
+            # Fold produced image back into the retrieval index (never-raise).
+            try:
+                from ai_model.retrieval.generated_ingestor import get_generated_ingestor
+                from ai_model.image.image_engine import _UPLOADS_DIR as _IMG_DIR
+                get_generated_ingestor().enqueue(
+                    str(_IMG_DIR / res.filename), brand=artist,
+                    endpoint="/api/generate/campaign", platform=_plat,
+                )
+            except Exception:
+                pass
+            return {
+                "type": "image", "url": res.url, "width": res.width,
+                "height": res.height, "format": "png",
+                "meta": {
+                    "color_scheme": res.color_scheme, "layout": res.layout,
+                    "engine": "maxbooster-pil-v1",
+                    "conditioned_on": "campaign_art_direction",
+                },
+            }
+        except Exception:
+            return None
+
+    def _campaign_teaser_fn(*, topic, hook, body, cta, platform, purpose, art_direction):
+        """Queue one short video teaser via the /api/generate-video pipeline,
+        conditioned on the campaign's genre/mood so it matches the art direction.
+        Async: returns the render job id to poll."""
+        if not (_model_ready and _script_agent and _visual_spec_agent and _creative_model):
+            return None
+        try:
+            ad = art_direction or {}
+            vreq = ApiGenerateVideoRequest(
+                idea=topic, platform=normalize_platform(platform),
+                genre=req.genre, tone=req.tone or "energetic",
+                goal=purpose or "awareness", artist_name=artist,
+                hook=hook, body=body, cta=cta, topic=topic,
+                mood=ad.get("mood") or req.mood, bpm=req.bpm, key=req.key,
+            )
+            jid, _brief = _start_video_job(vreq, normalize_platform(platform))
+            return {
+                "type": "video", "job_id": jid, "status": "processing",
+                "poll_url": f"/api/video-job/{jid}",
+                "meta": {"conditioned_on": "campaign_art_direction"},
+            }
+        except Exception:
+            return None
+
+    image_fn = _campaign_image_fn if req.generate_images else None
+    teaser_fn = _campaign_teaser_fn if req.generate_teasers else None
+
+    def _build():
+        return build_campaign(
+            artist=artist,
+            title=req.title,
+            genre=req.genre,
+            tone=req.tone,
+            brand_voice=req.brand_voice,
+            target_audience=req.target_audience,
+            platforms=req.platforms,
+            weeks=req.weeks or 6,
+            mood=req.mood,
+            bpm=req.bpm,
+            key=req.key,
+            release_date=req.release_date,
+            hashtag_fn=_api_hashtags,
+            normalize_platform_fn=normalize_platform,
+            image_fn=image_fn,
+            teaser_fn=teaser_fn,
+            seed=abs(hash(f"{artist}|{req.title}")) % 100000,
+        )
+
+    # Asset generation renders images inline (blocking PIL work), so run the
+    # whole build off the event loop when assets are requested; the fast
+    # text-only path stays synchronous.
+    if image_fn or teaser_fn:
+        plan = await _in_thread(_build)
+    else:
+        plan = _build()
     plan["processing_time_ms"] = round((time.time() - start) * 1000, 1)
     return plan
 

@@ -65,6 +65,10 @@ _BLUEPRINT: List[Dict[str, Any]] = [
     {"phase": "sustain",  "type": "milestone",    "format": "post",  "day": 18,  "goal": "social_proof", "platform": "instagram", "theme": "streams milestone",         "brief": "Celebrate a streams / playlist milestone with fans."},
 ]
 
+# Formats that represent moving video (get a short video teaser when asset
+# generation is opted into); everything else is a still image only.
+_TEASER_FORMATS = {"reel", "video"}
+
 _PHASE_META = {
     "announce": ("Announcement", "Reveal the release exists and start the story."),
     "tease":    ("Teaser",       "Give tasters of the sound to build anticipation."),
@@ -191,6 +195,8 @@ def build_campaign(
     release_date: Optional[str] = None,
     hashtag_fn: Optional[Callable[[str, Optional[str], str], List[str]]] = None,
     normalize_platform_fn: Optional[Callable[[str], str]] = None,
+    image_fn: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
+    teaser_fn: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
     seed: int = 0,
 ) -> Dict[str, Any]:
     """Build a full release rollout campaign for one song. Never raises.
@@ -198,6 +204,14 @@ def build_campaign(
     Returns a structured, multi-week, multi-platform content calendar: phased
     posts each with ready-to-post copy (hook/body/CTA/caption + hashtags), plus
     shared art direction (Visual DNA) for the imagery and video.
+
+    Optional visual asset generation (opt-in via ``image_fn`` / ``teaser_fn``):
+    when an ``image_fn`` is supplied, every post is paired with an on-brand image
+    conditioned on the campaign's shared ``art_direction`` (so the whole rollout
+    looks like one release); when a ``teaser_fn`` is supplied, reel/video slots
+    additionally get a short video teaser. Both callables are invoked never-raise
+    — a failed asset simply leaves that post text-only, so the calendar is always
+    complete. When neither is supplied the plan stays text-only and fast.
     """
     artist = (artist or "the artist").strip() or "the artist"
     title = (title or "the new single").strip() or "the new single"
@@ -233,9 +247,18 @@ def build_campaign(
         except Exception:
             return None
 
+    # Shared Visual DNA for the whole rollout — computed once up front so the
+    # optional per-post asset generators can condition on it (every image/teaser
+    # shares one palette/energy) and so it can be returned to the caller as-is.
+    art = _art_direction(
+        idea=title, genre=genre, tone=tone, mood=mood, bpm=bpm, key=key, seed=seed,
+    )
+
     phases: Dict[str, Dict[str, Any]] = {}
     total = 0
     by_platform: Dict[str, int] = {}
+    images_generated = 0
+    teasers_queued = 0
 
     for slot in _BLUEPRINT:
         try:
@@ -295,6 +318,33 @@ def build_campaign(
                 "char_count": len(f"{artist} — {title}"),
             }
 
+        # ── Optional generated assets (opt-in), conditioned on the shared art
+        # direction so every asset looks like one release. Never-raise: a failed
+        # asset just leaves the post text-only and never drops it.
+        if image_fn is not None:
+            try:
+                img = image_fn(
+                    topic=title, headline=post["hook"], platform=post["platform"],
+                    fmt=post["format"], purpose=post["goal"], art_direction=art,
+                )
+                if img:
+                    post["image"] = img
+                    images_generated += 1
+            except Exception:
+                pass
+        if teaser_fn is not None and post["format"] in _TEASER_FORMATS:
+            try:
+                tsr = teaser_fn(
+                    topic=title, hook=post["hook"], body=post["body"],
+                    cta=post["cta"], platform=post["platform"],
+                    purpose=post["goal"], art_direction=art,
+                )
+                if tsr:
+                    post["teaser"] = tsr
+                    teasers_queued += 1
+            except Exception:
+                pass
+
         ph = slot["phase"]
         if ph not in phases:
             label, desc = _PHASE_META.get(ph, (ph.title(), ""))
@@ -314,14 +364,14 @@ def build_campaign(
             "platforms": allowed,
             "release_date": rel.isoformat() if rel else None,
         },
-        "art_direction": _art_direction(
-            idea=title, genre=genre, tone=tone, mood=mood, bpm=bpm, key=key, seed=seed,
-        ),
+        "art_direction": art,
         "phases": ordered,
         "summary": {
             "total_posts": total,
             "by_platform": by_platform,
             "by_phase": {p["phase"]: len(p["posts"]) for p in ordered},
+            "images_generated": images_generated,
+            "teasers_queued": teasers_queued,
         },
         "notes": [
             "Rollout works backward from release day; negative day_offset = days "
