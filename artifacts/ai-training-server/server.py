@@ -680,16 +680,12 @@ def _merged_awareness_for(req: Any) -> str:
     fallback: they are internal prompt-engineering instructions the awareness
     parser would quote verbatim. Returns "" when there is no real context, which
     every agent handles gracefully. Every modality now uses awareness the same
-    way — only the direction personalisation differs per endpoint."""
-    from ai_model import request_intelligence as ri
-    direction = " ".join(s for s in (
-        _as_text(getattr(req, "instruction", None)),
-        _as_text(getattr(req, "extra_context", None)),
-    ) if s)
-    return "\n".join(p for p in (
-        ri.awareness_from_direction(direction, getattr(req, "content_themes", None)),
-        (getattr(req, "awareness", "") or "").strip(),
-    ) if p)
+    way — only the direction personalisation differs per endpoint.
+
+    Delegates to the unified generation orchestrator so awareness merging has a
+    single source of truth shared across all five modalities."""
+    from ai_model.generation import merge_awareness
+    return merge_awareness(req)
 
 
 class ContentRequest(_AwarenessMixin):
@@ -4698,6 +4694,29 @@ class ApiGenerateContentRequest(_AwarenessMixin):
     platforms: Optional[List[str]] = None
 
 
+class ApiGenerateCampaignRequest(_AwarenessMixin):
+    """Turn one release into a full multi-week, multi-platform rollout campaign.
+
+    The most-requested capability for independent artists/producers: a structured
+    release rollout (announce → tease → pre-save → release day → sustain) with
+    ready-to-post copy per post plus shared visual art direction.
+    """
+    title: str                                   # the song / release name
+    artist_name: Optional[str] = None
+    artist: Optional[str] = None                 # MaxBooster client alias
+    genre: Optional[str] = None
+    tone: Optional[str] = None
+    brand_voice: Optional[str] = None
+    target_audience: Optional[str] = None
+    platforms: Optional[List[str]] = None        # default ["instagram","tiktok"]
+    weeks: Optional[int] = None                  # campaign length, default 6 (2–12)
+    release_date: Optional[str] = None           # ISO date; posts get absolute dates
+    mood: Optional[str] = None
+    bpm: Optional[float] = None
+    key: Optional[str] = None
+    artistProfileId: Optional[str] = None
+
+
 class ApiGenerateTextRequest(_AwarenessMixin):
     mode: str  # "planner" | "content"
     system: Optional[str] = None
@@ -4973,12 +4992,16 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
     def _build(_request=None, _platform=None):
         # ── Request intelligence: analyse intent, audience & strategy up front ──
         from ai_model import request_intelligence as ri
+        from ai_model.generation import build_context
         _plat = _platform or platform
         _narrative = " ".join(
             filter(None, [req.instruction, req.extra_context, req.artist_bio])
         )
-        brief = ri.build_brief(
-            modality="content", platform=_plat, topic=topic, goal=goal,
+        # Unified orchestrator: brief + merged awareness in one call. Technique
+        # extraction is skipped on the hot text path (no media rendered here).
+        _ctx = build_context(
+            "content", req, with_technique=False,
+            platform=_plat, topic=topic, goal=goal,
             tone=req.tone, genre=req.genre, artist=artist,
             extra=" ".join(filter(None, [req.brand_voice, req.target_audience])),
             narrative=_narrative,
@@ -4987,6 +5010,7 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
             mood=req.mood, bpm=req.bpm, key=req.key,
             artist_profile_id=req.artistProfileId,
         )
+        brief = _ctx.brief
 
         hook = f"🎵 {artist} just dropped something you need to hear — {topic}"
         body = (f"Bringing {req.genre or 'music'} vibes that hit different. "
@@ -5012,7 +5036,7 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
         #      so this path never actually fed the bridge.
         # `brief.directives` are deliberately excluded: they are internal
         # prompt-engineering instructions the parser would quote verbatim.
-        _merged_awareness = _merged_awareness_for(req)
+        _merged_awareness = _ctx.awareness
 
         if _model_ready and _script_agent:
             from ai_model.agents.script_agent import ScriptRequest
@@ -5152,6 +5176,43 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
     return result
 
 
+@app.post("/api/generate/campaign")
+async def api_generate_campaign(req: ApiGenerateCampaignRequest, _key=Depends(require_scope("generate"))):
+    """Turn one release into a full rollout campaign.
+
+    The most-requested capability for independent artists/producers (Water & Music
+    survey; RouteNote/NotNoise/Chartlex rollout guides): a structured multi-week,
+    multi-platform content calendar — announce → tease → pre-save → release day →
+    sustain — with ready-to-post copy per post plus shared visual art direction,
+    so one song becomes a whole campaign. Composes the same brief + caption
+    engine as ``/api/generate/content`` and the unified Visual-DNA technique
+    engine. Never fails: any slot that can't generate degrades to a template.
+    """
+    start = time.time()
+    from ai_model.generation import build_campaign
+
+    artist = req.artist_name or req.artist or "the artist"
+    plan = build_campaign(
+        artist=artist,
+        title=req.title,
+        genre=req.genre,
+        tone=req.tone,
+        brand_voice=req.brand_voice,
+        target_audience=req.target_audience,
+        platforms=req.platforms,
+        weeks=req.weeks or 6,
+        mood=req.mood,
+        bpm=req.bpm,
+        key=req.key,
+        release_date=req.release_date,
+        hashtag_fn=_api_hashtags,
+        normalize_platform_fn=normalize_platform,
+        seed=abs(hash(f"{artist}|{req.title}")) % 100000,
+    )
+    plan["processing_time_ms"] = round((time.time() - start) * 1000, 1)
+    return plan
+
+
 @app.post("/api/generate/text")
 async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_scope("generate"))):
     """Two-mode text generation — planner or content."""
@@ -5179,10 +5240,14 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
     def _build(_request=None):
         # ── Request intelligence: analyse intent, audience & strategy up front ──
         from ai_model import request_intelligence as ri
-        brief = ri.build_brief(
-            modality="text", platform=platform, topic=idea, goal=intent, tone=tone,
+        from ai_model.generation import build_context
+        # Unified orchestrator: brief + merged awareness in one call.
+        _ctx = build_context(
+            "text", req, with_technique=False,
+            platform=platform, topic=idea, goal=intent, tone=tone,
             extra=getattr(req, "brand_voice", None),
         )
+        brief = _ctx.brief
 
         fallback = f"Generated content for intent '{intent}'."
         candidates: List[str] = []
@@ -5199,7 +5264,7 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
                 # comment in /api/generate/content above).
                 return _script_agent.run(ScriptRequest(
                     idea=idea, platform=platform, goal=intent, tone=brief.tone,
-                    awareness=_merged_awareness_for(req),
+                    awareness=_ctx.awareness,
                 ))
 
             try:
@@ -5736,9 +5801,23 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
             artist_profile_id=req.artistProfileId,
         )
 
+        # Unified conditioning bus: real-asset-grounded visual technique drives
+        # the default colour scheme + RTA mood (VisualSpecAgent may still
+        # override). Never-raise.
+        try:
+            from ai_model.generation import extract_technique as _extract_tech
+            _tech = _extract_tech(
+                idea=str(topic), genre=req.genre,
+                tone=(style_tags[0] if style_tags else None),
+                mood=req.mood, bpm=req.bpm, key=req.key, brand=artist_name,
+                seed=abs(hash((slot_id, str(topic)))) % (2**31),
+            )
+        except Exception:
+            _tech = None
+
         # ── Determine layout and color scheme via VisualSpecAgent ─────────────
         layout       = brief.layout
-        color_scheme = "dark_neon"
+        color_scheme = _tech.color_scheme() if _tech else "dark_neon"
         # Slot-local copy — each slot/platform gets its own derived tags, so
         # one slot's producer-metadata tags never bleed into the next slot's
         # render (the shared `style_tags` list from constraints/step is the
@@ -5804,7 +5883,7 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
                 else:
                     _bh, _bw = _base, max(64, int(round(_base * _pw / _ph)))
                 _seed = _rta.image.scene_builder.stable_seed(str(topic), platform, color_scheme)
-                _mood = slot_style_tags[0] if slot_style_tags else "cinematic"
+                _mood = _tech.mood() if _tech else (slot_style_tags[0] if slot_style_tags else "cinematic")
                 # NEE (direct light sampling) in the path tracer cuts variance
                 # hard, so 6 spp now reads cleaner than the old 20-spp brute force
                 # at a fraction of the render time.
@@ -5867,6 +5946,7 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
                     "engine":       ("rta-irc-pathtraced-v1" if _rta_bg is not None
                                      else "maxbooster-pil-v1"),
                     "ai_disclosure": brief.ai_disclosure,
+                    "technique":    _tech.to_dict() if _tech else None,
                 },
             })
         else:
@@ -5891,6 +5971,7 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
                     "engine":       "maxbooster-pil-v1",
                     "status":       "engine_not_ready",
                     "ai_disclosure": brief.ai_disclosure,
+                    "technique":    _tech.to_dict() if _tech else None,
                 },
             })
 
@@ -6252,6 +6333,18 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         goal=req.intent, tone=None, genre=req.genre,
     )
 
+    # Unified conditioning bus: sonic technique (tempo/key/spectral tilt). When
+    # TECHNIQUE_REAL_AUDIO=1 these can come from a real held audio sample;
+    # otherwise they stay None and the brief-derived tempo band drives BPM.
+    try:
+        from ai_model.generation import extract_technique as _extract_tech
+        _audio_tech = _extract_tech(
+            idea=genre_hint, genre=req.genre, tone=brief.tone,
+            mood=req.intent, seed=(req.seed or 0), with_audio=True,
+        )
+    except Exception:
+        _audio_tech = None
+
     # Pre-generate AI concept synchronously before spawning the thread
     audio_concept  = None
     style_hook     = None
@@ -6312,6 +6405,13 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         else:
             rng2 = _np2.random.default_rng((_seed_base + 7919) % (2**31))
             key  = keys_list[int(rng2.integers(0, len(keys_list)))]
+        # Real-asset sonic technique (opt-in) grounds tempo/key when the caller
+        # gave neither a style fingerprint nor an explicit target.
+        if _audio_tech is not None:
+            if not (fp and len(fp) >= 4) and req.target_bpm is None and _audio_tech.tempo:
+                bpm = round(float(_audio_tech.tempo), 1)
+            if not (fp and len(fp) >= 8) and req.target_key is None and _audio_tech.key:
+                key = _audio_tech.key
         # Producer targets override the derived values (exact key/BPM the output
         # must LAND on, via pitch-shift + time-stretch in the render).
         target_bpm = float(req.target_bpm) if req.target_bpm else bpm
@@ -6378,6 +6478,8 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         })
 
     _job_update(job_id, {"intelligence": brief.to_dict()})
+    if _audio_tech is not None:
+        _job_update(job_id, {"technique": _audio_tech.to_dict()})
     threading.Thread(target=_process, daemon=True, name=f"ApiAudioJob-{job_id}").start()
     return {"job_id": job_id, "status": "processing", "intelligence": brief.to_dict()}
 
@@ -6473,7 +6575,26 @@ def _start_video_job(req: ApiGenerateVideoRequest, platform: str) -> tuple[str, 
             ratio  = production.aspect_ratio or PLATFORM_RATIOS.get(production.platform, "9:16")
             width, height = ASPECT_RATIOS.get(ratio, (1080, 1920))
 
-            scene_configs = agent.build_open_scenes(agent_req, production, width, height)
+            # Unified conditioning bus: extract real-asset-grounded Visual DNA
+            # so the diffusion background pipeline conditions on the technique of
+            # peak reference media, not just a genre lookup. Never-raise.
+            try:
+                from ai_model.generation import extract_technique
+                _tech = extract_technique(
+                    idea=agent_req.idea, genre=production.genre_detected,
+                    tone=production.tone_used, energy=getattr(brief, "energy", None),
+                    mood=getattr(brief, "mood", None), bpm=getattr(brief, "bpm", None),
+                    key=getattr(brief, "key", None), brand=req.artist_name or None,
+                    seed=abs(hash(job_id)) % (2**31),
+                )
+                _tech_dna = _tech.dna_dict()
+            except Exception:
+                _tech, _tech_dna = None, None
+
+            scene_configs = agent.build_open_scenes(
+                agent_req, production, width, height, technique_dna=_tech_dna)
+            if _tech is not None:
+                _job_update(job_id, {"technique": _tech.to_dict()})
             dna        = ai_scene_builder.build_dna(agent_req.idea, production.genre_detected, production.tone_used)
             transition = "fadeblack" if dna.darkness > 0.70 else "dissolve" if dna.energy < 0.50 else "fade"
 
@@ -6746,6 +6867,7 @@ async def api_poll_video_job(job_id: str, _key=Depends(require_scope("read"))):
             "scenes":          job.get("scenes", []),
             "scenes_rendered": job.get("scenes_rendered", 0),
             "render_ms":       job.get("render_ms"),
+            "technique":       job.get("technique"),
         }
     if job["status"] == "error":
         return {"status": "error", "error": job.get("error", "Unknown error")}
@@ -6916,6 +7038,7 @@ async def api_poll_audio_job(job_id: str, _key=Depends(require_scope("read"))):
             "concept":   job.get("concept"),
             "style_hook": job.get("style_hook"),
             "source":    job.get("source", "heuristic"),
+            "technique": job.get("technique"),
         }
     if job["status"] == "error":
         return {"status": "error", "error": job.get("error", "Unknown error")}

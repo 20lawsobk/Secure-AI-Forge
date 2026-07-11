@@ -15,7 +15,7 @@ from __future__ import annotations
 import hashlib
 import colorsys
 from dataclasses import dataclass
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from .scenes import SceneConfig, TextElement, FONT_PATH
 
@@ -296,6 +296,7 @@ def build_scenes(
     width: int,
     height: int,
     awareness: str = "",
+    technique_dna: Optional[Dict] = None,
 ) -> List[SceneConfig]:
     """
     Build a list of SceneConfig objects from content DNA.
@@ -465,12 +466,13 @@ def build_scenes(
             "tone": tone,
             "awareness": awareness,
             "brand": artist_name or "",
-            "dna": {
+            "dna": technique_dna or {
                 "energy": dna.energy,
                 "darkness": dna.darkness,
                 "warmth": dna.warmth,
                 "saturation": dna.saturation,
             },
+            "technique_source": "real_asset" if technique_dna else "genre_prior",
         } if awareness else {}
 
         cfg = SceneConfig(

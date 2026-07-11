@@ -202,6 +202,47 @@ def _compute_vector(src: Any) -> Optional[np.ndarray]:
         return None
 
 
+def describe_image(src: Any) -> Optional[Dict[str, float]]:
+    """Interpretable *technique* descriptors for a real image, each in [0, 1].
+
+    Unlike :func:`image_to_vector` (a normalized embedding for nearest-neighbour
+    retrieval), this returns human-meaningful scalars — brightness, darkness,
+    contrast, saturation, warmth, colorfulness — the raw material the generation
+    technique layer turns into Visual DNA for conditioning renderers. Never
+    raises; returns ``None`` when the source can't be read.
+    """
+    img = _to_rgb(src)
+    if img is None:
+        return None
+    try:
+        small = img.resize((WORK, WORK))
+        rgb = np.asarray(small, dtype=np.float32)
+        hsv = np.asarray(small.convert("HSV"), dtype=np.float32)
+        s = hsv[:, :, 1]
+        r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
+        lum = 0.299 * r + 0.587 * g + 0.114 * b
+        p05, p95 = np.percentile(lum, [5, 95])
+        rg = r - g
+        yb = 0.5 * (r + g) - b
+        colorfulness = (float(np.sqrt(rg.std() ** 2 + yb.std() ** 2))
+                        + 0.3 * float(np.sqrt(rg.mean() ** 2 + yb.mean() ** 2))) / 255.0
+        brightness = float(lum.mean()) / 255.0
+
+        def _c(x: float) -> float:
+            return float(max(0.0, min(1.0, x)))
+
+        return {
+            "brightness": _c(brightness),
+            "darkness": _c(1.0 - brightness),
+            "contrast": _c((p95 - p05) / 255.0),
+            "saturation": _c(float(s.mean()) / 255.0),
+            "warmth": _c(float((r > b).mean())),
+            "colorfulness": _c(colorfulness),
+        }
+    except Exception:
+        return None
+
+
 def image_to_vector(src: Any, *, use_cache: bool = True) -> Optional[np.ndarray]:
     """
     Deterministic EMBED_DIM feature vector for a real image. Never raises.

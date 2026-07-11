@@ -11,7 +11,7 @@ from __future__ import annotations
 import gc
 import re
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 
 from ..model.creative_model import CreativeModel
 from ..agents.script_agent import ScriptAgent, PLATFORM_CTAS
@@ -340,11 +340,16 @@ class VideoAgent:
         prod: VideoProduction,
         width: int,
         height: int,
+        technique_dna: Optional[Dict] = None,
     ) -> List[SceneConfig]:
         """
         Convert a VideoProduction into SceneConfig objects via the AI scene
         builder.  No template is involved — visual DNA is computed from
         genre/tone/idea and every parameter is generated fresh.
+
+        When ``technique_dna`` is supplied (real-asset-grounded Visual DNA from
+        the generation orchestrator) it overrides the genre-prior DNA the
+        diffusion background pipeline conditions on.
         """
         scenes_data = [{"type": s.scene_type, "text": s.text} for s in prod.scenes]
         return ai_scene_builder.build_scenes(
@@ -358,6 +363,7 @@ class VideoAgent:
             width=width,
             height=height,
             awareness=req.awareness,
+            technique_dna=technique_dna,
         )
 
     def render(self, req: VideoAgentRequest) -> CinematicResult:
