@@ -32,7 +32,8 @@ copy (a known failure mode when instruction text is templated raw).
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional
+import re
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
 # ── Rollout blueprint ────────────────────────────────────────────────────────
@@ -78,8 +79,11 @@ _PHASE_META = {
 }
 
 # Clean, phase-appropriate hooks per content type. ``{title}``/``{artist}`` are
-# filled; ``countdown`` is handled separately (needs the day count).
-_HOOKS = {
+# filled; ``countdown`` is handled separately (needs the day count). A value may
+# be a list of variants — when the same content type is used by more than one
+# slot (e.g. two ``out_now`` posts on release day), each occurrence takes the
+# next variant so no two posts in the campaign share an identical hook.
+_HOOKS: Dict[str, Any] = {
     "announcement": "New single incoming — '{title}' 🎶",
     "teaser":       "Something new from {artist} is on the way…",
     "story":        "The story behind '{title}'",
@@ -87,7 +91,10 @@ _HOOKS = {
     "lyric_tease":  "This line from '{title}' hits different…",
     "bts":          "Behind the scenes making '{title}'",
     "presave_push": "'{title}' — pre-save it now (link in bio)",
-    "out_now":      "'{title}' is OUT NOW 🚀",
+    "out_now": [
+        "'{title}' is OUT NOW 🚀",
+        "The wait is over — '{title}' is live everywhere 🎧",
+    ],
     "thank_you":    "Thank you for the love on '{title}' 🙏",
     "reaction":     "Your reactions to '{title}' are unreal",
     "acoustic":     "'{title}' — stripped back 🎸",
@@ -105,26 +112,45 @@ def _countdown_phrase(day_offset: int) -> str:
     return f"{n} days to go"
 
 
-def _hook_for(ctype: str, title: str, artist: str, day_offset: int) -> str:
+def _hook_for(ctype: str, title: str, artist: str, day_offset: int,
+              variant_index: int = 0) -> str:
     if ctype == "countdown":
         return f"{_countdown_phrase(day_offset)} until '{title}' 🔥"
     tpl = _HOOKS.get(ctype, "'{title}' — {artist}")
+    if isinstance(tpl, (list, tuple)):
+        tpl = tpl[variant_index % len(tpl)] if tpl else "'{title}' — {artist}"
     try:
         return tpl.format(title=title, artist=artist)
     except Exception:
         return f"{artist} — {title}"
 
 
+def _body_similarity(a: str, b: str) -> float:
+    """Token-set Jaccard similarity (0-1) between two body strings.
+
+    Used to keep each post's chosen body distinct from the bodies already placed
+    in the same phase, so a campaign that shares one title never collapses posts
+    into near-duplicates (the exact failure this planner guards against)."""
+    ta = set(re.findall(r"[a-z0-9]+", (a or "").lower()))
+    tb = set(re.findall(r"[a-z0-9]+", (b or "").lower()))
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
 def _compose_body_cta(
     *, title: str, artist: str, platform: str, goal: str, theme: str,
     tone: Optional[str], genre: Optional[str], brand_voice: Optional[str],
     target_audience: Optional[str],
-) -> Dict[str, str]:
-    """Body + CTA from the shared intelligence composer. Never raises.
+) -> Dict[str, Any]:
+    """Ranked body+CTA variants from the shared intelligence composer.
 
-    Only the *body* and *CTA* are taken from the composer; the hook is templated
-    per content type. ``theme`` (a natural phrase, never an instruction) is fed
-    as the post's theme to diversify bodies across the campaign.
+    Returns ``{"variants": [{"body", "cta"}, ...], "disclosure_brief": brief}``
+    with the composer's variants in rank order (best first). Only the *body* and
+    *CTA* come from the composer; the hook is templated per content type.
+    ``theme`` (a natural phrase, never an instruction) is fed as the post's theme
+    to diversify bodies across the campaign. The caller picks the variant that is
+    most distinct from other posts already placed in the same phase. Never raises.
     """
     try:
         from ai_model import request_intelligence as ri
@@ -135,16 +161,41 @@ def _compose_body_cta(
             themes=[theme] if theme else None, track=title,
         )
         composed = ri.compose_caption(
-            title, artist, brief, genre=genre, brand_voice=brand_voice, variants=1,
+            title, artist, brief, genre=genre, brand_voice=brand_voice, variants=4,
         )
-        return {
-            "body": composed.get("body", "") or theme.capitalize(),
-            "cta": composed.get("cta", "") or brief.suggested_cta,
-            "disclosure_brief": brief,
-        }
+        fallback_cta = composed.get("cta", "") or brief.suggested_cta
+        opts: List[Dict[str, str]] = []
+        for v in (composed.get("variants") or []):
+            body = v.get("body", "")
+            if body:
+                opts.append({"body": body, "cta": v.get("cta", "") or fallback_cta})
+        if not opts:
+            opts = [{"body": composed.get("body", "") or theme.capitalize(),
+                     "cta": fallback_cta}]
+        return {"variants": opts, "disclosure_brief": brief}
     except Exception:
-        return {"body": theme.capitalize() if theme else "New music.",
-                "cta": "Follow for more.", "disclosure_brief": None}
+        return {"variants": [{"body": theme.capitalize() if theme else "New music.",
+                              "cta": "Follow for more."}],
+                "disclosure_brief": None}
+
+
+def _pick_distinct_body(
+    variants: List[Dict[str, str]], placed_bodies: List[str],
+) -> Dict[str, str]:
+    """Choose the body/CTA variant least similar to bodies already placed in the
+    phase; ties break toward the composer's own rank (earlier = higher quality)."""
+    if not variants:
+        return {"body": "", "cta": ""}
+    best = variants[0]
+    best_key: Optional[Tuple[float, int]] = None
+    for rank, opt in enumerate(variants):
+        worst_sim = max((_body_similarity(opt["body"], pb) for pb in placed_bodies),
+                        default=0.0)
+        key = (worst_sim, rank)
+        if best_key is None or key < best_key:
+            best_key = key
+            best = opt
+    return best
 
 
 def _apply_disclosure(caption: str, brief: Any) -> str:
@@ -259,8 +310,19 @@ def build_campaign(
     by_platform: Dict[str, int] = {}
     images_generated = 0
     teasers_queued = 0
+    # Anti-repetition state, so a rollout that shares one title never degrades
+    # into near-duplicate copy: ``type_seen`` picks a fresh hook variant each
+    # time a content type recurs; ``placed_bodies`` tracks the bodies already
+    # used in each phase so every new post picks the most *distinct* body variant.
+    type_seen: Dict[str, int] = {}
+    placed_bodies: Dict[str, List[str]] = {}
 
     for slot in _BLUEPRINT:
+        ctype = slot["type"]
+        phase_name = slot["phase"]
+        hook_variant = type_seen.get(ctype, 0)
+        type_seen[ctype] = hook_variant + 1
+        phase_bodies = placed_bodies.setdefault(phase_name, [])
         try:
             pref = slot["platform"]
             platform = pref if pref in allowed else allowed[0]
@@ -269,13 +331,17 @@ def build_campaign(
             base_day = int(slot["day"])
             day_offset = int(round(base_day * scale)) if base_day < 0 else base_day
 
-            hook = _hook_for(slot["type"], title, artist, day_offset)
+            hook = _hook_for(ctype, title, artist, day_offset,
+                             variant_index=hook_variant)
             bc = _compose_body_cta(
                 title=title, artist=artist, platform=platform, goal=slot["goal"],
                 theme=slot["theme"], tone=tone, genre=genre, brand_voice=brand_voice,
                 target_audience=target_audience,
             )
-            caption = f"{hook}\n\n{bc['body']}\n\n{bc['cta']}".strip()
+            chosen = _pick_distinct_body(bc["variants"], phase_bodies)
+            body, cta = chosen["body"], chosen["cta"]
+            phase_bodies.append(body)
+            caption = f"{hook}\n\n{body}\n\n{cta}".strip()
             caption = _apply_disclosure(caption, bc.get("disclosure_brief"))
 
             tags: List[str] = []
@@ -294,8 +360,8 @@ def build_campaign(
                 "goal": slot["goal"],
                 "brief": slot["brief"],
                 "hook": hook,
-                "body": bc["body"],
-                "cta": bc["cta"],
+                "body": body,
+                "cta": cta,
                 "caption": caption,
                 "hashtags": tags,
                 "char_count": len(caption),
