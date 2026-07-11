@@ -1,6 +1,7 @@
 from .base import Backend
 from .cpu_backend import CPUBackend
-from .future_backends import ASICBackend, ClusterBackend, GPUBackend
+from .device_backend import GPUBackend
+from .future_backends import ASICBackend, ClusterBackend
 from .registry import available, available_runtime, get_backend, register
 
 __all__ = [

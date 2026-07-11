@@ -10,7 +10,8 @@ from typing import Callable
 
 from .base import Backend
 from .cpu_backend import CPUBackend
-from .future_backends import ASICBackend, ClusterBackend, GPUBackend
+from .device_backend import GPUBackend
+from .future_backends import ASICBackend, ClusterBackend
 
 _FACTORIES: dict[str, Callable[..., Backend]] = {}
 _INSTANCES: dict[tuple, Backend] = {}
@@ -47,6 +48,6 @@ def available_runtime() -> dict[str, bool]:
 
 
 register("cpu", lambda **kw: CPUBackend(**kw))
-register("gpu", lambda **kw: GPUBackend())
+register("gpu", lambda **kw: GPUBackend(**kw))
 register("cluster", lambda **kw: ClusterBackend())
 register("asic", lambda **kw: ASICBackend())

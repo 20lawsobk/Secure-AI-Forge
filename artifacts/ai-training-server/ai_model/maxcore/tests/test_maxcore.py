@@ -217,14 +217,70 @@ def test_registry_and_future_backends_are_honest():
     assert "cpu" in available()
     runnable = available_runtime()
     assert runnable["cpu"] is True
+    # No CUDA device on this host, so the (real) gpu backend is not runnable and
+    # must say so rather than silently pretend to be a GPU.
     assert runnable["gpu"] is False
-    gpu = get_backend("gpu")
+    # cluster/asic remain honest plug-points: kernels raise NotImplementedError.
+    cluster = get_backend("cluster")
     raised = False
     try:
-        gpu.gemm(None, None)
+        cluster.gemm(None, None)
     except NotImplementedError as e:
-        raised = "Triton" in str(e) or "not implemented" in str(e)
+        raised = "not implemented" in str(e)
     assert raised
+
+
+def test_gpu_backend_is_real_but_honest_without_hardware():
+    """The gpu backend is a genuine torch implementation, not a stub. Without a
+    CUDA device it reports unavailable and raises a clear, hardware-honest error
+    (naming the missing device) instead of faking GPU compute on the CPU."""
+    import numpy as _np
+
+    from ai_model.maxcore.backend.device_backend import GPUBackend, cuda_is_available
+
+    gpu = get_backend("gpu")
+    if cuda_is_available():
+        # On a real GPU host the kernel runs and matches the CPU backend.
+        cpu = get_backend("cpu")
+        a = _np.random.default_rng(0).standard_normal((4, 5)).astype(_np.float32)
+        b = _np.random.default_rng(1).standard_normal((5, 3)).astype(_np.float32)
+        assert _np.allclose(gpu.gemm(a, b).numpy(), cpu.gemm(a, b).numpy(), atol=1e-3)
+    else:
+        assert gpu.is_available() is False
+        raised = False
+        try:
+            gpu.gemm(_np.zeros((2, 2), _np.float32), _np.zeros((2, 2), _np.float32))
+        except RuntimeError as e:
+            raised = "CUDA" in str(e) or "no CUDA device" in str(e)
+        assert raised
+
+    # The same code path is validated on torch-CPU (the correctness proof for
+    # the kernels that will run on the GPU): it matches CPUBackend numerics.
+    cpu = get_backend("cpu")
+    val = GPUBackend(device="cpu")
+    a = _np.random.default_rng(2).standard_normal((6, 7)).astype(_np.float32)
+    b = _np.random.default_rng(3).standard_normal((7, 4)).astype(_np.float32)
+    assert _np.allclose(val.gemm(a, b).numpy(), cpu.gemm(a, b).numpy(), atol=1e-3)
+
+
+def test_gpu_backend_reduce_parity_with_cpu():
+    """reduce() on the gpu backend must match CPUBackend for all ops and for
+    multi-axis reductions (numpy/CPU support tuple axes; torch's dim does not,
+    so the backend folds them — this guards that parity)."""
+    import numpy as _np
+
+    from ai_model.maxcore.backend.device_backend import GPUBackend
+
+    cpu = get_backend("cpu")
+    val = GPUBackend(device="cpu")
+    x = _np.random.default_rng(9).standard_normal((3, 4, 5)).astype(_np.float32)
+    for op in ("sum", "mean", "max", "min", "prod"):
+        for axis in (1, (1, 2), (0, 2)):
+            for keepdims in (False, True):
+                r_gpu = val.reduce(x, op, axis=axis, keepdims=keepdims).numpy()
+                r_cpu = cpu.reduce(x, op, axis=axis, keepdims=keepdims).numpy()
+                assert r_gpu.shape == r_cpu.shape, (op, axis, keepdims)
+                assert _np.allclose(r_gpu, r_cpu, atol=1e-3, rtol=1e-3), (op, axis, keepdims)
 
 
 # ── PDIM ──────────────────────────────────────────────────────────────────────

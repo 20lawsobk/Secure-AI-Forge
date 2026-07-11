@@ -52,13 +52,9 @@ class _FutureBackend(Backend):
         self._nyi("reduce")
 
 
-class GPUBackend(_FutureBackend):
-    name = "gpu"
-    contract = (
-        "Implement kernels via Triton / cuBLAS / cuDNN with CUDA graphs and "
-        "persistent kernels. Must match CPUBackend numerics within fp tolerance "
-        "and honor the runtime's deterministic mode."
-    )
+# NOTE: the "gpu" backend is now a *real* implementation, not a stub. It lives
+# in ``device_backend.py`` (GPUBackend) and dispatches the kernel contract to
+# torch on an actual CUDA device. Cluster/ASIC remain honest plug-points below.
 
 
 class ClusterBackend(_FutureBackend):
