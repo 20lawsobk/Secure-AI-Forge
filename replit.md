@@ -14,6 +14,8 @@ A production-grade AI content generation and training platform for music artists
 
 Required env vars: `DATABASE_URL`, `PORT`, `MODEL_API_PORT`, `ADMIN_KEY`, `STORAGE_CONNECTION_URL`, `STORAGE_HTTP_URL`, `STORAGE_BEARER_TOKEN`, `AI_TRAINING_KEY_PROD`
 
+Required Replit Secrets (must NOT be stored in source or `.replit` env): `SESSION_SECRET`. The server validates this at startup and exits immediately if it is missing — set it in the Replit Secrets panel so it flows into both dev and production automatically.
+
 ## Stack
 
 - **Frontend**: React 19, Vite 7, Tailwind CSS v4, Radix UI, TanStack Query, Framer Motion, Wouter

@@ -4,6 +4,21 @@ import app from "./app";
 import { ensurePythonServer, stopPythonServer } from "./python-server";
 import { startKeepalive, stopKeepalive } from "./keepalive";
 
+// ─── Required secrets / env-var gate ─────────────────────────────────────────
+// Fail fast on startup rather than serving broken requests or exposing an
+// unauthenticated surface.  SESSION_SECRET must be a Replit Secret (never a
+// plain env var in source control) so it is available in both development and
+// the production VM without being committed to the repo.
+const REQUIRED_ENV: string[] = ["SESSION_SECRET"];
+const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
+if (missing.length > 0) {
+  console.error(
+    `[Startup] Missing required secrets: ${missing.join(", ")}. ` +
+      "Set them as Replit Secrets and restart.",
+  );
+  process.exit(1);
+}
+
 const rawPort = process.env["PORT"];
 
 if (!rawPort) {
