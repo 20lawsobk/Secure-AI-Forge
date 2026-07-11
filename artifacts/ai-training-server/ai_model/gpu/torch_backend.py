@@ -184,9 +184,14 @@ class DigitalGPUSoftmax(nn.Module):
 
 
 class DigitalGPUBackend:
-    def __init__(self, lanes=32):
-        self.gpu = DigitalGPU(lanes=lanes)
+    def __init__(self, lanes=32, silicon=None):
+        self.gpu = DigitalGPU(lanes=lanes, silicon=silicon)
         self._profile_history = []
+
+    def silicon_report(self):
+        """Estimated (NOT measured) cycle/time budget from the attached silicon
+        performance model, or None."""
+        return self.gpu.silicon_report()
 
     def linear(self, in_features, out_features, bias=True, fused_relu=False):
         return DigitalGPULinear(in_features, out_features, self.gpu, bias=bias, fused_relu=fused_relu)

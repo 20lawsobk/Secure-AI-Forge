@@ -489,6 +489,7 @@ class HyperGPU:
         precision: PrecisionMode = PrecisionMode.MIXED,
         vram_capacity: int = 0,
         tile_size: int = 128,
+        silicon=None,
     ):
         self.core = HyperSIMDCore(
             lanes=lanes,
@@ -502,6 +503,18 @@ class HyperGPU:
         self._total_compute_ms = 0.0
         self._lock = threading.Lock()
         self._training_ops = 0
+        # Optional MaxCoreSilicon performance model (estimates only; never alters
+        # results or speed). See ai_model/gpu/silicon_model.py.
+        self.silicon = silicon
+
+    def _model(self, kind: str, flops: float, kv_size: float = 0.0,
+               bytes_moved: float = 0.0, precision: str = "fp16") -> None:
+        if self.silicon is not None:
+            self.silicon.model_op(kind, flops, kv_size=kv_size,
+                                  bytes_moved=bytes_moved, precision=precision)
+
+    def silicon_report(self):
+        return self.silicon.report() if self.silicon is not None else None
 
     def _record_op(self, op_name: str, flops: int, simulated_ms: float):
         with self._lock:
@@ -523,6 +536,8 @@ class HyperGPU:
         result, _src = self._pocket().accelerate(
             "hyper_gemm", (A32, B32), 2.0 * float(A32.size) * float(B32.shape[-1]),
             lambda: self.core.tensor_core_gemm(A32, B32))
+        self._model("gemm", 2.0 * float(A32.size) * float(B32.shape[-1]),
+                    bytes_moved=A32.nbytes + B32.nbytes)
         self._total_compute_ms += (time.time() - t0) * 1000
         return result
 
@@ -532,6 +547,8 @@ class HyperGPU:
             "hyper_mixed", (A, B), 2.0 * float(A.size) * float(B.shape[-1]),
             lambda: self.core.mixed_precision_gemm(A, B),
             extra_key=f"|fp16={_EMULATE_FP16}")
+        self._model("gemm", 2.0 * float(A.size) * float(B.shape[-1]),
+                    bytes_moved=A.nbytes + B.nbytes, precision="fp16")
         self._total_compute_ms += (time.time() - t0) * 1000
         return result
 
@@ -541,6 +558,8 @@ class HyperGPU:
             "hyper_gemm_batched", (A, B),
             2.0 * float(A.size) * float(B.shape[-1]),
             lambda: self.core.batched_gemm(A, B))
+        self._model("gemm", 2.0 * float(A.size) * float(B.shape[-1]),
+                    bytes_moved=A.nbytes + B.nbytes)
         self._total_compute_ms += (time.time() - t0) * 1000
         return result
 
@@ -550,6 +569,9 @@ class HyperGPU:
     ) -> np.ndarray:
         t0 = time.time()
         result = self.core.flash_attention(Q, K, V, causal=causal, block_size=block_size)
+        B, T, D = Q.shape
+        self._model("attention", 4.0 * B * T * T * D,
+                    kv_size=float(K.nbytes + V.nbytes), bytes_moved=Q.nbytes)
         self._total_compute_ms += (time.time() - t0) * 1000
         return result
 
@@ -561,6 +583,8 @@ class HyperGPU:
                stride: int = 1, padding: int = 0) -> np.ndarray:
         t0 = time.time()
         result = self.core.conv2d(X, W, stride=stride, padding=padding)
+        self._model("conv", 2.0 * float(result.size) * float(W[0].size),
+                    bytes_moved=X.nbytes + W.nbytes)
         self._total_compute_ms += (time.time() - t0) * 1000
         return result
 
@@ -642,6 +666,7 @@ class HyperGPU:
             "vram": self.vram.status(),
             "memory_pool": core_status["memory_pool"],
             "uptime_s": round(uptime, 1),
+            "silicon": self.silicon_report(),
         }
 
 

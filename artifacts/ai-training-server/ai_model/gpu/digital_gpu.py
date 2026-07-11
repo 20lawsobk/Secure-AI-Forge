@@ -236,10 +236,25 @@ class Scheduler:
 
 
 class DigitalGPU:
-    def __init__(self, lanes: int = 32):
+    def __init__(self, lanes: int = 32, silicon=None):
         self.vram = VRAM()
         self.core = SIMDCore(lanes=lanes)
         self.scheduler = Scheduler(self.vram, self.core)
+        # Optional MaxCoreSilicon performance model. When attached, each executed
+        # op is ALSO recorded there to accumulate an *estimated* cycle/time budget.
+        # This never alters results and never speeds anything up — the real math
+        # below runs at this host's actual speed regardless.
+        self.silicon = silicon
+
+    def _model(self, kind: str, flops: float, kv_size: float = 0.0,
+               bytes_moved: float = 0.0) -> None:
+        if self.silicon is not None:
+            self.silicon.model_op(kind, flops, kv_size=kv_size, bytes_moved=bytes_moved)
+
+    def silicon_report(self):
+        """Estimated (NOT measured) cycle/time budget from the attached silicon
+        model, or None if no model is attached."""
+        return self.silicon.report() if self.silicon is not None else None
 
     def h_gemm(self, hA: int, hB: int) -> int:
         A = self.vram.get(hA)
@@ -287,17 +302,21 @@ class DigitalGPU:
         hA = self.vram.alloc(A)
         hB = self.vram.alloc(B)
         hC = self.h_gemm(hA, hB)
+        self._model("gemm", 2.0 * A.shape[0] * A.shape[1] * B.shape[1],
+                    bytes_moved=A.nbytes + B.nbytes)
         return self.vram.get(hC)
 
     def add(self, A: np.ndarray, B: np.ndarray) -> np.ndarray:
         hA = self.vram.alloc(A)
         hB = self.vram.alloc(B)
         hC = self.h_add(hA, hB)
+        self._model("add", float(A.size), bytes_moved=A.nbytes + B.nbytes)
         return self.vram.get(hC)
 
     def softmax(self, X: np.ndarray, axis: int = -1) -> np.ndarray:
         hX = self.vram.alloc(X)
         hY = self.h_softmax(hX, axis=axis)
+        self._model("softmax", 5.0 * float(X.size), bytes_moved=X.nbytes)
         return self.vram.get(hY)
 
     def attention(self, Q: np.ndarray, K: np.ndarray, V: np.ndarray, causal: bool = False) -> np.ndarray:
@@ -305,6 +324,9 @@ class DigitalGPU:
         hK = self.vram.alloc(K)
         hV = self.vram.alloc(V)
         hO = self.h_attention(hQ, hK, hV, causal=causal)
+        B, T, D = Q.shape
+        self._model("attention", 4.0 * B * T * T * D,
+                    kv_size=float(K.nbytes + V.nbytes), bytes_moved=Q.nbytes)
         return self.vram.get(hO)
 
     def gemm_bias_relu(self, A: np.ndarray, B: np.ndarray, bias: np.ndarray) -> np.ndarray:
@@ -312,6 +334,8 @@ class DigitalGPU:
         hB = self.vram.alloc(B)
         hBias = self.vram.alloc(bias)
         hO = self.h_gemm_bias_relu(hA, hB, hBias)
+        self._model("gemm", 2.0 * A.shape[0] * A.shape[1] * B.shape[1] + A.shape[0] * B.shape[1],
+                    bytes_moved=A.nbytes + B.nbytes)
         return self.vram.get(hO)
 
     def last_profile(self):

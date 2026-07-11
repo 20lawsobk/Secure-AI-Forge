@@ -446,12 +446,14 @@ class HyperGPUBackend:
         precision: PrecisionMode = PrecisionMode.MIXED,
         vram_capacity: int = 0,
         training_mode: bool = False,
+        silicon=None,
     ):
         self.gpu = HyperGPU(
             lanes=lanes,
             tensor_cores=tensor_cores,
             precision=precision,
             vram_capacity=vram_capacity,
+            silicon=silicon,
         )
         self._training_mode = training_mode
 
@@ -487,6 +489,11 @@ class HyperGPUBackend:
 
     def status(self):
         return self.gpu.status()
+
+    def silicon_report(self):
+        """Estimated (NOT measured) cycle/time budget from the attached silicon
+        performance model, or None."""
+        return self.gpu.silicon_report()
 
 
 class ClusterBackend:
