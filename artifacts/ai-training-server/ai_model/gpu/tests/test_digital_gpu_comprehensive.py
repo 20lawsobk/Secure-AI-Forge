@@ -28,6 +28,13 @@ from ai_model.gpu.hyper_core import (
     HyperGPU, HyperVRAM, HyperSIMDCore, MemoryPool, TensorCoreUnit,
     PrecisionMode, GPUCluster, GPUClusterNode,
 )
+from ai_model.gpu.precision import to_fp16
+from ai_model.maxcore.pdim.pocket_accelerator import PocketAccelerator
+import ai_model.gpu.hyper_core as _hyper_core_mod
+
+# Mirror the module-level flag so tests react to the same condition the
+# implementation uses — rather than hardcoding a magic tolerance constant.
+_EMULATE_FP16: bool = _hyper_core_mod._EMULATE_FP16
 
 rng = np.random.default_rng(42)
 
@@ -36,6 +43,27 @@ rng = np.random.default_rng(42)
 
 def f32(*shape):
     return rng.standard_normal(shape).astype(np.float32)
+
+
+def _fp16_gemm_atol(A: np.ndarray, B: np.ndarray) -> float:
+    """Rigorous per-element tolerance for (fp16-rounded A @ fp16-rounded B) vs A @ B.
+
+    For C[i,j] = Σ_k A[i,k]*B[k,j], independent fp16 rounding on each element
+    of A and B introduces errors εA = |A_fp16 − A| and εB = |B_fp16 − B|.
+    The output error (per element) is bounded by the first-order term:
+
+        |ΔC[i,j]| ≤ K * (||εA||_∞ · ||B||_∞ + ||εB||_∞ · ||A||_∞)
+
+    plus the second-order term K · ||εA||_∞ · ||εB||_∞, where K = A.shape[-1].
+    This is derived from the precision model in precision.py — not a magic constant.
+    """
+    K = int(A.shape[-1])
+    # to_fp16 returns fp32; cast both sides to float64 for an exact error measurement
+    eA = float(np.abs(to_fp16(A).astype(np.float64) - A.astype(np.float64)).max())
+    eB = float(np.abs(to_fp16(B).astype(np.float64) - B.astype(np.float64)).max())
+    norm_A = float(np.abs(A).max())
+    norm_B = float(np.abs(B).max())
+    return K * (eA * norm_B + eB * norm_A) + K * eA * eB
 
 
 def _naive_softmax(X, axis=-1):
@@ -586,13 +614,23 @@ class TestTensorCoreUnit:
         assert tc.ops_executed == 1
         assert tc.total_flops > 0.0
 
-    def test_mixed_precision_matmul_close_to_fp32(self):
+    def test_mixed_precision_matmul_tolerance_from_precision_model(self):
         tc = TensorCoreUnit()
         A = f32(8, 6)
         B = f32(6, 4)
         C = tc.mixed_precision_matmul(A, B)
-        # Mixed-precision (FP32 SGEMM or emulated FP16) must be within fp16 tolerance
-        np.testing.assert_allclose(C, A @ B, atol=5e-2)
+        ref = A @ B
+        if _EMULATE_FP16:
+            # Tolerance derived analytically from precision.py's to_fp16 rounding
+            # model — not a magic constant. Covers the worst-case per-element error
+            # from fp16 quantization on both A and B operands.
+            tol = _fp16_gemm_atol(A, B)
+        else:
+            # Default path: FP32 SGEMM (BLAS has no half GEMM; emulating would be
+            # slower). FP32 multiply/accumulate is a strict superset of fp16×fp32,
+            # so the result is exact to within normal fp32 accumulation error.
+            tol = 1e-5
+        np.testing.assert_allclose(C, ref, atol=tol)
 
     def test_mixed_precision_increments_flops_by_multiplier(self):
         tc = TensorCoreUnit(throughput_multiplier=8.0)
@@ -658,11 +696,18 @@ class TestHyperSIMDCore:
             self.core.batched_gemm(f32(2, 4, 5), f32(2, 6, 3))
 
     # ── mixed_precision_gemm ──────────────────────────────────────────────────
-    def test_mixed_precision_gemm_close_to_fp32(self):
+    def test_mixed_precision_gemm_tolerance_from_precision_model(self):
         A = f32(8, 6)
         B = f32(6, 4)
         got = self.core.mixed_precision_gemm(A, B)
-        np.testing.assert_allclose(got, A @ B, atol=5e-2)
+        ref = A @ B
+        if _EMULATE_FP16:
+            # Tolerance derived analytically from precision.py — not a magic constant.
+            tol = _fp16_gemm_atol(A, B)
+        else:
+            # Default: straight FP32 SGEMM. Tight tolerance.
+            tol = 1e-5
+        np.testing.assert_allclose(got, ref, atol=tol)
 
     def test_mixed_precision_gemm_wrong_rank_raises(self):
         with pytest.raises(ShapeError):
@@ -695,11 +740,23 @@ class TestHyperSIMDCore:
         assert rv.shape == (4,)
 
     def test_batch_norm_eval_without_running_stats_raises(self):
-        X = f32(4, 3)
-        gamma = np.ones(3, dtype=np.float32)
-        beta = np.zeros(3, dtype=np.float32)
-        with pytest.raises(GPUError):
-            self.core.batch_norm(X, gamma, beta, training=False)
+        # In eval mode, batch_norm normalises using pre-computed running statistics
+        # from training. Without them the function has no mean/var to use — this
+        # must be a hard error, not a silent fallback to batch statistics, because
+        # silent fallback would make eval-mode inference non-deterministic and
+        # dependent on batch size. The guard is: `running_mean is None or
+        # running_var is None` → raise GPUError. We test with both a 2-D input
+        # (per-sample features, axis=(0,)) and a 4-D input (NCHW, axis=(0,2,3))
+        # to confirm the guard fires for any input rank.
+        gamma2 = np.ones(3, dtype=np.float32)
+        beta2 = np.zeros(3, dtype=np.float32)
+        with pytest.raises(GPUError, match="running stats"):
+            self.core.batch_norm(f32(4, 3), gamma2, beta2, training=False)
+
+        gamma4 = np.ones(4, dtype=np.float32)
+        beta4 = np.zeros(4, dtype=np.float32)
+        with pytest.raises(GPUError, match="running stats"):
+            self.core.batch_norm(f32(8, 4, 5, 5), gamma4, beta4, training=False)
 
     def test_batch_norm_eval_with_running_stats(self):
         X = f32(4, 3)
@@ -889,27 +946,124 @@ class TestHyperGPU:
         assert self.gpu._total_compute_ms >= before
 
 
-class TestHyperGPUGemmPaths:
-    """Test gemm paths separately — they route through pocket accelerator."""
+class TestHyperGPUGemmComputePath:
+    """HyperGPU GEMM ops with the pocket cache forcibly bypassed.
 
-    def test_gemm_correct(self):
+    The pocket accelerator (MAXCORE_POCKET_ACCEL=0 → accelerate() calls compute()
+    directly) is an *independent* dedup layer. Disabling it lets these tests check
+    only the TensorCoreUnit/HyperSIMDCore compute path at FP32 BLAS accuracy,
+    without the risk of a warm cache masking a broken compute lambda.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _bypass_pocket(self, monkeypatch):
+        """Force every test in this class to skip the content-hash dedup layer."""
+        monkeypatch.setenv("MAXCORE_POCKET_ACCEL", "0")
+
+    def test_gemm_matches_numpy_tight_tolerance(self):
         gpu = HyperGPU()
-        A = f32(8, 6)
-        B = f32(6, 4)
-        np.testing.assert_allclose(gpu.gemm(A, B), A @ B, atol=1e-4)
+        A, B = f32(8, 6), f32(6, 4)
+        # Bypass → compute() called every time → FP32 BLAS SGEMM → tight atol
+        np.testing.assert_allclose(gpu.gemm(A, B), A @ B, atol=1e-5)
 
-    def test_mixed_gemm_close_to_fp32(self):
+    def test_mixed_gemm_tolerance_from_precision_model(self):
         gpu = HyperGPU()
-        A = f32(8, 6)
-        B = f32(6, 4)
-        np.testing.assert_allclose(gpu.mixed_gemm(A, B), A @ B, atol=5e-2)
+        A, B = f32(8, 6), f32(6, 4)
+        ref = A @ B
+        got = gpu.mixed_gemm(A, B)
+        if _EMULATE_FP16:
+            # Tolerance derived analytically from precision.py — not a magic constant.
+            tol = _fp16_gemm_atol(A, B)
+        else:
+            # Default: FP32 SGEMM (same code path as gemm). Tight tolerance.
+            tol = 1e-5
+        np.testing.assert_allclose(got, ref, atol=tol)
 
-    def test_gemm_batched_3d_correct(self):
+    def test_gemm_batched_matches_numpy_tight_tolerance(self):
         gpu = HyperGPU()
         A = rng.standard_normal((3, 5, 4)).astype(np.float32)
         B = rng.standard_normal((3, 4, 6)).astype(np.float32)
-        got = gpu.gemm_batched(A, B)
-        np.testing.assert_allclose(got, np.matmul(A, B), atol=1e-4)
+        np.testing.assert_allclose(gpu.gemm_batched(A, B), np.matmul(A, B), atol=1e-5)
+
+
+class TestPocketAcceleratorBehavior:
+    """The pocket accelerator deduplicates GEMMs: same inputs → cache hit.
+
+    Tested on PocketAccelerator directly (not through HyperGPU) with min_flops=0
+    so small test matrices clear the FLOP gate that would otherwise bypass hashing.
+    This is the right place to assert cache semantics; compute correctness lives in
+    TestHyperGPUGemmComputePath above.
+    """
+
+    def test_first_call_is_miss_second_is_hit(self):
+        accel = PocketAccelerator(min_flops=0)
+        A, B = f32(4, 4), f32(4, 4)
+        ref = A @ B
+
+        r1, src1 = accel.accelerate("gemm", (A, B), 128.0, lambda: A @ B)
+        r2, src2 = accel.accelerate("gemm", (A, B), 128.0, lambda: A @ B)
+
+        assert src1 == "compute", "first call must compute, not serve from cache"
+        assert src2 == "pocket",  "second call with identical inputs must hit cache"
+        np.testing.assert_allclose(r1, ref, atol=1e-6)
+        np.testing.assert_allclose(r2, ref, atol=1e-6)  # same value from cache
+
+    def test_stats_reflect_hit_and_miss(self):
+        accel = PocketAccelerator(min_flops=0)
+        A, B = f32(4, 4), f32(4, 4)
+        C, D = f32(5, 3), f32(3, 7)
+
+        accel.accelerate("k", (A, B), 128.0, lambda: A @ B)   # miss 1
+        accel.accelerate("k", (C, D), 128.0, lambda: C @ D)   # miss 2 (different shape)
+        accel.accelerate("k", (A, B), 128.0, lambda: A @ B)   # hit  1
+
+        s = accel.stats()
+        assert s["misses"] == 2
+        assert s["hits"]   == 1
+        # stats() rounds hit_rate to 4 decimal places → 0.3333; compare within
+        # the rounding granularity of round(..., 4) = 5e-5 worst case, use 1e-4.
+        assert s["hit_rate"] == pytest.approx(1 / 3, abs=1e-4)
+
+    def test_different_values_produce_different_cache_entries(self):
+        accel = PocketAccelerator(min_flops=0)
+        A1 = np.ones((4, 4), dtype=np.float32)
+        A2 = np.ones((4, 4), dtype=np.float32) * 2.0
+        B  = np.ones((4, 4), dtype=np.float32)
+
+        _, s1 = accel.accelerate("g", (A1, B), 128.0, lambda: A1 @ B)
+        _, s2 = accel.accelerate("g", (A2, B), 128.0, lambda: A2 @ B)
+
+        # Content-hash distinguishes different values at the same shape — both miss
+        assert s1 == "compute"
+        assert s2 == "compute"
+        assert accel.stats()["hits"] == 0
+
+    def test_cached_value_is_numerically_identical_to_computed_value(self):
+        accel = PocketAccelerator(min_flops=0)
+        A = rng.standard_normal((8, 6)).astype(np.float32)
+        B = rng.standard_normal((6, 4)).astype(np.float32)
+        compute_calls = [0]
+
+        def tracked_compute():
+            compute_calls[0] += 1
+            return A @ B
+
+        r_miss, _ = accel.accelerate("g", (A, B), 128.0, tracked_compute)
+        r_hit,  _ = accel.accelerate("g", (A, B), 128.0, tracked_compute)
+
+        assert compute_calls[0] == 1, "compute lambda must be called exactly once"
+        np.testing.assert_array_equal(r_miss, r_hit)  # bitwise equal — same buffer
+
+    def test_disable_env_var_routes_all_calls_to_compute(self, monkeypatch):
+        monkeypatch.setenv("MAXCORE_POCKET_ACCEL", "0")
+        accel = PocketAccelerator(min_flops=0)
+        A, B = f32(4, 4), f32(4, 4)
+
+        _, s1 = accel.accelerate("g", (A, B), 128.0, lambda: A @ B)
+        _, s2 = accel.accelerate("g", (A, B), 128.0, lambda: A @ B)
+
+        assert s1 == "bypass"
+        assert s2 == "bypass"  # no caching — both calls bypass
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1036,22 +1190,55 @@ class TestGPUCluster:
         reassembled = self.cluster.gather_results(results)
         np.testing.assert_allclose(reassembled, data, atol=1e-6)
 
-    def test_run_distributed_thread_safety(self):
-        """Concurrent distributed calls on disjoint node sets must not crash."""
-        errors = []
+    def test_run_distributed_correct_under_concurrency(self):
+        """Four concurrent distributed jobs on disjoint node sets produce correct results.
 
-        def one_run():
+        Each job uses a dedicated set of 3 nodes (no node is shared between jobs),
+        a deterministic per-job seed, and a distinct scale factor so every job's
+        output is distinguishable. We verify both the absence of crashes *and*
+        that every gathered result equals the expected single-threaded reference —
+        correctness, not just liveness.
+        """
+        # 12 nodes so 4 concurrent 3-node jobs never share a node
+        big_cluster = GPUCluster(num_nodes=12)
+        results: list = [None] * 4
+        errors: list = []
+
+        def one_run(run_idx: int) -> None:
             try:
-                data = f32(3, 4)
-                chunks = self.cluster.scatter_data(data, num_chunks=3)
-                self.cluster.run_distributed(
-                    lambda gpu, c: gpu.add(c, np.zeros_like(c)), chunks)
-            except Exception as e:
-                errors.append(e)
+                local_rng = np.random.default_rng(seed=run_idx * 31 + 7)
+                data = local_rng.standard_normal((9, 4)).astype(np.float32)
 
-        threads = [threading.Thread(target=one_run) for _ in range(4)]
+                node_ids = list(range(run_idx * 3, run_idx * 3 + 3))
+                chunks = big_cluster.scatter_data(data, num_chunks=3)
+
+                # Each job uses a distinct scale so a cross-job result mix-up
+                # is detectable (scale=1 identity, scale=2 double, …)
+                scale = np.float32(run_idx + 1)
+
+                def scale_fn(gpu, chunk, _s=scale):
+                    # c*s = c + c*(s-1); expressed as gpu.add so the GPU op
+                    # is exercised, not bypassed
+                    return gpu.add(chunk, chunk * (_s - 1.0))
+
+                out_chunks = big_cluster.run_distributed(
+                    scale_fn, chunks, node_ids=node_ids
+                )
+                assembled = big_cluster.gather_results(out_chunks)
+                results[run_idx] = (data * scale, assembled)
+            except Exception as exc:
+                errors.append((run_idx, exc))
+
+        threads = [threading.Thread(target=one_run, args=(i,)) for i in range(4)]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
-        assert not errors
+
+        assert not errors, f"Concurrent run errors: {errors}"
+        for run_idx, (ref, got) in enumerate(results):
+            assert got is not None, f"Run {run_idx} produced no result"
+            np.testing.assert_allclose(
+                got, ref, atol=1e-6,
+                err_msg=f"Run {run_idx}: gathered output does not match reference"
+            )
