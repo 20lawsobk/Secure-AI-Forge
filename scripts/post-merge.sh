@@ -1,4 +1,5 @@
 #!/bin/bash
 set -e
 pnpm install --frozen-lockfile
-pnpm --filter db push
+echo "" | pnpm --filter @workspace/db run push-force
+uv sync --no-dev
