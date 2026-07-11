@@ -201,8 +201,9 @@ class DigitalGPUBackend:
 
         This is a *real* allocation — a numpy byte buffer tracked in VRAM — not a
         simulated counter. Free it with ``free(handle)``. (For typed data, prefer
-        the array-based ops directly; this exists so a device-style caller that
-        thinks in byte sizes and handles has a working allocator.)
+        ``from_tensor`` which stores the array directly; this exists so a
+        device-style caller that thinks in byte sizes and handles has a working
+        allocator.)
         """
         # Strict integer bytes — never silently truncate a fractional size.
         if isinstance(size, bool):
@@ -223,6 +224,79 @@ class DigitalGPUBackend:
     def free(self, handle: int) -> None:
         """Free a handle previously returned by ``alloc`` (or any VRAM handle)."""
         self.gpu.vram.free(handle)
+
+    # ── tensor ↔ handle boundary (tinygrad Buffer.fromCPU/toCPU pattern) ─────
+
+    def from_tensor(self, arr: np.ndarray) -> int:
+        """Store a numpy array in VRAM and return an integer handle.
+
+        This is the entry-point from the *tensor world* into the *handle world*:
+        the returned handle can be passed to ``run_kernel_h`` or retrieved later
+        with ``to_tensor``. The array is stored by reference (not copied) unless
+        dtype conversion is needed — call ``arr.copy()`` first if you need
+        isolation.
+
+        Example full handle pipeline::
+
+            h_A = backend.from_tensor(A)
+            h_B = backend.from_tensor(B)
+            h_C = backend.run_kernel_h("gemm", [h_A, h_B])
+            C   = backend.to_tensor(h_C)
+            backend.free(h_A); backend.free(h_B); backend.free(h_C)
+        """
+        return self.gpu.vram.alloc(np.asarray(arr))
+
+    def to_tensor(self, handle: int) -> np.ndarray:
+        """Retrieve the numpy array stored at ``handle``.
+
+        Returns a *live view* into the VRAM store — not a copy. Mutating the
+        returned array mutates the stored buffer. Call ``.copy()`` for an
+        independent array.
+        """
+        return self.gpu.vram.get(handle)
+
+    def run_kernel_h(self, name: str, input_handles: list, **kwargs) -> int:
+        """Handle-based kernel dispatch — the unified interface that composes
+        with ``alloc`` / ``from_tensor`` / ``free``.
+
+        Reads each input array from VRAM by handle, runs the named kernel, stores
+        the result in a *new* VRAM handle, and returns that handle. The caller is
+        responsible for freeing input handles (and the returned output handle)
+        when they are no longer needed.
+
+        This closes the interface gap where ``alloc()`` returns handles but
+        ``run_kernel()`` requires tensor arrays: both sides now speak handles.
+        The existing ``run_kernel()`` method (takes and returns arrays directly)
+        is preserved for callers that already have arrays.
+
+        Only kernels in ``_KERNELS`` are accepted — same safeguard as
+        ``run_kernel()``; hardware-implying names raise rather than masquerade.
+
+        Args:
+            name: kernel name (e.g. ``"gemm"``, ``"attention"``).
+            input_handles: list of integer VRAM handles, in the order the kernel
+                expects its positional arguments (A, B for gemm; Q, K, V for
+                attention; etc.).
+            **kwargs: forwarded verbatim to the underlying kernel (e.g.
+                ``causal=True`` for attention).
+
+        Returns:
+            Integer VRAM handle for the output array.
+
+        Raises:
+            ValueError: unknown kernel name or handle not in VRAM.
+        """
+        key = str(name).lower()
+        if key not in self._KERNELS:
+            raise ValueError(
+                f"digital GPU has no kernel named {name!r}. Supported: "
+                f"{list(self._KERNELS)}. Hardware-implying names (fp8, sm102, "
+                f"tensor-core variants) require real silicon — use the numpy "
+                f"equivalent here, or a real CUDA backend."
+            )
+        input_arrays = [self.gpu.vram.get(h) for h in input_handles]
+        result = getattr(self.gpu, key)(*input_arrays, **kwargs)
+        return self.gpu.vram.alloc(np.asarray(result))
 
     # ── named-kernel dispatch to the real numpy ops ──────────────────────────
     def run_kernel(self, name: str, *args, **kwargs):

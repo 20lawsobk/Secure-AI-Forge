@@ -610,6 +610,11 @@ class HyperGPU:
                stride=(1, 1, 1), padding=(0, 0, 0)) -> np.ndarray:
         t0 = time.time()
         result = self.core.conv3d(X, W, stride=stride, padding=padding)
+        # FLOPs = 2 * N * C_out * C_in * kD * kH * kW * D_out * H_out * W_out
+        # Equivalent: 2 * result.size * kernel_volume (where kernel_volume = product of kernel dims per out-channel).
+        self._model("conv",
+                    2.0 * float(result.size) * float(W.shape[1] * W.shape[2] * W.shape[3] * W.shape[4]),
+                    bytes_moved=float(X.nbytes + W.nbytes + result.nbytes))
         self._total_compute_ms += (time.time() - t0) * 1000
         return result
 
@@ -617,6 +622,10 @@ class HyperGPU:
                    beta: np.ndarray, eps: float = 1e-5) -> np.ndarray:
         t0 = time.time()
         result = self.core.layer_norm(X, gamma, beta, eps=eps)
+        # Roofline: mean + variance + normalise + scale + shift = 5 FLOPs/element.
+        # Memory-bound: arithmetic intensity ≈ 1.5 FLOPs/byte. Track read + write.
+        self._model("normalization", 5.0 * float(X.size),
+                    bytes_moved=float(X.nbytes + gamma.nbytes + beta.nbytes + result.nbytes))
         self._total_compute_ms += (time.time() - t0) * 1000
         return result
 
@@ -627,42 +636,76 @@ class HyperGPU:
         result = self.core.batch_norm(
             X, gamma, beta, running_mean, running_var, training, eps
         )
+        # result is (out, running_mean, running_var); model only the main output bytes.
+        # Same FLOPs formula as layer_norm: 5 FLOPs/element.
+        self._model("normalization", 5.0 * float(X.size),
+                    bytes_moved=float(X.nbytes + gamma.nbytes + beta.nbytes + result[0].nbytes))
         self._total_compute_ms += (time.time() - t0) * 1000
         return result
 
     def gelu(self, X: np.ndarray) -> np.ndarray:
         t0 = time.time()
         result = self.core.gelu(X)
+        # Roofline: tanh approx ≈ 8 FLOPs/element (cube + 3×mul + 2×add + tanh + scale).
+        # Deeply memory-bound (~4 FLOPs/byte on typical arrays). Track read + write.
+        self._model("elementwise", 8.0 * float(X.size),
+                    bytes_moved=float(2 * X.nbytes))
         self._total_compute_ms += (time.time() - t0) * 1000
         return result
 
     def silu(self, X: np.ndarray) -> np.ndarray:
         t0 = time.time()
         result = self.core.silu(X)
+        # Roofline: x * sigmoid(x) ≈ 4 FLOPs/element (neg + exp + add-1 + div + mul).
+        # Memory-bound: arithmetic intensity ≈ 2–3 FLOPs/byte.
+        self._model("elementwise", 4.0 * float(X.size),
+                    bytes_moved=float(2 * X.nbytes))
         self._total_compute_ms += (time.time() - t0) * 1000
         return result
 
     def softmax(self, X: np.ndarray, axis: int = -1) -> np.ndarray:
         t0 = time.time()
         result = self.core.softmax(X, axis=axis)
+        # Roofline: max + subtract + exp + sum + divide = 5 FLOPs/element.
+        # Memory-bound: intensity ≈ 4 FLOPs/byte (per ZeroEntropy roofline chart).
+        self._model("elementwise", 5.0 * float(X.size),
+                    bytes_moved=float(2 * X.nbytes))
         self._total_compute_ms += (time.time() - t0) * 1000
         return result
 
     def add(self, A: np.ndarray, B: np.ndarray) -> np.ndarray:
         t0 = time.time()
         result = self.core.add(A, B)
+        # 1 FLOPs/element; reads two arrays and writes one — 3× elem bytes total.
+        self._model("elementwise", float(A.size),
+                    bytes_moved=float(A.nbytes + B.nbytes + result.nbytes))
         self._total_compute_ms += (time.time() - t0) * 1000
         return result
 
     def grouped_gemm(self, A_list, B_list):
         t0 = time.time()
         result = self.core.grouped_gemm(A_list, B_list)
+        # Sum 2*M*N*K per group; bytes = all input reads (outputs excluded as they
+        # are typically streamed out once, matching the GEMM bandwidth model).
+        total_flops = sum(
+            2.0 * float(A.shape[0]) * float(A.shape[1]) * float(B.shape[1])
+            for A, B in zip(A_list, B_list)
+        )
+        total_bytes = float(sum(A.nbytes + B.nbytes for A, B in zip(A_list, B_list)))
+        self._model("gemm", total_flops, bytes_moved=total_bytes)
         self._total_compute_ms += (time.time() - t0) * 1000
         return result
 
     def fused_attention_norm(self, Q, K, V, gamma, beta, causal=False, eps=1e-5):
         t0 = time.time()
         result = self.core.fused_attention_norm(Q, K, V, gamma, beta, causal, eps)
+        B_n, T, D = Q.shape
+        attn_flops = 4.0 * B_n * T * T * D          # flash-attention: 4BT²D
+        norm_flops  = 5.0 * float(Q.size)            # layer-norm: 5 FLOPs/element
+        self._model("attention_norm", attn_flops + norm_flops,
+                    kv_size=float(K.nbytes + V.nbytes),
+                    bytes_moved=float(Q.nbytes + K.nbytes + V.nbytes
+                                      + gamma.nbytes + beta.nbytes + result.nbytes))
         self._total_compute_ms += (time.time() - t0) * 1000
         return result
 
