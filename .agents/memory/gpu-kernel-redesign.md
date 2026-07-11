@@ -42,6 +42,20 @@ GEMM already saturates the CPU, and Winograd's 4 transform passes add memory
 traffic that dominates. Winograd only wins on hardware where multiplies dominate
 AND transforms are fused (GPU/DSP/hand-tuned). Do NOT integrate it here.
 
+**Rejected again (with `optimize=True`): Winograd 3x3.** `np.einsum(..., optimize=True)`
+does NOT rescue it — still 11x slower than im2col+BLAS at 256x256 (~10.2s vs
+~0.9s). The cost is structural (many small transform passes vs one big GEMM), not
+contraction order. Stop re-benchmarking Winograd on this CPU.
+
+**Rejected: Numba for numerical hot paths.** `@nb.njit(parallel=True, fastmath=True)`
+beat `np.dot` ~2x on a 1D dot (12 vs 24 ms) — but only by multithreading a
+bandwidth-bound level-1 reduction (BLAS sdot is single-threaded), and `fastmath`
+made the result disagree by ~5e-2 (breaks IEEE ordering). The real hot paths are
+GEMMs already on multithreaded full-precision BLAS, which numba can't beat, so
+there is NO safe integration target. Do not add numba/fastmath into training or
+inference math. **Triton flash kernel:** GPU-only (no CUDA here); same algorithm
+as the integrated numpy tiled flash — real GPU is the external lever.
+
 **Accepted: fused row-dot via einsum.** `np.einsum("ij,ij->i", A, B)` is ~3.5x
 faster than `np.sum(A*B, axis=1)` (and `np.dot` ~4.6x faster than `np.sum(x*y)`
 for 1D) because it skips the temporary and hits a fused/BLAS reduction. Applied
