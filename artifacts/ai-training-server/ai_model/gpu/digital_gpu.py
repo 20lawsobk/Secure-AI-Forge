@@ -135,26 +135,19 @@ class SIMDCore:
 
     def attention(self, Q: np.ndarray, K: np.ndarray, V: np.ndarray, causal: bool = False) -> np.ndarray:
         if Q.shape != K.shape or Q.shape != V.shape:
-            raise ShapeError("Q, K, V must have same shape [B, T, D]")
-        B, T, D = Q.shape
-        out = np.zeros_like(Q)
+            raise ShapeError("Q, K, V must have same shape [..., T, D]")
+        if Q.ndim < 2:
+            raise ShapeError(f"attention needs rank >= 2 [..., T, D], got {Q.shape}")
+        # Batched over ALL leading dims via np.matmul (no Python per-batch loop),
+        # which BLAS parallelizes and which generalizes beyond a single [B, T, D].
+        T, D = Q.shape[-2], Q.shape[-1]
         scale = 1.0 / np.sqrt(D)
-
+        scores = np.matmul(Q, np.swapaxes(K, -1, -2)) * scale
         if causal:
-            mask = np.triu(np.full((T, T), -1e9, dtype=Q.dtype), k=1)
-        else:
-            mask = None
-
-        for b in range(B):
-            Qb = Q[b]
-            Kb = K[b]
-            Vb = V[b]
-            scores = (Qb @ Kb.T) * scale
-            if mask is not None:
-                scores = scores + mask
-            probs = self.softmax(scores, axis=-1)
-            out[b] = probs @ Vb
-        return out
+            mask = np.triu(np.full((T, T), -1e9, dtype=scores.dtype), k=1)
+            scores = scores + mask
+        probs = self.softmax(scores, axis=-1)
+        return np.matmul(probs, V)
 
     def gemm_bias_relu(self, A: np.ndarray, B: np.ndarray, bias: np.ndarray) -> np.ndarray:
         C = self.gemm_tiled(A, B)
@@ -340,8 +333,11 @@ class DigitalGPU:
         hK = self.vram.alloc(K)
         hV = self.vram.alloc(V)
         hO = self.h_attention(hQ, hK, hV, causal=causal)
-        B, T, D = Q.shape
-        self._model("attention", 4.0 * B * T * T * D,
+        # Shape-agnostic telemetry: attention is over the last two axes (T, D);
+        # any leading axes are batch. Works for [B, T, D] and higher rank alike.
+        T, D = Q.shape[-2], Q.shape[-1]
+        lead = int(np.prod(Q.shape[:-2])) if Q.ndim > 2 else 1
+        self._model("attention", 4.0 * lead * T * T * D,
                     kv_size=float(K.nbytes + V.nbytes), bytes_moved=Q.nbytes)
         return self.vram.get(hO)
 

@@ -29,8 +29,13 @@ class NativeCompiler:
         self.cc_version = self._probe_version()
         self.last_error: Optional[str] = None
 
-        self.base_flags: List[str] = ["-O3", "-march=native", "-funroll-loops",
-                                      "-shared", "-fPIC"]
+        # NOTE: -march=native is silently stripped on NixOS (NIX_ENFORCE_NO_NATIVE),
+        # which quietly caps kernels at baseline SSE. We instead detect the CPU's
+        # ISA from /proc/cpuinfo and pass explicit -mavx512*/-mavx2 flags, which
+        # are honored. This is what actually unlocks AVX-512 width.
+        self.isa_flags = self._detect_isa_flags()
+        self.base_flags: List[str] = ["-O3", "-funroll-loops", "-shared", "-fPIC",
+                                      *self.isa_flags]
         if fast_math:
             self.base_flags.append("-ffast-math")
         if extra_flags:
@@ -44,6 +49,32 @@ class NativeCompiler:
             # cache dir unusable -> disable native path; callers fall back to numpy
             self.available = False
             self.last_error = f"cannot create cache dir {self.cache_dir!r}: {e}"
+
+    @staticmethod
+    def _detect_isa_flags() -> List[str]:
+        """Return explicit SIMD ISA flags for the host CPU (widest available)."""
+        try:
+            with open("/proc/cpuinfo") as f:
+                info = f.read()
+        except OSError:
+            return []
+        cpu_flags: set = set()
+        for line in info.splitlines():
+            if line.startswith(("flags", "Features")):
+                cpu_flags = set(line.split(":", 1)[1].split())
+                break
+        if "avx512f" in cpu_flags:
+            out = ["-mavx512f"]
+            out += [f"-m{x}" for x in ("avx512bw", "avx512vl", "avx512dq")
+                    if x in cpu_flags]
+            if "fma" in cpu_flags:
+                out.append("-mfma")
+            return out
+        if "avx2" in cpu_flags:
+            return ["-mavx2"] + (["-mfma"] if "fma" in cpu_flags else [])
+        if "avx" in cpu_flags:
+            return ["-mavx"]
+        return []
 
     def _probe_version(self) -> str:
         if not self.available:

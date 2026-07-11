@@ -99,11 +99,81 @@ def test_non_float32_input_routes_correctly():
     assert np.allclose(out, _ref_hardswish(X), atol=1e-5)
 
 
+def _ref_silu(x):
+    return (x / (1.0 + np.exp(-x))).astype(np.float32)
+
+
+def _ref_gelu(x):
+    k0, k1 = 0.7978845608028654, 0.044715
+    return (0.5 * x * (1.0 + np.tanh(k0 * (x + k1 * x ** 3)))).astype(np.float32)
+
+
+def _ref_softmax(x):
+    m = x.max(axis=1, keepdims=True)
+    e = np.exp(x - m)
+    return (e / e.sum(axis=1, keepdims=True)).astype(np.float32)
+
+
+def _ref_layernorm(x, g, b, eps):
+    mean = x.mean(1, keepdims=True); var = x.var(1, keepdims=True)
+    return ((x - mean) / np.sqrt(var + eps) * g + b).astype(np.float32)
+
+
+def test_silu_correct():
+    # poly-exp path -> ~1e-6 tolerance, not bit-exact
+    for k in (get_native_kernels(), _fallback_kernels()):
+        assert np.allclose(k.silu(X), _ref_silu(X), atol=1e-4)
+
+
+def test_gelu_correct():
+    for k in (get_native_kernels(), _fallback_kernels()):
+        assert np.allclose(k.gelu(X), _ref_gelu(X), atol=1e-4)
+
+
+def test_softmax_rows_correct_and_guards():
+    for k in (get_native_kernels(), _fallback_kernels()):
+        got = k.softmax_rows(X2)
+        assert np.allclose(got, _ref_softmax(X2), atol=1e-5)
+        # rows sum to 1
+        assert np.allclose(got.sum(axis=1), 1.0, atol=1e-4)
+    try:
+        get_native_kernels().softmax_rows(X)     # 1D
+        assert False
+    except ValueError:
+        pass
+
+
+def test_layernorm_rows_correct_and_guards():
+    beta = rng.standard_normal(128).astype(np.float32)
+    for k in (get_native_kernels(), _fallback_kernels()):
+        got = k.layernorm_rows(X2, G, beta, eps=1e-5)
+        assert np.allclose(got, _ref_layernorm(X2, G, beta, 1e-5), atol=1e-4)
+    try:
+        get_native_kernels().layernorm_rows(X2, G[:10], beta)
+        assert False
+    except ValueError:
+        pass
+
+
+def test_row_kernels_empty_input_no_crash():
+    # zero-column / zero-row must not reach the native OOB path
+    k = get_native_kernels()
+    for shape in ((4, 0), (0, 8)):
+        empty = np.zeros(shape, dtype=np.float32)
+        g = np.zeros(shape[1], dtype=np.float32)
+        b = np.zeros(shape[1], dtype=np.float32)
+        assert k.softmax_rows(empty).shape == shape
+        assert k.rmsnorm_rows(empty, g).shape == shape
+        assert k.layernorm_rows(empty, g, b).shape == shape
+
+
 def test_describe_never_claims_hardware():
     d = get_native_kernels().describe()
     assert d["is_hardware_execution"] is False
     assert d["backend"] in ("native-cpu-simd", "numpy-fallback")
     assert "CPU" in d["note"] or "cpu" in d["note"]
+    assert isinstance(d["openmp"], bool)
+    assert isinstance(d["isa_flags"], list)
 
 
 def test_compiler_cache_reuse():

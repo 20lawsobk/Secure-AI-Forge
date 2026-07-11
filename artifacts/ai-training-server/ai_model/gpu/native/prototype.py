@@ -42,7 +42,8 @@ def _compile(src: str) -> ctypes.CDLL:
     sopath = os.path.join(d, f"k_{key}.so")
     with open(cpath, "w") as f:
         f.write(src)
-    flags = ["gcc", "-O3", "-march=native", "-funroll-loops", "-ffast-math",
+    # -march=native is stripped on NixOS; use an explicit ISA flag instead.
+    flags = ["gcc", "-O3", "-mavx2", "-mfma", "-funroll-loops", "-ffast-math",
              "-shared", "-fPIC", "-o", sopath, cpath, "-lm"]
     subprocess.run(flags, check=True, capture_output=True, text=True)
     return ctypes.CDLL(sopath)
