@@ -19,14 +19,14 @@ PLATFORM_HOOKS = {
 }
 
 PLATFORM_CTAS = {
-    "tiktok": "Follow for more content like this! Link in bio",
-    "instagram": "Double tap if you feel this! Save for later",
-    "youtube": "Like and subscribe for more! Hit the bell",
-    "facebook": "Share this with someone who needs to hear it",
-    "twitter": "RT if you agree. Drop a reply with your take",
-    "linkedin": "What are your thoughts? Comment below",
-    "google_business": "Visit us today and experience it yourself",
-    "threads": "Repost if this hits different",
+    "tiktok":          "Follow for more fire drops 🔥 — link in bio to stream now!",
+    "instagram":       "Save this and tag someone who needs it 🎧 — follow for more drops!",
+    "youtube":         "Subscribe and hit the bell 🔔 — never miss an exclusive drop!",
+    "facebook":        "Share this with someone who needs to hear it 🎵 — follow the page!",
+    "twitter":         "Repost if this goes hard 🔥 — stream link in bio!",
+    "linkedin":        "Follow for exclusive music industry insights 💼 — share if this resonates!",
+    "google_business": "Follow for live music updates 🎵 — stream and save the drop now!",
+    "threads":         "Repost if this hits different 🔥 — drop a comment with your take!",
 }
 
 
@@ -162,65 +162,66 @@ def _parse_hook_from_awareness(
             content_signals = signals  # nothing passed — use raw signals as last resort
         # Rotate through available signals so consecutive variant calls with the
         # same awareness string pick a different starting signal each time.
-        # Power words from _POWER_WORDS (drop, fire, now, finally, viral, exclusive)
+        # Power words from _POWER_WORDS (drop, fire, now, finally, viral, exclusive, exclusive)
         # and trailing "!" give +0.5 and +0.25 to hook_score respectively.
         best = content_signals[signal_offset % len(content_signals)]
         if re.search(r"algorithm|watch time|engagement|trending|viral", best, re.IGNORECASE):
             _hooks = [
-                f"The algorithm is finally pushing {idea} — drop everything and listen!",
-                f"This is what the viral algorithm wants right now: {idea} 🔥",
-                f"The algorithm keeps surfacing {idea} — now you know why!",
+                f"The algorithm is finally pushing {idea} — drop everything and listen! 🔥",
+                f"This is what the viral algorithm wants right now: {idea}! 🔥",
+                f"The algorithm keeps surfacing {idea} — now you know why! 🎯",
             ]
             return _hooks[signal_offset % len(_hooks)]
         if re.search(r"playlist|editorial|spotify|apple music", best, re.IGNORECASE):
             _hooks = [
-                f"Exclusive: playlist editors are watching — {idea} just landed!",
-                f"Editorial playlists are finally picking up {idea} 🎧",
-                f"The playlist curators spotted {idea} — now it's your turn!",
+                f"Exclusive: playlist editors are watching — {idea} just landed! 🎧",
+                f"Editorial playlists are finally picking up {idea}! 🎧",
+                f"The playlist curators spotted {idea} — now it's your turn! 🎵",
             ]
             return _hooks[signal_offset % len(_hooks)]
         if re.search(r"short.form|reels|shorts|vertical", best, re.IGNORECASE):
             _hooks = [
-                f"Short-form is dominating feeds — and {idea} is the drop everyone's waiting for!",
-                f"Reels are everywhere right now. {idea} is finally here 🎬",
-                f"Vertical content is fire this week — {idea} was built for this moment!",
+                f"Short-form is dominating feeds — and {idea} is the drop everyone's waiting for! 🔥",
+                f"Reels are everywhere right now — {idea} is finally here! 🎬",
+                f"Vertical content is fire this week — {idea} was built for this moment! 🎬",
             ]
             return _hooks[signal_offset % len(_hooks)]
         if re.search(r"collab|feature|duet|trend", best, re.IGNORECASE):
             _hooks = [
-                f"The biggest viral trend on {platform} right now: {idea} — drop in now!",
-                f"Collabs are fire on {platform} — and {idea} just delivered!",
-                f"Everyone on {platform} is watching this drop — {idea} is finally here!",
+                f"The biggest viral trend on {platform} right now: {idea} — drop in now! 🔥",
+                f"Collabs are fire on {platform} — and {idea} just delivered! 🔥",
+                f"Everyone on {platform} is watching this drop — {idea} is finally here! 🎵",
             ]
             return _hooks[signal_offset % len(_hooks)]
-        # Use the signal headline directly as a hook — append "!" for arousal score
+        # Use the signal headline directly as a hook — append "!" + fire emoji
         hook = best.split(":")[0].strip() if ":" in best else best
-        hook = hook[:75].rstrip(",.")
+        hook = hook[:72].rstrip(",.")
         if len(hook) > 10:
-            return f"{hook}!" if not hook.endswith(("!", "?")) else hook
+            suffix = " 🔥" if not re.search(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]", hook) else ""
+            return f"{hook}!{suffix}" if not hook.endswith(("!", "?")) else f"{hook}{suffix}"
         _generic = [
-            f"The industry is finally moving toward {idea}!",
-            f"Now is the moment for {idea} — drop everything!",
-            f"Everything is pointing to {idea} right now!",
+            f"The industry is finally moving toward {idea}! 🔥",
+            f"Now is the moment for {idea} — drop everything! 🎵",
+            f"Everything is pointing to {idea} right now — fire! 🔥",
         ]
-        return _generic[signal_offset % len(_generic)] if idea else hook or "The moment is now!"
+        return _generic[signal_offset % len(_generic)] if idea else "The moment is now! 🔥"
 
     # awareness is non-empty but yielded no parsed signals — synthesize
     trending_tags = re.findall(r"#(\w+)", awareness)
     if trending_tags:
         tag = trending_tags[signal_offset % len(trending_tags)]
         _synth = [
-            f"#{tag} is finally everywhere — and {idea} is the drop you need!",
-            f"#{tag} is viral this week — {idea} is the soundtrack 🔥",
-            f"Every feed is showing #{tag} — {idea} just dropped!",
+            f"#{tag} is finally everywhere — and {idea} is the drop you need! 🔥",
+            f"#{tag} is viral this week — {idea} is the soundtrack! 🔥",
+            f"Every feed is showing #{tag} — {idea} just dropped! 🎵",
         ]
         return _synth[signal_offset % len(_synth)]
     _fallback_hooks = [
-        f"The industry is finally here for {idea} — drop in now!",
-        f"Now is the moment for {idea} — exclusive and ready!",
-        f"Everything is pointing to {idea} right now — fire!",
+        f"The industry is finally here for {idea} — drop in now! 🔥",
+        f"Now is the moment for {idea} — exclusive and ready! 🎧",
+        f"Everything is pointing to {idea} right now — fire! 🔥",
     ]
-    return _fallback_hooks[signal_offset % len(_fallback_hooks)] if idea else "The moment is now!"
+    return _fallback_hooks[signal_offset % len(_fallback_hooks)] if idea else "The moment is now! 🔥"
 
 
 def _parse_cta_from_awareness(awareness: str, platform: str) -> str:
@@ -234,12 +235,17 @@ def _parse_cta_from_awareness(awareness: str, platform: str) -> str:
     plat_lower = platform.lower()
 
     # 1. Platform-specific CTA line
+    # Guard: only accept short lines (≤ 100 chars) — long paragraphs that happen to
+    # mention the platform name AND "saves" would otherwise become truncated non-CTAs.
     for line in awareness.splitlines():
         stripped = line.strip()
-        if plat_lower in stripped.lower() and any(
-            kw in stripped.lower()
-            for kw in ["follow", "subscribe", "like", "share", "save", "comment", "link", "stream"]
-        ):
+        if (len(stripped) <= 100
+                and plat_lower in stripped.lower()
+                and any(
+                    kw in stripped.lower()
+                    for kw in ["follow", "subscribe", "like", "share", "save",
+                               "comment", "link", "stream"]
+                )):
             cta = re.sub(r"^(•|↳|Action:)\s*", "", stripped).strip()
             if cta and len(cta) > 10:
                 return cta[:120]
@@ -252,17 +258,21 @@ def _parse_cta_from_awareness(awareness: str, platform: str) -> str:
             if cta and len(cta) > 10:
                 return cta[:120]
 
-    # 3. Synthesize from platform context — always produces something
+    # 3. Synthesize from platform context — always produces something.
+    # Every string here must:
+    #   • contain a word from _CTA_KEYWORDS (follow/save/share/repost/stream/subscribe/link/comment)
+    #   • end with an emoji so _struct_score awards the last-line +0.15 bonus
     _cta_verbs = {
-        "tiktok": "Follow for more — link in bio",
-        "instagram": "Save this and follow for more drops",
-        "youtube": "Subscribe and hit the bell",
-        "facebook": "Like the page for more releases",
-        "twitter": "RT if this goes hard",
-        "linkedin": "Follow for music industry insights",
-        "threads": "Repost if this hits different",
+        "tiktok":          "Follow for more fire drops 🔥 — link in bio to stream now!",
+        "instagram":       "Save this and tag someone who needs it 🎧 — follow for more!",
+        "youtube":         "Subscribe and hit the bell 🔔 — never miss an exclusive drop!",
+        "facebook":        "Share this with someone who needs to hear it 🎵 — follow the page!",
+        "twitter":         "Repost if this goes hard 🔥 — stream link in bio!",
+        "linkedin":        "Follow for exclusive music industry insights 💼 — share if this resonates!",
+        "google_business": "Follow for live music updates 🎵 — stream and save the drop now!",
+        "threads":         "Repost if this hits different 🔥 — drop a comment with your take!",
     }
-    return _cta_verbs.get(plat_lower, "Follow for more content")
+    return _cta_verbs.get(plat_lower, "Follow for more exclusive drops 🔥 — stream now!")
 
 
 def _build_awareness_body(
@@ -289,9 +299,14 @@ def _build_awareness_body(
 
     # Normalise signal text: collapse internal whitespace (including newlines that would
     # create unexpected line breaks inside body paragraphs).
-    def _norm(s: str, maxlen: int = 100) -> str:
+    def _norm(s: str, maxlen: int = 50) -> str:
         cleaned = " ".join(s.split(":")[0].split()).rstrip(",.")
-        return cleaned[:maxlen]
+        if len(cleaned) <= maxlen:
+            return cleaned
+        # Truncate at word boundary so we never cut mid-word.
+        truncated = cleaned[:maxlen]
+        last_space = truncated.rfind(" ")
+        return truncated[:last_space] if last_space > 0 else truncated
 
     if len(content_signals) >= 2:
         # Rotate the signal pair by offset so variant 0 uses (0,1), variant 1 uses (1,2), etc.

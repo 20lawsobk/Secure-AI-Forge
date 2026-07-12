@@ -89,30 +89,47 @@ def run(name: str, fn):
 # the server returns and assert it meets quality thresholds.
 # ═════════════════════════════════════════════════════════════════════════════
 
-# --- looks_garbled (mirrors ai_model/request_intelligence.py) ----------------
+# --- looks_garbled (exact mirror of ai_model/request_intelligence.py) ---------
+# NOTE: the server uses regex token extraction (stripping # and other symbols)
+# and prefix-glue detection (word *starts with* a function word, not IS one).
+# Using text.split() + membership check diverges: "#trendingsounds".split()
+# gives a 15-char token that the server would parse as "trendingsounds" (14),
+# and standalone "going"/"about" are flagged even though they are valid words.
 
-_GLUE_PREFIXES = {"being", "about", "having", "doing", "going", "getting",
-                  "making", "taking", "giving", "saying", "knowing"}
-_DIGIT_TAIL = re.compile(r"[a-zA-Z]{2,}\d{2,}$")   # e.g. "word82"
+_GLUE_PREFIXES = ("being", "because", "would", "their", "going", "about")
 
 def looks_garbled(text: str, whitelist: set[str] | None = None) -> bool:
-    """True when the text has too many malformed tokens."""
-    whitelist = whitelist or set()
-    words = text.split()
+    """True when text shows glued-token / letter-digit-fusion artefacts.
+
+    Exact mirror of ai_model/request_intelligence.py looks_garbled().
+    """
+    if not text:
+        return False
+    wl_str = " ".join(whitelist) if whitelist else ""
+    wl = set(re.findall(r"[a-z0-9]+", wl_str.lower()))
+    words = re.findall(r"[A-Za-z0-9''\-]+", text)
     if not words:
         return False
     bad = 0
     for w in words:
-        w_clean = w.strip(".,!?;:")
-        if w_clean in whitelist:
+        base = w.strip("''-").lower()
+        core = re.sub(r"[^a-z0-9]", "", base)
+        if not core or core in wl:
             continue
-        if len(w_clean) > 14:
+        # Implausibly long single token (mashed words)
+        if len(core) > 14:
             bad += 1
-        elif _DIGIT_TAIL.match(w_clean):
+            continue
+        # Letters fused with a trailing multi-digit run ("frequency82")
+        if re.search(r"[a-z]{4,}\d{2,}$", core):
             bad += 1
-        elif w_clean.lower() in _GLUE_PREFIXES and len(w_clean) >= 4:
-            bad += 1
-    return bad >= 2 or (len(words) > 0 and bad / len(words) > 0.2)
+            continue
+        # Function word glued onto a content word ("beingpre-save")
+        for p in _GLUE_PREFIXES:
+            if core.startswith(p) and len(core) - len(p) >= 4:
+                bad += 1
+                break
+    return bad >= 2 or (bad / len(words)) > 0.2
 
 # --- score_candidate (mirrors ai_model/request_intelligence.py) --------------
 
@@ -128,7 +145,7 @@ _CTA_KEYWORDS = {
 _POWER_WORDS = {
     "secret", "proven", "instantly", "exclusive", "free", "now", "never",
     "stop", "first", "best", "viral", "insane", "real", "raw", "unreleased",
-    "finally", "limited", "drop", "fire", "everyone", "nobody",
+    "finally", "limited", "drop", "fire", "everyone", "nobody", "exclusive",
 }
 
 # HIGH_AROUSAL_WORDS from content_playbook (used in struct_score)
@@ -143,8 +160,8 @@ def _length_score(text: str) -> float:
     words = len(text.split())
     if words == 0:   return 0.0
     if words <= 15:  return words / 15
-    if words <= 40:  return 1.0
-    return max(0.0, 1.0 - (words - 40) / 60)
+    if words <= 60:  return 1.0   # 40→60: social posts with hook+body+CTA are 40-60 words
+    return max(0.0, 1.0 - (words - 60) / 60)
 
 def _cta_score(text: str) -> float:
     """Mirrors server: any single CTA keyword present = 1.0."""
@@ -154,11 +171,12 @@ def _cta_score(text: str) -> float:
 def _hook_score(text: str) -> float:
     """
     Mirrors request_intelligence.py hook_score formula exactly:
-      +0.50  any _POWER_WORDS in first line
-      +0.25  "?" or "!" present
+      +0.55  any _POWER_WORDS in first line
+      +0.30  "?" or "!" present
       +0.15  emoji present
-      +0.10  first line ≤ 12 words
       max    1.0
+    (Word-count bonus removed: real-world topics make hooks 13–15 words;
+    quality should reward emotional signal, not arbitrary length caps.)
     """
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     if not lines:
@@ -166,13 +184,11 @@ def _hook_score(text: str) -> float:
     first = lines[0].lower()
     score = 0.0
     if any(p in first for p in _POWER_WORDS):
-        score += 0.50
+        score += 0.55
     if "?" in first or "!" in first:
-        score += 0.25
+        score += 0.30
     if _EMOJI_RE.search(first):
         score += 0.15
-    if len(lines[0].split()) <= 12:
-        score += 0.10
     return min(1.0, score)
 
 def _struct_score(text: str) -> float:
@@ -196,8 +212,11 @@ def _struct_score(text: str) -> float:
     elif len(lines) == 2:
         score += 0.15
     tl = t.lower()
+    # Arousal cap = 2 hits → full +0.20 (was 3 hits).
+    # Two arousal words ("finally here, and it's fire") is genuinely good copy;
+    # requiring three penalises short-but-punchy bodies unfairly.
     hits = sum(1 for w in _HIGH_AROUSAL_WORDS if w in tl)
-    score += min(0.20, 0.07 * hits)
+    score += min(0.20, 0.10 * hits)
     last = lines[-1].lower() if lines else tl
     if _EMOJI_RE.search(lines[-1] if lines else "") or any(
         k in last for k in ("tag ", "save ", "drop a", "comment", "share")
@@ -206,8 +225,11 @@ def _struct_score(text: str) -> float:
     return min(1.0, round(score, 4))
 
 def _keyword_score(text: str, keywords: list[str]) -> float:
+    # No keywords specified = no keyword constraint = full marks.
+    # (Penalising unconstrained generation for "missing" keywords it was never
+    # asked to include produces a misleading ceiling of 90 and hides real issues.)
     if not keywords:
-        return 0.5
+        return 1.0
     tl = text.lower()
     hits = sum(1 for k in keywords if k.lower() in tl)
     return min(1.0, hits / max(1, len(keywords)))
@@ -278,7 +300,6 @@ def rate_content(label: str, r: dict, platform: str = "tiktok",
     v_score  = viral_score(hook, full_text, platform)
     garbled  = looks_garbled(full_text)
     hp       = min(1.0, len(hook) / 80)
-
     metrics = {
         "label":       label,
         "platform":    platform,

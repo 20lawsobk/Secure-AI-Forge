@@ -836,7 +836,7 @@ def _warm_content_cache() -> None:
                         "source": getattr(sr, "source", "template"),
                     }
 
-                _orch.compute(cache_key, _builder, namespace="api_content")
+                _orch.compute(cache_key, _builder, namespace="api_content_v4")
                 warmed += 1
             except Exception as exc:
                 print(f"[CacheWarm] {plat}/{topic}: {exc}")
@@ -2477,21 +2477,23 @@ def _resolve_topic_from_url(raw_topic: str) -> str:
 
 
 def _effective_awareness(platform: str, raw_awareness: str) -> str:
-    """Return ``raw_awareness`` when provided; otherwise auto-inject the
-    platform-specific awareness string from the quality awareness buffer.
+    """Always combine platform strategy signals with caller-provided awareness.
 
-    This ensures every platform (TikTok, Instagram, YouTube, Facebook,
-    LinkedIn, Google Business, Threads) receives rich content-strategy
-    signals even when the API caller sends no ``awareness`` field.
+    Platform signals (fire/viral/drop/finally/exclusive etc.) are prepended so
+    the hook-selector and body-builder always have arousal-rich [HIGH] signals
+    available regardless of whether the caller sends extra context.  When the
+    caller sends no awareness, only platform signals are used.
     Never-raise.
     """
-    if raw_awareness:
-        return raw_awareness
     try:
         from ai_model.quality_awareness import platform_awareness_string
-        return platform_awareness_string(platform)
+        platform_awareness = platform_awareness_string(platform)
     except Exception:  # noqa: BLE001
-        return ""
+        platform_awareness = ""
+    if not raw_awareness:
+        return platform_awareness
+    # Prepend platform awareness so its [HIGH] signals are extracted first.
+    return f"{platform_awareness}\n{raw_awareness}" if platform_awareness else raw_awareness
 
 
 @app.post("/content/generate")
@@ -2559,7 +2561,7 @@ async def generate_content(req: ContentRequest, _key = Depends(require_scope("ge
         _orch = _get_pdim_orchestrator()
         _cache_key = {"platform": platform, "topic": topic, "tone": req.tone,
                       "goal": req.goal, "awareness": effective_awareness}
-        _out = await _in_thread(lambda: _orch.compute(_cache_key, _build_result, namespace="api_content"))
+        _out = await _in_thread(lambda: _orch.compute(_cache_key, _build_result, namespace="api_content_v4"))
         _result = dict(_out["result"])
         if _out.get("source") in ("cache", "coalesced"):
             _result["cached"] = True
@@ -3332,6 +3334,8 @@ async def platform_video_generate(req: PlatformVideoRequest, _key = Depends(requ
             "user_id": req.user_id,
             "title": f"{req.topic} — {req.style.capitalize()} Video",
             "hook": script_result.hook,
+            "body": script_result.body,
+            "cta":  script_result.cta,
             "script": full_script,
             "scenes": raw_scenes,
             "captions": caption_blocks,
@@ -5265,7 +5269,7 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
     # artist edits their profile.
     if _model_ready and not req.artistProfileId:
         _orch = _get_pdim_orchestrator()
-        _out = await _in_thread(lambda: _orch.compute(req, _build, namespace="api_content"))
+        _out = await _in_thread(lambda: _orch.compute(req, _build, namespace="api_content_v4"))
         result = dict(_out["result"])
         if _out.get("source") in ("cache", "coalesced"):
             result["cached"] = True

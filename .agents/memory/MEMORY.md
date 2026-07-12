@@ -42,3 +42,4 @@
 - [Native SIMD (Path A)](native-simd-path-a.md) — ai_model/gpu/native compiles fused C kernels to CPU SIMD (gcc+ctypes), 2.5-8x over numpy via fusion; never-raise numpy fallback; NOT GPU hardware; target fused elementwise not gemm
 - [Digital GPU execution stack](digital-gpu-execution-stack.md) — opcode `is_hardware_execution` flag gates hardware ops; real OCP e4m3/e5m2 fp8 (format-specific inf, not scale=16 toy); telemetry measured-vs-derived; live-set OOM; don't clobber existing DigitalGPU/GPUBackend
 - [GPU kernel redesign](gpu-kernel-redesign.md) — HyperSIMDCore flash_attention is real tiled online-softmax (16x less score mem, faster at long T); conv2d/3d use strided im2col (1.4-2.3x); flash must loop over Tk not Tq, clamp block_size, conv preserves input dtype
+- [Quality leaderboard 100/100](quality-leaderboard.md) — scoring rules, final fixes, and constraints to preserve when touching script_agent or server.py
