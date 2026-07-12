@@ -2476,11 +2476,30 @@ def _resolve_topic_from_url(raw_topic: str) -> str:
     return resolved
 
 
+def _effective_awareness(platform: str, raw_awareness: str) -> str:
+    """Return ``raw_awareness`` when provided; otherwise auto-inject the
+    platform-specific awareness string from the quality awareness buffer.
+
+    This ensures every platform (TikTok, Instagram, YouTube, Facebook,
+    LinkedIn, Google Business, Threads) receives rich content-strategy
+    signals even when the API caller sends no ``awareness`` field.
+    Never-raise.
+    """
+    if raw_awareness:
+        return raw_awareness
+    try:
+        from ai_model.quality_awareness import platform_awareness_string
+        return platform_awareness_string(platform)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 @app.post("/content/generate")
 async def generate_content(req: ContentRequest, _key = Depends(require_scope("generate"))):
     start = time.time()
     platform = normalize_platform(req.platform)
     topic = _resolve_topic_from_url(req.topic)
+    effective_awareness = _effective_awareness(platform, req.awareness)
 
     if not _model_ready or _script_agent is None:
         # Model not ready yet — signal the client to retry rather than returning
@@ -2500,12 +2519,12 @@ async def generate_content(req: ContentRequest, _key = Depends(require_scope("ge
         from ai_model.agents.distribution_agent import DistributionRequest
         script_result = await _in_thread(lambda: _script_agent.run(ScriptRequest(
             idea=topic, platform=platform, goal=req.goal, tone=req.tone,
-            awareness=req.awareness,
+            awareness=effective_awareness,
         )))
         full_script = f"{script_result.hook}\n{script_result.body}\n{script_result.cta}"
         dist_result = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
             script=full_script, platform=platform, goal=req.goal,
-            awareness=req.awareness,
+            awareness=effective_awareness,
         )))
         return script_result, dist_result
 
@@ -2514,12 +2533,12 @@ async def generate_content(req: ContentRequest, _key = Depends(require_scope("ge
         from ai_model.agents.distribution_agent import DistributionRequest
         sr = _script_agent.run(ScriptRequest(
             idea=topic, platform=platform, goal=req.goal,
-            tone=req.tone, awareness=req.awareness,
+            tone=req.tone, awareness=effective_awareness,
         ))
         full_script = f"{sr.hook}\n{sr.body}\n{sr.cta}"
         dr = _distribution_agent.run(DistributionRequest(
             script=full_script, platform=platform,
-            goal=req.goal, awareness=req.awareness,
+            goal=req.goal, awareness=effective_awareness,
         ))
         if not any([sr.hook.strip(), sr.body.strip(), sr.cta.strip()]):
             raise ValueError("empty generatedContent — model warming up, please retry")
@@ -2539,7 +2558,7 @@ async def generate_content(req: ContentRequest, _key = Depends(require_scope("ge
         # Identical concurrent requests collapse to one compute; all share result.
         _orch = _get_pdim_orchestrator()
         _cache_key = {"platform": platform, "topic": topic, "tone": req.tone,
-                      "goal": req.goal, "awareness": req.awareness}
+                      "goal": req.goal, "awareness": effective_awareness}
         _out = await _in_thread(lambda: _orch.compute(_cache_key, _build_result, namespace="api_content"))
         _result = dict(_out["result"])
         if _out.get("source") in ("cache", "coalesced"):
@@ -2547,7 +2566,7 @@ async def generate_content(req: ContentRequest, _key = Depends(require_scope("ge
         _result["processing_time_ms"] = round((time.time() - start) * 1000, 1)
         _fw_ingest(_key, "scripts", _result, {
             "topic": topic, "platform": platform,
-            "tone": req.tone, "awareness": req.awareness,
+            "tone": req.tone, "awareness": effective_awareness,
         })
         return _result
     except HTTPException:
@@ -2890,6 +2909,7 @@ async def platform_social_generate(req: PlatformSocialRequest, _key = Depends(re
 
     # Personalize tone based on user's past engagement data in storage
     personalized_tone = _build_personalized_tone(req.user_id, platform, req.tone)
+    effective_awareness = _effective_awareness(platform, req.awareness)
 
     variants = []
     if not _model_ready or _script_agent is None:
@@ -2908,13 +2928,13 @@ async def platform_social_generate(req: PlatformSocialRequest, _key = Depends(re
                 s = await _in_thread(lambda: _script_agent.run(ScriptRequest(
                     idea=req.topic, platform=platform,
                     goal=req.goal, tone=personalized_tone,
-                    awareness=req.awareness,
+                    awareness=effective_awareness,
                     variant_idx=vidx,
                 )))
                 d = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
                     script=f"{s.hook}\n{s.body}\n{s.cta}",
                     platform=platform, goal=req.goal,
-                    awareness=req.awareness,
+                    awareness=effective_awareness,
                 )))
                 return s, d
 
@@ -2956,7 +2976,7 @@ async def platform_social_generate(req: PlatformSocialRequest, _key = Depends(re
     }
     _fw_ingest(_key, "social", _result, {
         "topic": req.topic, "platform": platform,
-        "tone": personalized_tone, "awareness": req.awareness,
+        "tone": personalized_tone, "awareness": effective_awareness,
     })
     return _result
 

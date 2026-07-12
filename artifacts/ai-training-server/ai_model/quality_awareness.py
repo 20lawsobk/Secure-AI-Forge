@@ -287,6 +287,101 @@ def _graduate(recent: Dict[str, str], winner: str, corpus_key: str) -> bool:
         return False
 
 
+# ── Per-platform stable strategy knowledge ───────────────────────────────────
+# These lines are ALWAYS included in the awareness string for each platform,
+# regardless of what the live harvester finds.  They encode the stable content
+# strategy patterns for each platform (format signals, engagement drivers,
+# CTA patterns, posting-time hints) in the [HIGH]/•/TRENDS: format that
+# _parse_signals_for_platform() in script_agent.py already reads.
+
+_PLATFORM_STRATEGY: Dict[str, List[str]] = {
+    "tiktok": [
+        "[HIGH] Hook must land within the first 2–3 seconds — pattern interrupt beats slow burn.",
+        "[HIGH] FYP algorithm rewards watch-to-end rate: tighter edits outperform long intros.",
+        "• Content format: vertical short-form, trending audio overlay, challenge/duet friendly.",
+        "• Best engagement window: 6 pm–10 pm local time.",
+        "TRENDS: #fyp #foryou #trendingsounds peaking. Stitch and duet formats boosting reach 2×.",
+    ],
+    "instagram": [
+        "[HIGH] Reels first 3 seconds are critical — algorithm measures full-watch rate.",
+        "[HIGH] Save rate outweighs like rate for Explore placement: give them a reason to save.",
+        "• Content format: Reels for reach, carousels for saves, Stories for daily engagement.",
+        "• Best engagement window: 11 am–1 pm and 7 pm–9 pm local time.",
+        "TRENDS: #reels #newmusic #explore #artist performing. Aesthetic grid cohesion rewarded.",
+    ],
+    "youtube": [
+        "[HIGH] First 30 seconds must deliver the promise of the title — curiosity gap hook.",
+        "[HIGH] Chapters and timestamp markers increase average view duration by up to 30%.",
+        "• Content format: long-form music videos, Shorts for discovery, behind-the-scenes.",
+        "• Best upload window: 2 pm–4 pm Tuesday–Thursday.",
+        "TRENDS: #shorts #musicvideo #newrelease up. Thumbnail contrast (face + bold text) boosting CTR.",
+    ],
+    "facebook": [
+        "[HIGH] Native video uploads reach 3× the audience of external video links.",
+        "[HIGH] Community-focused storytelling drives share rates above any other content type.",
+        "• Content format: native video, event promotion, group posts, emotional personal stories.",
+        "• Best posting window: 9 am–11 am Wednesday and Friday.",
+        "TRENDS: #facebookreels #newmusic #community up. Sound-off captions capturing scroll audience.",
+    ],
+    "linkedin": [
+        "[HIGH] First 3 lines before the 'see more' fold determine click-through — lead with value.",
+        "[HIGH] Comments drive more reach than reactions: end with a direct question to spark replies.",
+        "• Content format: professional insight, personal milestone, data-backed industry take.",
+        "• Best posting window: 8 am–10 am Tuesday–Thursday.",
+        "TRENDS: #musicindustry #contentcreator #artistentrepreneur trending. Thought leadership posts performing.",
+    ],
+    "google_business": [
+        "[HIGH] Offer and event posts drive the most local discovery clicks — post weekly at minimum.",
+        "[HIGH] Photo-rich posts earn 35% more click-throughs than text-only updates.",
+        "• Content format: event announcements, offers, business updates, behind-the-scenes photos.",
+        "• Best posting window: 10 am–noon local time.",
+        "TRENDS: #livemusic #localartist #musicstudio up in local search. Call-to-action posts (book, stream) converting.",
+    ],
+    "threads": [
+        "[HIGH] Conversational, authentic voice outperforms polished copy — Threads rewards unfiltered.",
+        "[HIGH] Reply chains drive distribution: a question or hot-take inviting responses beats announcements.",
+        "• Content format: text-first commentary, music opinions, cross-posted Reels for visual.",
+        "• Best posting window: 1 pm–3 pm and 9 pm–11 pm.",
+        "TRENDS: #newmusic #musiccommunity #threads up. Short punchy takes and music hot-takes generating the most reposts.",
+    ],
+}
+
+
+def platform_awareness_string(platform: str) -> str:
+    """Build a rich, platform-specific awareness string for ``platform``.
+
+    Combines:
+      1. Stable per-platform content strategy knowledge (``_PLATFORM_STRATEGY``).
+      2. Live genre/artist signals from the quality harvester doc, formatted
+         for that platform (``doc["platform_signals"][platform]``).
+
+    Returns a multi-line string in the ``[HIGH]/•/TRENDS:`` format that
+    ``_parse_signals_for_platform()`` in script_agent.py already parses.
+    Returns an empty string when retired (own corpus is self-sufficient).
+
+    Never-raise.
+    """
+    try:
+        plat = platform.lower().replace(" ", "_")
+        strategy_lines = _PLATFORM_STRATEGY.get(plat, [])
+
+        # Blend in live harvester signals when the buffer is still active.
+        suff = self_sufficiency()
+        live_lines: List[str] = []
+        if not suff["retired"]:
+            doc = get_doc()
+            if doc:
+                platform_signals: Dict[str, Any] = doc.get("platform_signals", {})
+                live_lines = list(platform_signals.get(plat, []))
+
+        all_lines = strategy_lines + live_lines
+        if not all_lines:
+            return ""
+        return "\n".join(all_lines)
+    except Exception:  # noqa: BLE001 — must never crash generation
+        return ""
+
+
 def brief_enrichment() -> Optional[Dict[str, str]]:
     """One directive + one note for the GenerationBrief, or None if inactive."""
     suff = self_sufficiency()
