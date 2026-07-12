@@ -323,6 +323,61 @@ register(_spec(
     flop_formula=lambda ins: 2.0 * ins["A"].shape[0] * ins["A"].shape[1] * ins["B"].shape[1],
 ))
 
+# ─────────────────────────────────────────────────────────────────────────────
+# SM102 MaxCore kernel set
+# Each op has a .cu source in native/cuda/ (the hardware specification) and a
+# Python digital-GPU implementation in native/cuda/sm102_kernels.py.
+# is_hardware_execution=False everywhere; target_arch="sm_102" is the label
+# of intent — what these ops model, not what runs them.
+# ─────────────────────────────────────────────────────────────────────────────
+
+register(_spec(
+    name="im2col_sm102", version=1,
+    inputs=("X",),
+    input_shapes={"X": ("N", "C", "H", "W")},
+    output_shapes={"cols": ("N", "CKK", "OH_OW")},
+    dtypes={"X": "fp16", "cols": "fp16"},
+    numeric_profile="fp16_mixed", deterministic=True,
+    is_hardware_execution=False, target_arch="sm_102",
+    doc=("SM102 im2col: scatter fp16 input patches into a column buffer for "
+         "downstream WMMA convolution. One CUDA thread block per (batch, channel). "
+         "Digital-GPU execution: stride_tricks zero-copy patch view (same numeric "
+         "result as the .cu kernel, no extra copies)."),
+    # memory-bound copy; ~1 FLOPs/element (readdress only)
+    flop_formula=lambda ins: float(ins["X"].size),
+))
+
+register(_spec(
+    name="conv_wmma_sm102", version=1,
+    inputs=("A", "B"),
+    input_shapes={"A": ("M", "K"), "B": ("N", "K")},
+    output_shapes={"C": ("M", "N")},
+    dtypes={"A": "fp16", "B": "fp16", "C": "fp16"},
+    numeric_profile="fp16_mixed", deterministic=True,
+    is_hardware_execution=False, target_arch="sm_102",
+    doc=("SM102 WMMA GEMM: 16×16×16 tensor-core fragment tiles, fp16 inputs, "
+         "fp16 accumulate. In hardware each warp owns one 16×16 output tile via "
+         "nvcuda::wmma::mma_sync. Digital-GPU execution: TensorCoreUnit "
+         "mixed_precision_matmul over the same 16×16 tile grid."),
+    flop_formula=lambda ins: 2.0 * float(ins["A"].shape[0]) * float(ins["A"].shape[1]) * float(ins["B"].shape[0]),
+))
+
+register(_spec(
+    name="reduction_sm102", version=1,
+    inputs=("X", "Y"),
+    input_shapes={"X": ("N",), "Y": ("N",)},
+    output_shapes={"out": ("1",)},
+    dtypes={"X": "fp32", "Y": "fp32", "out": "fp32"},
+    numeric_profile="fp32_strict", deterministic=True,
+    is_hardware_execution=False, target_arch="sm_102",
+    doc=("SM102 dot-product reduction  sum(X[i]*Y[i]). Two .cu variants: "
+         "(1) shared-memory binary-tree (reduction_current_sm102_kernel) and "
+         "(2) warp-shuffle __shfl_down_sync grid-stride (reduction_redesigned_sm102_kernel, "
+         "default — ~32× fewer atomicAdd calls). Select via params['variant']."),
+    # N multiplies + N adds = 2N FLOPs
+    flop_formula=lambda ins: 2.0 * float(ins["X"].size),
+))
+
 register(_spec(
     name="fused_attention_norm", version=1,
     inputs=("Q", "K", "V", "gamma", "beta"),

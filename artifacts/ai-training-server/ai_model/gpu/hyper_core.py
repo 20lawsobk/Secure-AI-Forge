@@ -709,6 +709,116 @@ class HyperGPU:
         self._total_compute_ms += (time.time() - t0) * 1000
         return result
 
+    # ── SM102 MaxCore kernel methods ──────────────────────────────────────────
+
+    @property
+    def nvcc(self):
+        """Lazy-compiled CUDANvcc backed by this HyperGPU instance."""
+        if not hasattr(self, "_nvcc"):
+            from ai_model.gpu.native.cuda import CUDANvcc
+            object.__setattr__(self, "_nvcc", CUDANvcc(gpu=self))
+        return self._nvcc
+
+    def flash_attn_fp8_sm102(
+        self,
+        Q: np.ndarray,
+        K: np.ndarray,
+        V: np.ndarray,
+        causal: bool = False,
+        fp8_format: str = "e4m3",
+    ) -> np.ndarray:
+        """Flash attention with fp8 Q/K/V via the SM102 custom nvcc.
+
+        Compiles ``flashattn_sm102.cu`` through the custom nvcc on first call
+        (cached thereafter) and executes it on this HyperGPU's SIMD cores.
+        Output dtype is fp16 — matching the ``__half* O`` in the .cu kernel.
+        """
+        t0 = time.time()
+        mod = self.nvcc.compile_sm102()
+        B, H, T, D = Q.shape
+        O = np.zeros((B, H, T, D), dtype=np.float16)
+        mod(
+            "flash_attn_sm102_kernel",
+            (B * H,), (32,),
+            Q.astype(np.float32), K.astype(np.float32),
+            V.astype(np.float32), O,
+            gpu=self,
+            causal=causal,
+            fp8_format=fp8_format,
+        )
+        self._model(
+            "attention",
+            4.0 * B * H * T * T * D,
+            kv_size=float(K.nbytes + V.nbytes),
+            bytes_moved=float(Q.nbytes + K.nbytes + V.nbytes + O.nbytes),
+            precision=f"fp8_{fp8_format}",
+        )
+        self._total_compute_ms += (time.time() - t0) * 1000
+        return O
+
+    def conv_wmma_sm102(
+        self,
+        A: np.ndarray,   # [M, K] fp16 — im2col output
+        B: np.ndarray,   # [N, K] fp16 — weight matrix
+    ) -> np.ndarray:
+        """WMMA tensor-core GEMM via the SM102 custom nvcc.
+
+        Matches ``conv_wmma_sm102_kernel`` in ``conv_sm102.cu``:
+        16×16×16 fragment tiles, fp16 inputs, fp16 accumulate.
+        """
+        t0 = time.time()
+        mod = self.nvcc.compile_sm102()
+        M, K_dim = A.shape
+        N = B.shape[0]
+        C = np.zeros((M, N), dtype=np.float16)
+        gx = max(1, (M + 63) // 64)
+        gy = max(1, (N + 63) // 64)
+        mod(
+            "conv_wmma_sm102_kernel",
+            (gx, gy), (128, 4),
+            A.astype(np.float16), B.astype(np.float16), C,
+            gpu=self,
+        )
+        self._model(
+            "gemm", 2.0 * M * K_dim * N,
+            bytes_moved=float(A.nbytes + B.nbytes + C.nbytes),
+            precision="fp16",
+        )
+        self._total_compute_ms += (time.time() - t0) * 1000
+        return C
+
+    def reduction_sm102(
+        self,
+        x: np.ndarray,
+        y: np.ndarray,
+        variant: str = "redesigned",
+    ) -> float:
+        """Dot-product reduction via the SM102 custom nvcc.
+
+        ``variant='redesigned'`` (default): warp-shuffle __shfl_down_sync
+        grid-stride path — ~32× fewer atomicAdd calls than the tree variant.
+        ``variant='current'``: shared-memory binary-tree reduction.
+        """
+        t0 = time.time()
+        mod = self.nvcc.compile_sm102()
+        x32 = x.astype(np.float32).ravel()
+        y32 = y.astype(np.float32).ravel()
+        out = np.zeros(1, dtype=np.float32)
+        n = len(x32)
+        kernel = ("reduction_redesigned_sm102_kernel"
+                  if variant == "redesigned"
+                  else "reduction_current_sm102_kernel")
+        mod(
+            kernel,
+            (min(1024, max(1, (n + 255) // 256)),), (256,),
+            x32, y32, out,
+            gpu=self,
+        )
+        self._model("elementwise", 2.0 * n,
+                    bytes_moved=float(x32.nbytes + y32.nbytes))
+        self._total_compute_ms += (time.time() - t0) * 1000
+        return float(out[0])
+
     def flush_vram(self):
         self.vram.flush()
 

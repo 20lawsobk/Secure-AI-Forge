@@ -22,6 +22,7 @@ propagates so real bugs aren't hidden.
 """
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
@@ -109,6 +110,10 @@ class ExecutionGraph:
             raise GPUError("execution graph has a cycle; cannot schedule")
         return order
 
+
+# ── SM102 module singleton ────────────────────────────────────────────────────
+# Compiled once per process; thread-safe via the inner Lock.
+_sm102_state: Dict = {"module": None, "lock": threading.Lock()}
 
 # ── opcode dispatch: name -> fn(gpu, inputs, params) -> {out_name: array} ──────
 
@@ -248,6 +253,97 @@ def _default_dispatch() -> Dict[str, Callable]:
         return {"O": HyperSIMDCore(lanes=1).fused_attention_norm(
             Q, K, V, gamma, beta, causal=causal, eps=eps)}
 
+    # ── SM102 MaxCore kernel set ───────────────────────────────────────────────
+    # Each handler compiles the SM102 source via the custom nvcc and dispatches
+    # through the digital GPU's SIMD/TensorCore execution stack.
+    # The nvcc module is compiled once per process and cached by source SHA-1.
+
+    def _get_sm102_module(gpu):
+        """Lazy-compile the unified SM102 module. Thread-safe singleton."""
+        if _sm102_state["module"] is None:
+            with _sm102_state["lock"]:
+                if _sm102_state["module"] is None:
+                    from ai_model.gpu.native.cuda import CUDANvcc
+                    _sm102_state["module"] = CUDANvcc(gpu=gpu).compile_sm102()
+        return _sm102_state["module"]
+
+    def flash_attention_fp8_sm102(gpu, i, p):
+        """SM102 fp8 flash attention — routes through custom nvcc + digital GPU."""
+        Q, K, V = i["Q"], i["K"], i["V"]
+        B, H = Q.shape[0], Q.shape[1]
+        O = np.zeros_like(Q, dtype=np.float16)
+        mod = _get_sm102_module(gpu)
+        mod(
+            "flash_attn_sm102_kernel",
+            (B * H,), (32,),
+            Q.astype(np.float32), K.astype(np.float32),
+            V.astype(np.float32), O,
+            gpu=gpu,
+            causal=p.get("causal", False),
+            fp8_format=p.get("fp8_format", "e4m3"),
+        )
+        return {"O": O}
+
+    def im2col_sm102(gpu, i, p):
+        """SM102 im2col — stride_tricks patch scatter on digital GPU."""
+        X = i["X"].astype(np.float16)
+        N, C, H, W = X.shape
+        stride  = p.get("stride", 1)
+        padding = p.get("padding", 0)
+        K       = p.get("K", 3)
+        out_h   = (H + 2 * padding - K) // stride + 1
+        out_w   = (W + 2 * padding - K) // stride + 1
+        cols    = np.zeros((N, C * K * K, out_h * out_w), dtype=np.float16)
+        gz      = max(1, (out_h * out_w + 255) // 256)
+        mod     = _get_sm102_module(gpu)
+        mod(
+            "im2col_sm102_kernel",
+            (N, C, gz), (256,),
+            X, cols,
+            gpu=gpu,
+            stride=stride, padding=padding,
+        )
+        return {"cols": cols}
+
+    def conv_wmma_sm102(gpu, i, p):
+        """SM102 WMMA GEMM — 16×16 tensor-core tiles on digital GPU."""
+        A = i["A"].astype(np.float16)
+        B = i["B"].astype(np.float16)
+        M, K_dim = A.shape
+        N        = B.shape[0]
+        C        = np.zeros((M, N), dtype=np.float16)
+        # Grid: ceil(M/64) × ceil(N/64)  (4 warps × 16 per warp = 64 rows/cols per block)
+        gx = max(1, (M + 63) // 64)
+        gy = max(1, (N + 63) // 64)
+        mod = _get_sm102_module(gpu)
+        mod(
+            "conv_wmma_sm102_kernel",
+            (gx, gy), (128, 4),
+            A, B, C,
+            gpu=gpu,
+        )
+        return {"C": C}
+
+    def reduction_sm102(gpu, i, p):
+        """SM102 dot-product reduction — warp-shuffle or tree variant."""
+        x   = i["X"].astype(np.float32)
+        y   = i["Y"].astype(np.float32)
+        out = np.zeros(1, dtype=np.float32)
+        n   = len(x)
+        variant = p.get("variant", "redesigned")
+        kernel  = ("reduction_redesigned_sm102_kernel"
+                   if variant == "redesigned"
+                   else "reduction_current_sm102_kernel")
+        n_blocks = min(1024, max(1, (n + 255) // 256))
+        mod = _get_sm102_module(gpu)
+        mod(
+            kernel,
+            (n_blocks,), (256,),
+            x, y, out,
+            gpu=gpu,
+        )
+        return {"out": out}
+
     return {
         # ── base set ──────────────────────────────────────────────────────────
         "gemm": gemm, "add": add, "softmax": softmax,
@@ -260,6 +356,10 @@ def _default_dispatch() -> Dict[str, Callable]:
         "gemm_batched": gemm_batched, "grouped_gemm": grouped_gemm,
         "mixed_precision_gemm": mixed_precision_gemm,
         "fused_attention_norm": fused_attention_norm,
+        # ── SM102 MaxCore kernel set ──────────────────────────────────────────
+        "im2col_sm102": im2col_sm102,
+        "conv_wmma_sm102": conv_wmma_sm102,
+        "reduction_sm102": reduction_sm102,
     }
 
 
