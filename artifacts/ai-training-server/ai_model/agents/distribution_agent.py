@@ -46,6 +46,27 @@ BEST_POSTING_TIMES = {
     "threads":         "T13:00:00Z",
 }
 
+# Low-friction CTA closes per platform — appended to the fallback caption when the
+# script doesn't already contain a CTA keyword.  One-tap language ("drop a 🔥",
+# "save", "tag") scores higher than generic "check it out" closers per the
+# content_playbook research.
+_FALLBACK_CTAS = {
+    "tiktok":          "Drop a 🔥 if this goes hard — link in bio to stream now!",
+    "instagram":       "Save this and tag someone who needs to hear it 🎧",
+    "youtube":         "Subscribe and hit the bell so you never miss a drop 🔔",
+    "facebook":        "Share this with someone who needs to hear it today!",
+    "twitter":         "RT if this goes hard — stream link in bio 🎵",
+    "linkedin":        "Follow for more music industry insights — share if this resonates.",
+    "google_business": "Follow for more live music updates and exclusive drops!",
+    "threads":         "Repost if this hits different 🔥 — stream now.",
+}
+
+_CTA_KEYWORDS = {
+    "click", "follow", "link", "save", "share", "buy", "get", "stream",
+    "listen", "subscribe", "comment", "tap", "join", "shop", "watch", "bio",
+    "drop a", "tag ", "repost",
+}
+
 
 # ── Awareness parsing ──────────────────────────────────────────────────────────
 # Both functions guarantee a non-empty result when `awareness` is non-empty.
@@ -256,12 +277,27 @@ class DistributionAgent:
         try:
             output = self.model.generate(prompt)
             if self._is_meaningful(output):
-                caption = output
+                # Also guard against garbled model output leaking into the caption.
+                # looks_garbled is never-raise; import lazily to avoid circular deps.
+                try:
+                    from ai_model.request_intelligence import looks_garbled as _lg
+                    if not _lg(output):
+                        caption = output
+                except Exception:
+                    caption = output  # can't check — accept as-is
         except Exception:
             pass
 
         if not caption:
-            caption = req.script
+            # Append a platform CTA if the script doesn't already contain one —
+            # ensures the caption always carries a CTA keyword for scoring and
+            # engagement purposes.
+            script_lower = req.script.lower()
+            if any(kw in script_lower for kw in _CTA_KEYWORDS):
+                caption = req.script
+            else:
+                plat_cta = _FALLBACK_CTAS.get(platform_key, "Follow for more content!")
+                caption = f"{req.script}\n\n{plat_cta}"
 
         platform_key = req.platform.lower().replace(" ", "_")
         awareness = req.awareness or ""

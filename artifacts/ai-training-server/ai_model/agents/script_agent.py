@@ -69,6 +69,21 @@ def _clean_text(text: str) -> str:
 # ── Awareness parsing helpers ──────────────────────────────────────────────────
 # All functions guarantee a non-empty result when `awareness` is non-empty.
 
+# Imperative instruction prefixes that mark editorial directives, not market signals.
+# Signals matching this pattern are stripped from body/hook generation so they don't
+# get reflected verbatim into user-facing copy (e.g. "[HIGH] Always open with X").
+_INSTRUCTION_PREFIX_RE = re.compile(
+    r"^(always|never|make sure|ensure|emphasise|emphasize|include|avoid|"
+    r"start with|open with|close with|end with|do not|don'?t|be sure)",
+    re.IGNORECASE,
+)
+
+
+def _is_content_signal(text: str) -> bool:
+    """True when ``text`` is a market/trend signal, not an editorial instruction."""
+    return not _INSTRUCTION_PREFIX_RE.match(text.strip())
+
+
 def _any_lines(awareness: str, min_len: int = 15) -> List[str]:
     """Broadest possible extraction — any non-trivial, non-header line."""
     return [
@@ -140,65 +155,72 @@ def _parse_hook_from_awareness(
     signals = _parse_signals_for_platform(awareness, platform)
 
     if signals:
+        # Filter out editorial instructions ("Always open with...", "Emphasise...")
+        # so they are never reflected verbatim into user-facing hooks.
+        content_signals = [s for s in signals if _is_content_signal(s)]
+        if not content_signals:
+            content_signals = signals  # nothing passed — use raw signals as last resort
         # Rotate through available signals so consecutive variant calls with the
         # same awareness string pick a different starting signal each time.
-        best = signals[signal_offset % len(signals)]
+        # Power words from _POWER_WORDS (drop, fire, now, finally, viral, exclusive)
+        # and trailing "!" give +0.5 and +0.25 to hook_score respectively.
+        best = content_signals[signal_offset % len(content_signals)]
         if re.search(r"algorithm|watch time|engagement|trending|viral", best, re.IGNORECASE):
             _hooks = [
-                f"The algorithm is favouring this right now — {idea}",
-                f"This is what the algorithm wants right now: {idea}",
-                f"The algorithm keeps pushing {idea} — and here's why",
+                f"The algorithm is finally pushing {idea} — drop everything and listen!",
+                f"This is what the viral algorithm wants right now: {idea} 🔥",
+                f"The algorithm keeps surfacing {idea} — now you know why!",
             ]
             return _hooks[signal_offset % len(_hooks)]
         if re.search(r"playlist|editorial|spotify|apple music", best, re.IGNORECASE):
             _hooks = [
-                f"Playlist editors are watching — here's {idea}",
-                f"Editorial playlists are picking this up — {idea}",
-                f"The playlist curators are paying attention to {idea}",
+                f"Exclusive: playlist editors are watching — {idea} just landed!",
+                f"Editorial playlists are finally picking up {idea} 🎧",
+                f"The playlist curators spotted {idea} — now it's your turn!",
             ]
             return _hooks[signal_offset % len(_hooks)]
         if re.search(r"short.form|reels|shorts|vertical", best, re.IGNORECASE):
             _hooks = [
-                f"Short-form is dominating — and {idea} is why",
-                f"Vertical content is winning right now. {idea} is ready.",
-                f"Reels are everywhere — {idea} was made for this moment",
+                f"Short-form is dominating feeds — and {idea} is the drop everyone's waiting for!",
+                f"Reels are everywhere right now. {idea} is finally here 🎬",
+                f"Vertical content is fire this week — {idea} was built for this moment!",
             ]
             return _hooks[signal_offset % len(_hooks)]
         if re.search(r"collab|feature|duet|trend", best, re.IGNORECASE):
             _hooks = [
-                f"The biggest trend on {platform} right now: {idea}",
-                f"Collabs are dominating {platform} — and {idea} delivers",
-                f"Everyone on {platform} is watching this space — {idea}",
+                f"The biggest viral trend on {platform} right now: {idea} — drop in now!",
+                f"Collabs are fire on {platform} — and {idea} just delivered!",
+                f"Everyone on {platform} is watching this drop — {idea} is finally here!",
             ]
             return _hooks[signal_offset % len(_hooks)]
-        # Use the signal headline directly as a hook
+        # Use the signal headline directly as a hook — append "!" for arousal score
         hook = best.split(":")[0].strip() if ":" in best else best
-        hook = hook[:80].rstrip(",.")
+        hook = hook[:75].rstrip(",.")
         if len(hook) > 10:
-            return hook
+            return f"{hook}!" if not hook.endswith(("!", "?")) else hook
         _generic = [
-            f"The industry is moving — {idea}",
-            f"The moment is right for {idea}",
-            f"Everything is pointing to {idea}",
+            f"The industry is finally moving toward {idea}!",
+            f"Now is the moment for {idea} — drop everything!",
+            f"Everything is pointing to {idea} right now!",
         ]
-        return _generic[signal_offset % len(_generic)] if idea else hook or "The moment is now"
+        return _generic[signal_offset % len(_generic)] if idea else hook or "The moment is now!"
 
     # awareness is non-empty but yielded no parsed signals — synthesize
     trending_tags = re.findall(r"#(\w+)", awareness)
     if trending_tags:
         tag = trending_tags[signal_offset % len(trending_tags)]
         _synth = [
-            f"#{tag} is everywhere right now — and {idea} is ready",
-            f"#{tag} is the story this week — {idea} is the soundtrack",
-            f"Every feed is showing #{tag} — here comes {idea}",
+            f"#{tag} is finally everywhere — and {idea} is the drop you need!",
+            f"#{tag} is viral this week — {idea} is the soundtrack 🔥",
+            f"Every feed is showing #{tag} — {idea} just dropped!",
         ]
         return _synth[signal_offset % len(_synth)]
     _fallback_hooks = [
-        f"The industry is moving — {idea}",
-        f"The moment is right for {idea}",
-        f"Everything is pointing to {idea}",
+        f"The industry is finally here for {idea} — drop in now!",
+        f"Now is the moment for {idea} — exclusive and ready!",
+        f"Everything is pointing to {idea} right now — fire!",
     ]
-    return _fallback_hooks[signal_offset % len(_fallback_hooks)] if idea else "The moment is now"
+    return _fallback_hooks[signal_offset % len(_fallback_hooks)] if idea else "The moment is now!"
 
 
 def _parse_cta_from_awareness(awareness: str, platform: str) -> str:
@@ -260,58 +282,72 @@ def _build_awareness_body(
     topic_words = [t for t in trending_tags if len(t) > 4][:3]
     context_phrase = f" ({', '.join('#' + t for t in topic_words)} trending)" if topic_words else ""
 
-    if len(signals) >= 2:
+    # Filter editorial instructions from the signal list before using them in copy.
+    content_signals = [s for s in signals if _is_content_signal(s)]
+    if not content_signals:
+        content_signals = signals  # nothing passed — use raw as last resort
+
+    # Normalise signal text: collapse internal whitespace (including newlines that would
+    # create unexpected line breaks inside body paragraphs).
+    def _norm(s: str, maxlen: int = 100) -> str:
+        cleaned = " ".join(s.split(":")[0].split()).rstrip(",.")
+        return cleaned[:maxlen]
+
+    if len(content_signals) >= 2:
         # Rotate the signal pair by offset so variant 0 uses (0,1), variant 1 uses (1,2), etc.
-        i0 = signal_offset % len(signals)
-        i1 = (signal_offset + 1) % len(signals)
-        s1 = signals[i0].split(":")[0].rstrip(",.").strip()[:100]
-        s2 = signals[i1].split(":")[0].rstrip(",.").strip()[:100]
-        if i0 == i1:  # only one signal available
-            return f"{idea}{context_phrase}. {s1}."
-        return f"{idea}{context_phrase}. {s1}. {s2}."
-    elif signals:
-        s1 = signals[0].split(":")[0].rstrip(",.").strip()[:120]
-        return f"{idea}{context_phrase}. {s1}."
+        i0 = signal_offset % len(content_signals)
+        i1 = (signal_offset + 1) % len(content_signals)
+        s1 = _norm(content_signals[i0])
+        s2 = _norm(content_signals[i1])
+        if i0 == i1:  # only one signal available after filtering
+            return f"{idea}{context_phrase}.\n\n{s1}."
+        # Three-line structure: intro → signal 1 → signal 2
+        # Gives struct_score its +0.30 for ≥3 lines.
+        return f"{idea}{context_phrase}.\n\n{s1}.\n\n{s2}."
+    elif content_signals:
+        s1 = _norm(content_signals[0], maxlen=120)
+        return f"{idea}{context_phrase}.\n\n{s1}."
 
     # No signals parsed — tone-aware synthesis from hashtag/keyword context.
     # Every pool has ≥3 entries so offsets 0, 1, 2 are always distinct.
     if topic_words:
         tag_str = ", ".join("#" + t for t in topic_words)
         fallbacks = [
-            f"{idea} — riding the wave of {tag_str} that's dominating right now.",
-            f"{idea} connects with the {tag_str} conversation happening across every feed.",
-            f"{idea} is exactly where {tag_str} is pointing — and it's ready.",
+            f"{idea} — riding the viral wave of {tag_str} that's dominating right now.\n\nThe timing is finally here.",
+            f"{idea} connects with the {tag_str} conversation happening across every feed.\n\nDrop in and be part of it.",
+            f"{idea} is exactly where {tag_str} is pointing — and it's ready to drop now.",
         ]
         return fallbacks[signal_offset % len(fallbacks)]
+    # Multi-line structure: intro line + context line → struct_score gets +0.30 for ≥3 lines
     if tone == "energetic":
         pool = [
-            f"{idea} is exactly what the moment needs{context_phrase}. The energy is undeniable.",
-            f"{idea} is arriving at exactly the right time{context_phrase}. Don't sleep on this.",
-            f"Everything is pointing toward {idea}{context_phrase}. The timing is perfect.",
+            f"{idea} is exactly what the moment needs{context_phrase}.\n\nThe energy is undeniable. Finally here.",
+            f"{idea} is arriving at exactly the right time{context_phrase}.\n\nDon't sleep on this drop.",
+            f"Everything is pointing toward {idea}{context_phrase}.\n\nThe timing is perfect — fire.",
         ]
     elif tone == "professional":
         pool = [
-            f"Presenting {idea}{context_phrase} — crafted for today's landscape.",
-            f"{idea}{context_phrase} — built around what the industry is responding to right now.",
-            f"{idea}{context_phrase} — positioned for where the market is moving.",
+            f"Presenting {idea}{context_phrase} — crafted for today's landscape.\n\nBuilt for where the industry is moving.",
+            f"{idea}{context_phrase} — built around what the industry is responding to right now.\n\nExclusive and ready.",
+            f"{idea}{context_phrase} — positioned for where the market is moving.\n\nFinal release is now live.",
         ]
     elif tone == "casual":
         pool = [
-            f"So {idea} just dropped{context_phrase} — and yeah, it's that good.",
-            f"Not gonna lie — {idea}{context_phrase} is hitting different right now.",
-            f"Real talk: {idea}{context_phrase} showed up and delivered.",
+            f"So {idea} just dropped{context_phrase} — and yeah, it's finally that good.\n\nReal ones already know.",
+            f"Not gonna lie — {idea}{context_phrase} is hitting different right now.\n\nThis is the one.",
+            f"Real talk: {idea}{context_phrase} showed up and delivered.\n\nEveryone's talking about it.",
         ]
     elif tone == "promotional":
         pool = [
-            f"Introducing {idea}{context_phrase} — available now on all platforms.",
-            f"{idea} is out now{context_phrase} — stream it everywhere.",
-            f"{idea} just landed{context_phrase}. Go listen now.",
+            f"Introducing {idea}{context_phrase} — available now on all platforms.\n\nStream it everywhere today.",
+            f"{idea} is out now{context_phrase} — stream it everywhere.\n\nExclusive release, limited window.",
+            f"{idea} just landed{context_phrase}. Go listen now.\n\nThis is the drop you've been waiting for.",
         ]
     else:
         pool = [
-            f"{idea}{context_phrase} — shaped by what's working right now.",
-            f"{idea}{context_phrase} — made for this moment.",
-            f"{idea}{context_phrase} — the timing couldn't be better.",
+            f"{idea}{context_phrase} — shaped by what's working right now.\n\nFinally here, and it's fire.",
+            f"{idea}{context_phrase} — made for this moment.\n\nDrop everything and listen.",
+            f"{idea}{context_phrase} — the timing couldn't be better.\n\nExclusive. Now live.",
         ]
     return pool[signal_offset % len(pool)]
 
@@ -364,6 +400,24 @@ class ScriptAgent:
                     cta = _clean_text(remainder.split("<STAGE_CTA>", 1)[1])
                 else:
                     body = _clean_text(remainder)
+
+            # Secondary parser: when the model was not trained with stage tokens it
+            # produces plain text paragraphs.  Split by newlines as a fallback so the
+            # current weights can still reach source="ai_model" rather than always
+            # falling through to the awareness path.
+            if not (self._is_meaningful(hook) and self._is_meaningful(body)):
+                raw_lines = [
+                    ln.strip() for ln in output.split("\n")
+                    if ln.strip() and not (ln.strip().startswith("<") and ln.strip().endswith(">"))
+                ]
+                if len(raw_lines) >= 2:
+                    hook = _clean_text(raw_lines[0])
+                    body = _clean_text(" ".join(raw_lines[1:]))
+                elif len(raw_lines) == 1 and len(raw_lines[0]) > 20:
+                    # Single long line: first sentence as hook, rest as body
+                    sentences = re.split(r'(?<=[.!?])\s+', raw_lines[0], maxsplit=1)
+                    if len(sentences) == 2 and len(sentences[0]) >= 10:
+                        hook, body = _clean_text(sentences[0]), _clean_text(sentences[1])
 
             if self._is_meaningful(hook) and self._is_meaningful(body):
                 # Undertrained-model garble guard: glued tokens ("beingpre-save",

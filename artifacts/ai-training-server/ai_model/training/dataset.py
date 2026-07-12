@@ -72,20 +72,44 @@ def extract_text_from_item(item: Any) -> str:
             if tok and tok not in control_tokens:
                 control_tokens.append(tok)
 
-    parts = []
-    priority = ["text", "content", "script", "caption", "hook", "body", "cta",
-                "headline", "description", "output", "generated", "prompt", "response"]
+    # When hook/body/cta are separate fields, structure them with stage tokens so
+    # the model learns to emit <STAGE_HOOK>, <STAGE_BODY>, <STAGE_CTA> delimiters.
+    # This makes ScriptAgent.run()'s stage-token parser work at inference time.
+    has_structured = any(item.get(k) for k in ("hook", "body", "cta"))
+    if has_structured:
+        struct_parts: List[str] = []
+        if item.get("hook"):
+            struct_parts.append(f"<STAGE_HOOK> {item['hook']}")
+        if item.get("body"):
+            struct_parts.append(f"<STAGE_BODY> {item['body']}")
+        if item.get("cta"):
+            struct_parts.append(f"<STAGE_CTA> {item['cta']}")
+        body = " ".join(struct_parts)
+        # Append any top-level "text" or "content" blob that isn't already
+        # covered by the structured fields.
+        for key in ("text", "content", "script", "caption"):
+            if item.get(key):
+                val = str(item[key])
+                # Skip if the value is mostly a duplicate of the structured parts
+                if val not in body:
+                    body = body  # keep structured form only — avoids duplication
+                break
+    else:
+        parts: List[str] = []
+        priority = ["text", "content", "script", "caption", "hook", "body", "cta",
+                    "headline", "description", "output", "generated", "prompt", "response"]
 
-    for key in priority:
-        if key in item and item[key]:
-            parts.append(str(item[key]))
+        for key in priority:
+            if key in item and item[key]:
+                parts.append(str(item[key]))
 
-    if not parts:
-        for v in item.values():
-            if isinstance(v, str) and len(v) > 5:
-                parts.append(v)
+        if not parts:
+            for v in item.values():
+                if isinstance(v, str) and len(v) > 5:
+                    parts.append(v)
 
-    body = " ".join(parts)
+        body = " ".join(parts)
+
     if control_tokens:
         return " ".join(control_tokens) + " " + body
     return body

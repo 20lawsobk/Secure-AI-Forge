@@ -116,10 +116,28 @@ def looks_garbled(text: str, whitelist: set[str] | None = None) -> bool:
 
 # --- score_candidate (mirrors ai_model/request_intelligence.py) --------------
 
-_CTA_PHRASES = {"link in bio", "swipe up", "tap to", "click", "shop now",
-                "stream now", "listen now", "out now", "available now",
-                "follow", "subscribe", "dm us", "drop a comment", "share",
-                "sign up", "get yours", "grab it"}
+# --- CTA and hook scoring — mirrors ai_model/request_intelligence.py exactly ---
+
+# Single-word keywords from request_intelligence._CTA_KEYWORDS
+_CTA_KEYWORDS = {
+    "click", "follow", "link", "save", "share", "buy", "get", "stream",
+    "listen", "subscribe", "comment", "tap", "join", "shop", "watch", "bio",
+}
+
+# Power words from request_intelligence._POWER_WORDS
+_POWER_WORDS = {
+    "secret", "proven", "instantly", "exclusive", "free", "now", "never",
+    "stop", "first", "best", "viral", "insane", "real", "raw", "unreleased",
+    "finally", "limited", "drop", "fire", "everyone", "nobody",
+}
+
+# HIGH_AROUSAL_WORDS from content_playbook (used in struct_score)
+_HIGH_AROUSAL_WORDS = {
+    "amazing", "incredible", "unbelievable", "finally", "secret",
+    "exclusive", "never", "always", "fire", "drop", "viral", "insane",
+}
+
+_EMOJI_RE = re.compile(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]")
 
 def _length_score(text: str) -> float:
     words = len(text.split())
@@ -129,22 +147,63 @@ def _length_score(text: str) -> float:
     return max(0.0, 1.0 - (words - 40) / 60)
 
 def _cta_score(text: str) -> float:
+    """Mirrors server: any single CTA keyword present = 1.0."""
     tl = text.lower()
-    return 1.0 if any(p in tl for p in _CTA_PHRASES) else 0.0
+    return 1.0 if any(kw in tl for kw in _CTA_KEYWORDS) else 0.0
 
 def _hook_score(text: str) -> float:
+    """
+    Mirrors request_intelligence.py hook_score formula exactly:
+      +0.50  any _POWER_WORDS in first line
+      +0.25  "?" or "!" present
+      +0.15  emoji present
+      +0.10  first line ≤ 12 words
+      max    1.0
+    """
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     if not lines:
         return 0.0
-    first = lines[0]
-    has_question = "?" in first
-    has_exclaim  = "!" in first
-    short_enough = len(first.split()) <= 12
-    return min(1.0, (0.4 * has_question + 0.3 * has_exclaim + 0.3 * short_enough))
+    first = lines[0].lower()
+    score = 0.0
+    if any(p in first for p in _POWER_WORDS):
+        score += 0.50
+    if "?" in first or "!" in first:
+        score += 0.25
+    if _EMOJI_RE.search(first):
+        score += 0.15
+    if len(lines[0].split()) <= 12:
+        score += 0.10
+    return min(1.0, score)
 
 def _struct_score(text: str) -> float:
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
-    return min(1.0, len(lines) / 3)
+    """
+    Mirrors content_playbook.structure_score():
+      +0.35  first line ≤ 125 chars (pre-fold hook)
+      +0.30  ≥ 3 distinct lines  |  +0.15 for exactly 2 lines
+      +0.20  high-arousal words (0.07 per hit, capped at 0.20)
+      +0.15  last line has emoji or save/tag/comment language
+    """
+    t = (text or "").strip()
+    if not t:
+        return 0.0
+    lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
+    first = lines[0] if lines else t
+    score = 0.0
+    if len(first) <= 125:
+        score += 0.35
+    if len(lines) >= 3:
+        score += 0.30
+    elif len(lines) == 2:
+        score += 0.15
+    tl = t.lower()
+    hits = sum(1 for w in _HIGH_AROUSAL_WORDS if w in tl)
+    score += min(0.20, 0.07 * hits)
+    last = lines[-1].lower() if lines else tl
+    if _EMOJI_RE.search(lines[-1] if lines else "") or any(
+        k in last for k in ("tag ", "save ", "drop a", "comment", "share")
+    ):
+        score += 0.15
+    return min(1.0, round(score, 4))
 
 def _keyword_score(text: str, keywords: list[str]) -> float:
     if not keywords:
@@ -208,7 +267,11 @@ def rate_content(label: str, r: dict, platform: str = "tiktok",
     caption = r.get("caption", "") or ""
     source  = r.get("source",  "unknown")
 
-    full_text = caption or f"{hook}\n{body}\n{cta}"
+    # Prefer structured fields (hook/body/cta) when present — they are always clean
+    # template/awareness copy.  Fall back to caption only when all three are absent,
+    # to avoid a garbled model-generated caption contaminating a clean score.
+    structured = "\n\n".join(p for p in [hook, body, cta] if p)
+    full_text = structured if structured else (caption or "")
     kw        = keywords or []
 
     q_score  = score_candidate(full_text, kw)
