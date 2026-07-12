@@ -332,12 +332,11 @@ def _init_ai_model():
     global _model_ready, _tokenizer, _creative_model, _script_agent
     global _visual_spec_agent, _distribution_agent, _optimization_agent
     global _repo, _adapter, _render_manager, _model_config, _image_engine
-    global _gen_coalescer
+    global _gen_coalescer, _hyper_backend, _digital_gpu_backend
 
     try:
         sys.path.insert(0, str(Path(__file__).parent))
         from ai_model.model.tokenizer import BPETokenizer
-        from ai_model.model.transformer import TransformerLM
         from ai_model.model.creative_model import CreativeModel
         from ai_model.agents.script_agent import ScriptAgent
         from ai_model.agents.visual_spec_agent import VisualSpecAgent
@@ -352,71 +351,141 @@ def _init_ai_model():
         _tokenizer = BPETokenizer()
 
         DEVICE = "cpu"
-        dim = int(os.environ.get("AI_MODEL_DIM", "512"))
-        n_layers = int(os.environ.get("AI_MODEL_LAYERS", "8"))
-        n_heads = int(os.environ.get("AI_MODEL_HEADS", "8"))
-        max_len = int(os.environ.get("AI_MODEL_MAX_LEN", "1024"))
+        dim      = int(os.environ.get("AI_MODEL_DIM",     "512"))
+        n_layers = int(os.environ.get("AI_MODEL_LAYERS",  "8"))
+        n_heads  = int(os.environ.get("AI_MODEL_HEADS",   "8"))
+        max_len  = int(os.environ.get("AI_MODEL_MAX_LEN", "1024"))
 
-        weights_dir = Path(__file__).parent / "ai_model" / "weights"
+        # ── Digital GPU backend (HyperGPU + SM102 custom nvcc + pdim) ─────────
+        # Initialise before the model so the pocket accelerator is warm by the
+        # time the first GEMM fires during weight loading / warm-up.
+        try:
+            from ai_model.gpu.hyper_core import HyperGPU, PrecisionMode
+            from ai_model.gpu.hyper_backend import HyperGPUBackend
+            from ai_model.gpu.digital_gpu import DigitalGPU
+
+            _hyper_backend    = HyperGPUBackend(
+                lanes=512, tensor_cores=8,
+                precision=PrecisionMode.MIXED,
+            )
+            _hyper_gpu        = _hyper_backend.gpu   # created internally
+            _digital_gpu_backend = DigitalGPU()
+
+            # Prime the pocket accelerator so its lazy init doesn't stall the
+            # first real request.
+            _hyper_gpu._pocket()
+
+            print(
+                f"[AI Model] Digital GPU ready — HyperGPU "
+                f"(lanes={_hyper_gpu.core.lanes}, "
+                f"tensor_cores={len(_hyper_gpu.core.tensor_core_units)}, "
+                f"precision={_hyper_gpu.precision.name})"
+            )
+        except Exception as gpu_err:
+            print(f"[AI Model] Digital GPU init skipped: {gpu_err}")
+            _hyper_backend = None
+            _digital_gpu_backend = None
+
+        weights_dir  = Path(__file__).parent / "ai_model" / "weights"
         weights_path = weights_dir / "model.pt"
 
+        state_dict = None
         if weights_path.exists():
             print(f"[AI Model] Loading weights from {weights_path}")
             checkpoint = torch.load(str(weights_path), map_location=DEVICE)
             if isinstance(checkpoint, dict) and "vocab" in checkpoint:
-                _tokenizer.vocab = checkpoint["vocab"]
+                _tokenizer.vocab    = checkpoint["vocab"]
                 _tokenizer.inv_vocab = checkpoint["inv_vocab"]
                 merges = checkpoint.get("merges", [])
-                _tokenizer.merges = [tuple(p) for p in merges]
-                _tokenizer._merge_ranks = {tuple(p): i for i, p in enumerate(_tokenizer.merges)}
+                _tokenizer.merges        = [tuple(p) for p in merges]
+                _tokenizer._merge_ranks  = {tuple(p): i for i, p in enumerate(_tokenizer.merges)}
                 _tokenizer.freeze()
                 state_dict = checkpoint["model_state_dict"]
                 if "config" in checkpoint:
-                    cfg = checkpoint["config"]
-                    dim = cfg.get("dim", dim)
-                    n_layers = cfg.get("layers", n_layers)
-                    n_heads = cfg.get("heads", n_heads)
-                    max_len = cfg.get("max_len", max_len)
+                    cfg      = checkpoint["config"]
+                    dim      = cfg.get("dim",     dim)
+                    n_layers = cfg.get("layers",  n_layers)
+                    n_heads  = cfg.get("heads",   n_heads)
+                    max_len  = cfg.get("max_len", max_len)
             else:
                 state_dict = checkpoint
 
-            base_model = TransformerLM(
-                vocab_size=max(len(_tokenizer.vocab), 1000),
-                dim=dim, n_layers=n_layers, n_heads=n_heads, max_len=max_len,
-            )
-            filtered = {
-                k: v for k, v in state_dict.items()
-                if k not in base_model.state_dict() or v.shape == base_model.state_dict()[k].shape
-            }
-            base_model.load_state_dict(filtered, strict=False)
-        else:
-            print("[AI Model] No pre-trained weights, using random init")
-            base_model = TransformerLM(
-                vocab_size=max(len(_tokenizer.vocab), 1000),
-                dim=dim, n_layers=n_layers, n_heads=n_heads, max_len=max_len,
-            )
+        vocab_size = max(len(_tokenizer.vocab), 1000)
 
-        _creative_model = CreativeModel(base_model, _tokenizer, device=DEVICE)
-        _script_agent = ScriptAgent(_creative_model)
-        _visual_spec_agent = VisualSpecAgent(_creative_model)
-        _distribution_agent = DistributionAgent(_creative_model)
-        _optimization_agent = OptimizationAgent(_creative_model)
-        _repo = BoostSheetRepository(path="boostsheets_db")
-        _adapter = UrlToBoostSheetAdapter(_repo)
-        _render_manager = RenderManager()
+        # ── Prefer HyperCreativeTransformerLM — digital GPU + KV-cache ────────
+        # State-dict compatible with TransformerLM so existing weights load
+        # directly.  Falls back to TransformerLM if the import fails.
+        base_model = None
+        if _hyper_backend is not None:
+            try:
+                from ai_model.gpu.hyper_creative_transformer import HyperCreativeTransformerLM
+                base_model = HyperCreativeTransformerLM(
+                    vocab_size=vocab_size,
+                    dim=dim, n_layers=n_layers, n_heads=n_heads, max_len=max_len,
+                    gpu=_hyper_gpu,
+                )
+                if state_dict is not None:
+                    # Checkpoint may be prefixed with '_orig_mod.' when it was
+                    # saved from a torch.compile-wrapped model — strip it so the
+                    # keys match HyperCreativeTransformerLM's clean names.
+                    clean_sd = {
+                        (k[len("_orig_mod."):] if k.startswith("_orig_mod.") else k): v
+                        for k, v in state_dict.items()
+                    }
+                    target_sd = base_model.state_dict()
+                    filtered = {
+                        k: v for k, v in clean_sd.items()
+                        if k in target_sd and v.shape == target_sd[k].shape
+                    }
+                    base_model.load_state_dict(filtered, strict=False)
+                    print(
+                        f"[AI Model] Weights loaded into HyperCreativeTransformerLM "
+                        f"({len(filtered)}/{len(clean_sd)} tensors matched)"
+                    )
+                else:
+                    print("[AI Model] HyperCreativeTransformerLM — random init")
+            except Exception as hct_err:
+                print(f"[AI Model] HyperCreativeTransformerLM unavailable: {hct_err}")
+                base_model = None
+
+        if base_model is None:
+            # Fallback: plain TransformerLM on CPU
+            from ai_model.model.transformer import TransformerLM
+            base_model = TransformerLM(
+                vocab_size=vocab_size,
+                dim=dim, n_layers=n_layers, n_heads=n_heads, max_len=max_len,
+            )
+            if state_dict is not None:
+                filtered = {
+                    k: v for k, v in state_dict.items()
+                    if k not in base_model.state_dict()
+                    or v.shape == base_model.state_dict()[k].shape
+                }
+                base_model.load_state_dict(filtered, strict=False)
+            backend_name = "CPU / aot_eager"
+            # torch.compile only for the plain CPU fallback path
+            try:
+                base_model = torch.compile(base_model, backend="aot_eager", fullgraph=False)
+                print("[AI Model] torch.compile applied (aot_eager / CPU fallback)")
+            except Exception as ce:
+                print(f"[AI Model] torch.compile skipped: {ce}")
+        else:
+            backend_name = "Digital GPU (HyperGPU + SM102 + pdim)"
+
+        print(f"[AI Model] Backend: {backend_name}")
+
+        _creative_model      = CreativeModel(base_model, _tokenizer, device=DEVICE)
+        _script_agent        = ScriptAgent(_creative_model)
+        _visual_spec_agent   = VisualSpecAgent(_creative_model)
+        _distribution_agent  = DistributionAgent(_creative_model)
+        _optimization_agent  = OptimizationAgent(_creative_model)
+        _repo                = BoostSheetRepository(path="boostsheets_db")
+        _adapter             = UrlToBoostSheetAdapter(_repo)
+        _render_manager      = RenderManager()
 
         from ai_model.image.image_engine import ImageEngine
         _image_engine = ImageEngine()
         print("[AI Model] ImageEngine ready (PIL renderer)")
-
-        # torch.compile with aot_eager backend works on CPU without Triton
-        try:
-            _creative_model.model = torch.compile(
-                _creative_model.model, backend="aot_eager", fullgraph=False
-            )
-            print("[AI Model] torch.compile applied (aot_eager / CPU-safe mode)")
-        except Exception as ce:
-            print(f"[AI Model] torch.compile skipped: {ce}")
 
         # ── Cross-request dynamic batching (opt-in: AI_DYNAMIC_BATCHING=1) ─────
         # Coalesces concurrent generate() calls into one batched forward. When
