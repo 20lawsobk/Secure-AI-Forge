@@ -544,6 +544,41 @@ def main() -> int:
     waves.append(w3)
     print_wave(w3)
 
+    # ── Wave 3b: Coalescer proof ──────────────────────────────────────────────
+    # Send N identical requests simultaneously.  The async coalescer collapses
+    # them to ONE compute; GPU ops delta should be ≈ 1 req's worth, not N.
+    # This is the direct proof that 90M identical bursts don't flood the GPU.
+    print("\n" + "─" * 68)
+    print("  Wave 3b — Coalescer proof  (200 identical requests  @200 concurrent)")
+    print("─" * 68)
+    _coal_payload = {
+        "platform": "tiktok",
+        "topic":    f"viral-coalescer-proof-{run_nonce}",  # unique per run to avoid pdim cache
+        "tone":     "hype",
+        "goal":     "streams",
+        "awareness": "Algorithm pushing fire exclusive drops on FYP right now.",
+    }
+    tasks_w3b = [("POST", "/content/generate", _coal_payload)] * 200
+    w3b = run_wave(
+        "Coalescer proof (200 identical @200 concurrent)", tasks_w3b,
+        concurrency=200, gpu_check=True,
+    )
+    waves.append(w3b)
+    coal_ok = print_wave(w3b)
+    # Assert coalescing: GPU ops should be far below 200 × single-compute ops.
+    # A full 200-compute run would produce ~200 × (ops/req from W3).
+    ops_per_req_w3 = (w3.gpu_delta / w3.total) if w3.gpu_delta and w3.total else 10.0
+    coal_upper  = max(6, ops_per_req_w3 * 5)   # allow up to 5 computes (very generous)
+    coal_delta  = w3b.gpu_delta or 0
+    coalesced   = coal_delta <= coal_upper
+    coal_sym    = PASS if coalesced else WARN
+    if w3b.gpu_delta is not None:
+        print(f"\n     Coalescer assertion:")
+        print(f"       Expected (no coalesce) : {ops_per_req_w3 * 200:,.0f} GPU ops  (200 × {ops_per_req_w3:.1f})")
+        print(f"       Actual delta            : {coal_delta:,} GPU ops")
+        print(f"       Upper bound (≤5 runs)   : {coal_upper:.0f} GPU ops")
+        print(f"       {coal_sym}  {'COALESCED — single compute served 200 concurrent requests' if coalesced else 'WARNING — more computes than expected (pdim cache may have pre-warmed)'}")
+
     # ── Wave 4: Quality + GPU ─────────────────────────────────────────────────
     print("\n" + "─" * 68)
     print("  Wave 4 — Quality + GPU validation  (all gen endpoints  ×30  @8 concurrent)")

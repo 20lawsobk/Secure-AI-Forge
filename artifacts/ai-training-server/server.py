@@ -292,6 +292,85 @@ def _get_pdim_orchestrator():
                 _pdim_orchestrator = PDIMOrchestrator()
     return _pdim_orchestrator
 
+
+# ─── Async-native request coalescer (90M concurrent path) ────────────────────
+#
+# The PDIMOrchestrator above uses threading.Event for single-flight, which is
+# correct for background threads but wrong at the HTTP layer: each follower
+# blocks an executor thread (~8 MB stack) instead of suspending as a coroutine
+# (~2 KB).  At 90M simultaneous requests that difference is existential.
+#
+# This coalescer sits at the asyncio layer, BEFORE any thread is created.
+# Identical-digest requests share one asyncio.Future; the other 89,999,999
+# waiters are suspended coroutines.  Only unique digests ever enter the thread
+# pool and the INFERENCE_GATE — pdim auto-scale ensures that universe is small.
+
+class _AsyncRequestCoalescer:
+    """Asyncio-native single-flight for generation handlers.
+
+    - Leader:   awaits the real coroutine, resolves the shared Future.
+    - Followers: await asyncio.shield(future) — zero threads, zero gate slots.
+
+    Thread-safe for coroutines (event loop is single-threaded; the dict
+    mutations between awaits are atomic at the Python level).
+    """
+
+    def __init__(self) -> None:
+        self._inflight: dict[str, asyncio.Future] = {}
+
+    @staticmethod
+    def _digest(key_data: dict) -> str:
+        import hashlib
+        payload = json.dumps(key_data, sort_keys=True, default=str).encode()
+        return hashlib.blake2b(payload, digest_size=16).hexdigest()
+
+    async def compute(self, key_data: dict, coro_fn) -> Any:
+        """Run coro_fn() once per unique digest; every other caller gets the
+        same result by awaiting the shared Future — no extra threads created."""
+        digest = self._digest(key_data)
+        loop   = asyncio.get_running_loop()
+
+        # Fast follower path — dict access between awaits is atomic in asyncio.
+        existing = self._inflight.get(digest)
+        if existing is not None and not existing.done():
+            return await asyncio.shield(existing)
+
+        # Leader: register Future before the first await so any coroutine
+        # that computes the same digest after this point becomes a follower.
+        fut: asyncio.Future = loop.create_future()
+        self._inflight[digest] = fut
+
+        try:
+            result = await coro_fn()
+            fut.set_result(result)
+            return result
+        except BaseException as exc:
+            if not fut.done():
+                fut.set_exception(exc)
+            raise
+        finally:
+            # Keep the settled Future in the map briefly so coroutines that
+            # computed the digest just before us receive the result rather
+            # than re-triggering a compute.
+            async def _evict() -> None:
+                await asyncio.sleep(0.5)
+                self._inflight.pop(digest, None)
+            asyncio.ensure_future(_evict())
+
+
+_async_coalescer: "_AsyncRequestCoalescer | None" = None
+_async_coalescer_lock = threading.Lock()
+
+
+def _get_async_coalescer() -> "_AsyncRequestCoalescer":
+    global _async_coalescer
+    if _async_coalescer is None:
+        with _async_coalescer_lock:
+            if _async_coalescer is None:
+                _async_coalescer = _AsyncRequestCoalescer()
+    return _async_coalescer
+
+
 # ─── Static file serving for generated assets ────────────────────────────────
 
 _UPLOADS_PATH = Path(__file__).parent / "uploads"
@@ -3295,10 +3374,27 @@ async def platform_video_generate(req: PlatformVideoRequest, _key = Depends(requ
         )))
         return script_result, full_script, visual_result, dist_result
 
+    # Async coalescer: identical video requests share one Future — followers are
+    # suspended coroutines, not threads.  Only unique digests hit the model.
+    _vkey = {
+        "topic":    req.topic,
+        "platform": platform,
+        "style":    req.style or "",
+        "goal":     req.goal  or "",
+        "tone":     personalized_tone or "",
+        "awareness": str(req.awareness or ""),
+        "duration": req.duration_seconds,
+    }
+    _coalesced_inference: list = []
+
+    async def _coalesced_video():
+        result = await asyncio.wait_for(_run_model_inference(), timeout=25.0)
+        _coalesced_inference.append(result)
+        return result
+
     try:
-        script_result, full_script, visual_result, dist_result = await asyncio.wait_for(
-            _run_model_inference(), timeout=25.0
-        )
+        script_result, full_script, visual_result, dist_result = \
+            await _get_async_coalescer().compute(_vkey, _coalesced_video)
 
         raw_scenes = getattr(visual_result, "scenes", None) or []
         if not raw_scenes:
@@ -5268,8 +5364,23 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
     # request could otherwise replay a stale caption/disclosure after the
     # artist edits their profile.
     if _model_ready and not req.artistProfileId:
-        _orch = _get_pdim_orchestrator()
-        _out = await _in_thread(lambda: _orch.compute(req, _build, namespace="api_content_v4"))
+        # Async coalescer sits BEFORE the thread pool: identical-digest requests
+        # share one asyncio.Future (suspended coroutines, ~2 KB each) rather
+        # than each blocking an executor thread (~8 MB).  Only unique digests
+        # enter _in_thread → INFERENCE_GATE → GPU.
+        _key = {
+            "platform": _plat,
+            "topic":    topic,
+            "tone":     req.tone or "",
+            "goal":     goal,
+            "awareness": str(req.awareness or ""),
+        }
+        async def _coalesced_content():
+            _orch = _get_pdim_orchestrator()
+            return await _in_thread(
+                lambda: _orch.compute(req, _build, namespace="api_content_v4")
+            )
+        _out = await _get_async_coalescer().compute(_key, _coalesced_content)
         result = dict(_out["result"])
         if _out.get("source") in ("cache", "coalesced"):
             result["cached"] = True
@@ -5662,11 +5773,21 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
         }
 
     # ── Default content-gen path: dedup + single-flight via PDIM orchestrator ──
-    # Concurrent identical requests collapse to ONE compute; the rest share it.
-    # Only the model path is cached — heuristic-only output stays uncached, as before.
+    # Async coalescer first (coroutine-level), then pdim orchestrator (thread-level).
     if _model_ready:
-        _orch = _get_pdim_orchestrator()
-        _out = await _in_thread(lambda: _orch.compute(req, _build, namespace="api_text"))
+        _key = {
+            "platform": getattr(req, "platform", ""),
+            "topic":    getattr(req, "topic", "") or getattr(req, "idea", ""),
+            "tone":     getattr(req, "tone", "") or "",
+            "goal":     getattr(req, "goal", "") or "",
+            "awareness": str(getattr(req, "awareness", "") or ""),
+        }
+        async def _coalesced_social():
+            _orch = _get_pdim_orchestrator()
+            return await _in_thread(
+                lambda: _orch.compute(req, _build, namespace="api_text")
+            )
+        _out = await _get_async_coalescer().compute(_key, _coalesced_social)
         result = dict(_out["result"])
         if _out.get("source") in ("cache", "coalesced"):
             result["cached"] = True
@@ -7702,6 +7823,6 @@ if __name__ == "__main__":
         log_level="info",
         workers=worker_count,
         timeout_keep_alive=300,
-        limit_concurrency=512,
-        backlog=2048,
+        limit_concurrency=None,   # no artificial cap — async coalescer + pdim auto-scale handle backpressure
+        backlog=4096,             # maximise OS socket queue for burst acceptance
     )
