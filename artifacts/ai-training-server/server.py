@@ -2903,11 +2903,13 @@ async def platform_social_generate(req: PlatformSocialRequest, _key = Depends(re
             from ai_model.agents.script_agent import ScriptRequest
             from ai_model.agents.distribution_agent import DistributionRequest
 
-            async def _run_variant():
+            _vidx = i   # capture loop variable before async boundary
+            async def _run_variant(vidx=_vidx):
                 s = await _in_thread(lambda: _script_agent.run(ScriptRequest(
                     idea=req.topic, platform=platform,
                     goal=req.goal, tone=personalized_tone,
                     awareness=req.awareness,
+                    variant_idx=vidx,
                 )))
                 d = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
                     script=f"{s.hook}\n{s.body}\n{s.cta}",

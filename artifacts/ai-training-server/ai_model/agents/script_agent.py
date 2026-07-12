@@ -37,6 +37,7 @@ class ScriptRequest:
     goal: str
     tone: str
     awareness: str = ""
+    variant_idx: int = 0  # offset into signal list; breaks determinism for multi-variant calls
 
 
 @dataclass
@@ -124,10 +125,14 @@ def _parse_signals_for_platform(awareness: str, platform: str) -> List[str]:
     return signals[:5]
 
 
-def _parse_hook_from_awareness(awareness: str, platform: str, idea: str) -> str:
+def _parse_hook_from_awareness(
+    awareness: str, platform: str, idea: str, signal_offset: int = 0
+) -> str:
     """
     Build a data-informed hook sentence from live industry signals.
-    Guaranteed to return a non-empty string when awareness is non-empty.
+    ``signal_offset`` rotates which signal is used as the primary hook source;
+    pass ``variant_idx`` here to get distinct hooks across multi-variant calls.
+    Guaranteed to return a non-empty string when ``awareness`` is non-empty.
     """
     if not awareness:
         return ""
@@ -135,27 +140,65 @@ def _parse_hook_from_awareness(awareness: str, platform: str, idea: str) -> str:
     signals = _parse_signals_for_platform(awareness, platform)
 
     if signals:
-        best = signals[0]
+        # Rotate through available signals so consecutive variant calls with the
+        # same awareness string pick a different starting signal each time.
+        best = signals[signal_offset % len(signals)]
         if re.search(r"algorithm|watch time|engagement|trending|viral", best, re.IGNORECASE):
-            return f"The algorithm is favouring this right now — {idea}"
+            _hooks = [
+                f"The algorithm is favouring this right now — {idea}",
+                f"This is what the algorithm wants right now: {idea}",
+                f"The algorithm keeps pushing {idea} — and here's why",
+            ]
+            return _hooks[signal_offset % len(_hooks)]
         if re.search(r"playlist|editorial|spotify|apple music", best, re.IGNORECASE):
-            return f"Playlist editors are watching — here's {idea}"
+            _hooks = [
+                f"Playlist editors are watching — here's {idea}",
+                f"Editorial playlists are picking this up — {idea}",
+                f"The playlist curators are paying attention to {idea}",
+            ]
+            return _hooks[signal_offset % len(_hooks)]
         if re.search(r"short.form|reels|shorts|vertical", best, re.IGNORECASE):
-            return f"Short-form is dominating — and {idea} is why"
+            _hooks = [
+                f"Short-form is dominating — and {idea} is why",
+                f"Vertical content is winning right now. {idea} is ready.",
+                f"Reels are everywhere — {idea} was made for this moment",
+            ]
+            return _hooks[signal_offset % len(_hooks)]
         if re.search(r"collab|feature|duet|trend", best, re.IGNORECASE):
-            return f"The biggest trend on {platform} right now: {idea}"
+            _hooks = [
+                f"The biggest trend on {platform} right now: {idea}",
+                f"Collabs are dominating {platform} — and {idea} delivers",
+                f"Everyone on {platform} is watching this space — {idea}",
+            ]
+            return _hooks[signal_offset % len(_hooks)]
         # Use the signal headline directly as a hook
         hook = best.split(":")[0].strip() if ":" in best else best
         hook = hook[:80].rstrip(",.")
         if len(hook) > 10:
             return hook
-        return f"The industry is moving — {idea}" if idea else hook or "The moment is now"
+        _generic = [
+            f"The industry is moving — {idea}",
+            f"The moment is right for {idea}",
+            f"Everything is pointing to {idea}",
+        ]
+        return _generic[signal_offset % len(_generic)] if idea else hook or "The moment is now"
 
     # awareness is non-empty but yielded no parsed signals — synthesize
     trending_tags = re.findall(r"#(\w+)", awareness)
     if trending_tags:
-        return f"#{trending_tags[0]} is everywhere right now — and {idea} is ready"
-    return f"The industry is moving — {idea}" if idea else "The moment is now"
+        tag = trending_tags[signal_offset % len(trending_tags)]
+        _synth = [
+            f"#{tag} is everywhere right now — and {idea} is ready",
+            f"#{tag} is the story this week — {idea} is the soundtrack",
+            f"Every feed is showing #{tag} — here comes {idea}",
+        ]
+        return _synth[signal_offset % len(_synth)]
+    _fallback_hooks = [
+        f"The industry is moving — {idea}",
+        f"The moment is right for {idea}",
+        f"Everything is pointing to {idea}",
+    ]
+    return _fallback_hooks[signal_offset % len(_fallback_hooks)] if idea else "The moment is now"
 
 
 def _parse_cta_from_awareness(awareness: str, platform: str) -> str:
@@ -200,11 +243,14 @@ def _parse_cta_from_awareness(awareness: str, platform: str) -> str:
     return _cta_verbs.get(plat_lower, "Follow for more content")
 
 
-def _build_awareness_body(awareness: str, platform: str, idea: str, tone: str) -> str:
+def _build_awareness_body(
+    awareness: str, platform: str, idea: str, tone: str, signal_offset: int = 0
+) -> str:
     """
     Build a body paragraph from live industry context.
-    Uses actual signal headlines rather than tone-keyed template strings.
-    Guaranteed to return a non-empty string when awareness is non-empty.
+    ``signal_offset`` rotates which pair of signals anchors the body so that
+    multi-variant calls with the same awareness produce distinct copy.
+    Guaranteed to return a non-empty string when ``awareness`` is non-empty.
     """
     if not awareness:
         return ""
@@ -215,27 +261,59 @@ def _build_awareness_body(awareness: str, platform: str, idea: str, tone: str) -
     context_phrase = f" ({', '.join('#' + t for t in topic_words)} trending)" if topic_words else ""
 
     if len(signals) >= 2:
-        s1 = signals[0].split(":")[0].rstrip(",.").strip()[:100]
-        s2 = signals[1].split(":")[0].rstrip(",.").strip()[:100]
+        # Rotate the signal pair by offset so variant 0 uses (0,1), variant 1 uses (1,2), etc.
+        i0 = signal_offset % len(signals)
+        i1 = (signal_offset + 1) % len(signals)
+        s1 = signals[i0].split(":")[0].rstrip(",.").strip()[:100]
+        s2 = signals[i1].split(":")[0].rstrip(",.").strip()[:100]
+        if i0 == i1:  # only one signal available
+            return f"{idea}{context_phrase}. {s1}."
         return f"{idea}{context_phrase}. {s1}. {s2}."
     elif signals:
         s1 = signals[0].split(":")[0].rstrip(",.").strip()[:120]
         return f"{idea}{context_phrase}. {s1}."
 
-    # No signals parsed — tone-aware synthesis from hashtag/keyword context
+    # No signals parsed — tone-aware synthesis from hashtag/keyword context.
+    # Every pool has ≥3 entries so offsets 0, 1, 2 are always distinct.
     if topic_words:
         tag_str = ", ".join("#" + t for t in topic_words)
-        return f"{idea} — riding the wave of {tag_str} that's dominating right now."
+        fallbacks = [
+            f"{idea} — riding the wave of {tag_str} that's dominating right now.",
+            f"{idea} connects with the {tag_str} conversation happening across every feed.",
+            f"{idea} is exactly where {tag_str} is pointing — and it's ready.",
+        ]
+        return fallbacks[signal_offset % len(fallbacks)]
     if tone == "energetic":
-        return f"{idea} is exactly what the moment needs{context_phrase}. The energy is undeniable."
+        pool = [
+            f"{idea} is exactly what the moment needs{context_phrase}. The energy is undeniable.",
+            f"{idea} is arriving at exactly the right time{context_phrase}. Don't sleep on this.",
+            f"Everything is pointing toward {idea}{context_phrase}. The timing is perfect.",
+        ]
     elif tone == "professional":
-        return f"Presenting {idea}{context_phrase} — crafted for today's landscape."
+        pool = [
+            f"Presenting {idea}{context_phrase} — crafted for today's landscape.",
+            f"{idea}{context_phrase} — built around what the industry is responding to right now.",
+            f"{idea}{context_phrase} — positioned for where the market is moving.",
+        ]
     elif tone == "casual":
-        return f"So {idea} just dropped{context_phrase} — and yeah, it's that good."
+        pool = [
+            f"So {idea} just dropped{context_phrase} — and yeah, it's that good.",
+            f"Not gonna lie — {idea}{context_phrase} is hitting different right now.",
+            f"Real talk: {idea}{context_phrase} showed up and delivered.",
+        ]
     elif tone == "promotional":
-        return f"Introducing {idea}{context_phrase} — available now on all platforms."
+        pool = [
+            f"Introducing {idea}{context_phrase} — available now on all platforms.",
+            f"{idea} is out now{context_phrase} — stream it everywhere.",
+            f"{idea} just landed{context_phrase}. Go listen now.",
+        ]
     else:
-        return f"{idea}{context_phrase} — shaped by what's working right now."
+        pool = [
+            f"{idea}{context_phrase} — shaped by what's working right now.",
+            f"{idea}{context_phrase} — made for this moment.",
+            f"{idea}{context_phrase} — the timing couldn't be better.",
+        ]
+    return pool[signal_offset % len(pool)]
 
 
 # ── Agent ──────────────────────────────────────────────────────────────────────
@@ -251,13 +329,17 @@ class ScriptAgent:
 
         # Always inject live awareness signals into the primary LLM prompt so the
         # model conditions on them even when it generates successfully.
+        # variant_idx rotates which signals lead the prompt so multi-variant
+        # calls with identical inputs sample different generation contexts.
         awareness_prefix = ""
         if req.awareness:
             signals = _parse_signals_for_platform(req.awareness, req.platform)
             if signals:
-                awareness_prefix = f"Industry context: {signals[0][:120]}\n"
-                if len(signals) > 1:
-                    awareness_prefix += f"Trend: {signals[1][:80]}\n"
+                i0 = req.variant_idx % len(signals)
+                i1 = (req.variant_idx + 1) % len(signals)
+                awareness_prefix = f"Industry context: {signals[i0][:120]}\n"
+                if len(signals) > 1 and i1 != i0:
+                    awareness_prefix += f"Trend: {signals[i1][:80]}\n"
             trending_tags = re.findall(r"#(\w+)", req.awareness)
             if trending_tags:
                 awareness_prefix += f"Trending: {', '.join(trending_tags[:4])}\n"
@@ -322,13 +404,17 @@ class ScriptAgent:
         Awareness is always active — resolve hook/body/cta entirely from live
         signals. Static dicts are only reached when awareness is absent, which
         should not happen in normal operation.
+        ``req.variant_idx`` rotates signal selection so multi-variant calls
+        with identical inputs produce distinct, non-duplicate copy.
         """
         platform = req.platform.lower().replace(" ", "_")
         awareness = req.awareness or ""
 
         if awareness:
-            hook = _parse_hook_from_awareness(awareness, platform, req.idea)
-            body = _build_awareness_body(awareness, platform, req.idea, req.tone)
+            hook = _parse_hook_from_awareness(awareness, platform, req.idea,
+                                              signal_offset=req.variant_idx)
+            body = _build_awareness_body(awareness, platform, req.idea, req.tone,
+                                         signal_offset=req.variant_idx)
             cta = _parse_cta_from_awareness(awareness, platform)
             return ScriptResponse(hook=hook, body=body, cta=cta, source="awareness")
 
