@@ -1,9 +1,13 @@
 """
-Wave 6 standalone — 90,000,000 unique request scale proof
-==========================================================
-Runs 150 content-unique requests (nonce-stamped so the async coalescer
-never fires) at 40 concurrent, measures stable pipelined throughput,
-and projects to 90,000,000.
+Wave 6 standalone — 90,000,000 unique user request scale proof
+===============================================================
+Models 90,000,000 distinct users each sending their own unique request
+simultaneously. Every request is content-unique (nonce-stamped so the
+async coalescer never fires) — there is no deduplication benefit here
+because each user's request is different.
+
+Runs 150 content-unique requests at 40 concurrent, measures stable
+pipelined throughput, and projects linearly to 90,000,000 users.
 
 Server must be running on port 9878 before executing this script.
 """
@@ -168,35 +172,30 @@ def main() -> int:
               f"({ops_per_req:.1f} ops/req — every request was a unique forward pass)")
 
     # ── 90M projection ────────────────────────────────────────────────────────
+    # Each of the 90,000,000 requests is from a different user — every request
+    # is unique. There is no deduplication: the full 90M must be processed.
     rps = result["rps"]
     if rps > 0:
-        eta_s     = UNIQUE_TARGET / rps
-        eta_h     = eta_s / 3600
-        n_1h      = math.ceil(eta_h)
-        n_8h      = math.ceil(eta_h / 8)
-        n_24h     = math.ceil(eta_h / 24)
+        eta_s  = UNIQUE_TARGET / rps
+        eta_h  = eta_s / 3600
+        n_1h   = math.ceil(eta_h)
+        n_8h   = math.ceil(eta_h / 8)
+        n_24h  = math.ceil(eta_h / 24)
 
         print()
-        print("  ┌─ 90,000,000 Unique Request Projection")
-        print(f"  │  Measured throughput      : {rps:,.1f} req/s  ({SAMPLE_N}-request sample)")
-        print(f"  │  Single-node ETA (90M)    : {eta_h:,.1f} hours  ({eta_s/86400:.1f} days)")
+        print("  ┌─ 90,000,000 Unique User Request Projection")
+        print(f"  │  Scenario: 90M different users, each with a unique request")
+        print(f"  │  Deduplication: none — every request must be processed")
         print(f"  │")
-        print(f"  │  Nodes needed to complete 90M unique requests in:")
+        print(f"  │  Measured throughput   : {rps:,.1f} req/s  ({SAMPLE_N}-request sample)")
+        print(f"  │  Single-node ETA (90M) : {eta_h:,.1f} hours  ({eta_s/86400:.1f} days)")
+        print(f"  │")
+        print(f"  │  Nodes required to serve all 90M users in:")
         print(f"  │    1 hour   →  {n_1h:>7,} nodes")
         print(f"  │    8 hours  →  {n_8h:>7,} nodes  (one work-day)")
         print(f"  │    24 hours →  {n_24h:>7,} nodes  (per day sustained)")
         print(f"  │")
-        print(f"  │  With pdim pocket dedup (real traffic is never 100% unique):")
-        for dedup, lbl in [
-            (0.50, "50% dedup (cold audience)  "),
-            (0.80, "80% dedup (typical traffic) "),
-            (0.95, "95% dedup (viral / trending) "),
-        ]:
-            unique_n   = UNIQUE_TARGET * (1.0 - dedup)
-            n_nodes_1h = math.ceil((unique_n / rps) / 3600)
-            print(f"  │    {lbl}  →  net {unique_n:>12,.0f} unique  → {n_nodes_1h:>5,} nodes/hr")
-        print(f"  │")
-        print(f"  │  Server config (90M-optimised):")
+        print(f"  │  Digital GPU server config:")
         print(f"  │    Thread pool   : max(512, cpu×32)")
         print(f"  │    Batch size    : B=64  (fills every forward-pass slot)")
         print(f"  │    Window        : 2 ms  (tight collection under burst)")
