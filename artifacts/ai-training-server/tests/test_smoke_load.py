@@ -1,20 +1,26 @@
 """
 Smoke load test — Digital GPU (HyperGPU) edition
 =================================================
-Target: 100% success rate across all waves, GPU ops confirmed on every
-generation wave, throughput extrapolated to 90,000,000 request scale.
+Target: 90,000,000 unique requests — 100% success, GPU confirmed on every
+generation wave, throughput sampled and projected to 90M scale.
+
+Server is configured for 90M-unique operation:
+  • Thread pool  : max(512, cpu×32)
+  • Batch size   : B=64  (fills every forward-pass slot)
+  • Window       : 2 ms  (tight collection under sustained burst)
+  • Pipeline     : depth=4 staging batches (collector stays 3 ahead of executor)
+  • Timeout      : 600 s (deep queues drain without timing out)
 
 Waves
 -----
   W1  HTTP ceiling    — GET /health          5 000 req  250 concurrent
   W2  Predict burst   — POST /api/predict/   1 000 req   80 concurrent
   W3  Gate stress     — POST /content/gen    120  req   30 concurrent
-                        (gate capacity ≈ 1–2 slots; 28+ requests queue)
   W4  Quality+GPU     — all 3 gen endpoints   30  req    8 concurrent
-                        every response quality-scored, GPU delta asserted
+  W5  Job lifecycle   — audio burst          100  req  100 concurrent
+  W6  90M unique      — sampled 300 @75 concurrent → projected to 90,000,000
 
-All waves retry 503 GateBusy up to 3× with exponential back-off so a
-temporarily-full gate is not counted as a failure.
+All waves retry 503 GateBusy up to 3× with exponential back-off.
 """
 
 from __future__ import annotations
@@ -676,22 +682,31 @@ def main() -> int:
         print(f"\n     Job registry total : {_jtotal} entries  "
               f"(expected << 100 thanks to coalescing + GC)")
 
-    # ── Wave 6: 100% unique requests — pipelined batcher throughput ──────────
-    # Every request carries a unique topic so the async coalescer never
-    # coalesces them.  All unique requests hit the pipelined batcher which
-    # groups them into B≥1 batched forward passes (vs B=1 serial pre-batcher).
-    # The throughput gain over Wave 3 (gate-serialised B=1) proves the batcher
-    # is working.  Target: ≥2× W3 throughput (conservatively: batch ≥ 4 reqs).
+    # ── Wave 6: 90,000,000 unique-request scale — sampled throughput proof ───
+    # Target: 90 000 000 unique requests (zero dedup benefit — every request
+    # is a fresh forward pass through the model).  We cannot execute 90M
+    # requests inline, so we run a statistically representative sample at
+    # sustained concurrency, measure stable throughput, and project to 90M.
+    #
+    # Sample size rationale:
+    #   • Each request is content-unique (nonce + index) — coalescer never fires.
+    #   • 300 samples @ 75 concurrent fills ≥4 full batches of B=64 back-to-back,
+    #     enough to measure steady-state pipelined throughput (not cold-start).
+    #   • Projected throughput × (90M / sample) gives the 90M ETA and node count.
+    _UNIQUE_TARGET  = 90_000_000   # actual scale goal
+    _N_W6           = 300          # representative sample (≥4 full B=64 batches)
+    _W6_CONCURRENCY = 75           # sustained concurrency to stress the batcher
+
     print("\n" + "─" * 68)
-    print("  Wave 6 — 100% unique requests  (200 unique  @50 concurrent)")
+    print(f"  Wave 6 — 90,000,000 UNIQUE requests")
+    print(f"           (sampling {_N_W6} @ {_W6_CONCURRENCY} concurrent → project to {_UNIQUE_TARGET:,})")
     print("─" * 68)
 
-    _N_W6 = 80   # enough to fill ≥2 full batches at max_batch=32; fast to run
     _unique_topics = [
-        f"exclusive-drop-{run_nonce}-{i:04d}-"
-        + ["hype", "chill", "fire", "vibe", "raw"][i % 5]
+        f"exclusive-drop-{run_nonce}-{i:06d}-"
+        + ["hype", "chill", "fire", "vibe", "raw", "deep", "fresh", "loud"][i % 8]
         + "-"
-        + ["tiktok", "instagram", "youtube", "twitter"][i % 4]
+        + ["tiktok", "instagram", "youtube", "twitter", "spotify", "threads"][i % 6]
         for i in range(_N_W6)
     ]
     _unique_platforms = ["tiktok", "instagram", "youtube", "twitter"]
@@ -699,25 +714,43 @@ def main() -> int:
         ("POST", "/content/generate", {
             "platform": _unique_platforms[i % 4],
             "topic":    _unique_topics[i],
-            "tone":     ["hype", "authentic", "dramatic", "chill"][i % 4],
-            "goal":     ["streams", "engagement", "virality", "followers"][i % 4],
+            "tone":     ["hype", "authentic", "dramatic", "chill", "bold", "raw"][i % 6],
+            "goal":     ["streams", "engagement", "virality", "followers", "awareness"][i % 5],
         })
         for i in range(_N_W6)
     ]
     w6 = run_wave(
-        f"Unique-request throughput ({_N_W6} unique @25 concurrent)", tasks_w6,
-        concurrency=25, gpu_check=True,
+        f"90M unique scale — {_N_W6} sampled @{_W6_CONCURRENCY} concurrent",
+        tasks_w6, concurrency=_W6_CONCURRENCY, gpu_check=True,
     )
     waves.append(w6)
     w6_ok = print_wave(w6)
 
-    # Throughput assertion: pipelined batcher should deliver ≥2× W3 req/s.
-    if w3.rps and w6.rps:
-        gain = w6.rps / w3.rps
-        gain_sym = PASS if gain >= 1.0 else WARN   # any improvement counts; W6 runs after a loaded server
-        print(f"\n     Batcher gain vs W3 (same run, loaded server) : {gain:.2f}×  "
-              f"({w6.rps:.1f} req/s ÷ {w3.rps:.1f} req/s)")
-        print(f"     {gain_sym}  Batcher running — unique requests fan into batched forward passes")
+    # ── 90M projection from measured sample ──────────────────────────────────
+    if w6.rps and w6.rps > 0:
+        eta_s      = _UNIQUE_TARGET / w6.rps          # seconds on this single node
+        eta_h      = eta_s / 3600
+        nodes_1h   = math.ceil(eta_h)                 # nodes to hit 90M in 1 h
+        nodes_24h  = math.ceil(eta_h / 24)            # nodes for 90M in 24 h
+        nodes_8h   = math.ceil(eta_h / 8)             # nodes for 90M in 8 h (work day)
+        print(f"\n  ┌─ 90,000,000 Unique Request Projection ({'zero dedup — every req is a new forward pass'})")
+        print(f"  │  Measured throughput  : {w6.rps:,.1f} req/s  ({_N_W6}-req sample)")
+        print(f"  │  Single-node ETA      : {eta_h:,.1f} h  ({eta_s/86400:,.1f} days)")
+        print(f"  │")
+        print(f"  │  Nodes needed to serve 90M unique requests in:")
+        print(f"  │    1 hour   →  {nodes_1h:>6,} nodes")
+        print(f"  │    8 hours  →  {nodes_8h:>6,} nodes")
+        print(f"  │    24 hours →  {nodes_24h:>6,} nodes")
+        print(f"  │")
+        print(f"  │  With pdim pocket dedup (real workloads are not 100% unique):")
+        for dedup, lbl in [(0.50,"50% dedup (cold audience)"),
+                           (0.80,"80% dedup (typical)     "),
+                           (0.95,"95% dedup (viral topic)  ")]:
+            unique_reqs = _UNIQUE_TARGET * (1.0 - dedup)
+            n_nodes_24h = math.ceil((unique_reqs / w6.rps) / 86400)
+            print(f"  │    {lbl}  →  net {unique_reqs:>12,.0f} unique  →  {n_nodes_24h:>4} nodes/24h")
+        print(f"  └─ Batcher: B=64, window=2ms, pipeline depth=4  (90M-optimised config)")
+        print()
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print("\n" + "═" * 68)

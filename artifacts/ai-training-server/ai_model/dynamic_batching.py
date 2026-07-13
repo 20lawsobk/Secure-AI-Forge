@@ -129,7 +129,9 @@ class GenerateCoalescer:
         self._pending: list[_Pending] = []
 
         # Staging queue between collector and executor (bounded = backpressure).
-        self._ready_q: queue.Queue[list[_Pending]] = queue.Queue(maxsize=2)
+        # Depth=4 lets the collector stay 3 batches ahead of the executor so
+        # the forward-pass thread is never starved during 90M-scale unique burst.
+        self._ready_q: queue.Queue[list[_Pending]] = queue.Queue(maxsize=4)
 
         self._started = False
         self._collector = threading.Thread(

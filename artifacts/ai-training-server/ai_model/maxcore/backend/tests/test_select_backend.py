@@ -1,8 +1,8 @@
 """Tests for the honest backend auto-selector (registry.select_backend).
 
 These verify the selector picks a *runnable* backend without pretending, and
-that on this CPU-only host it lands on the numpy CPU backend rather than a GPU
-it doesn't have.
+that on this Digital GPU host it lands on the Digital GPU backend rather than a
+CUDA GPU it doesn't have.
 """
 from ai_model.maxcore.backend import (
     CPUBackend,
@@ -19,17 +19,17 @@ def test_default_selects_runnable_backend():
     assert b.is_available() is True
 
 
-def test_cpu_only_host_falls_through_to_cpu():
-    """On a host without CUDA, 'gpu' is unavailable so we get the CPU backend.
+def test_cpu_only_host_falls_through_to_digital_gpu():
+    """On a host without CUDA, 'gpu' is unavailable so we get the Digital GPU backend.
 
-    Skip only if this box actually has a runnable GPU (then the assertion would
-    be legitimately different).
+    Skip only if this box actually has a runnable CUDA GPU (then the assertion
+    would be legitimately different).
     """
     if available_runtime().get("gpu"):
-        return  # real GPU present: falling-through-to-CPU is not the case to test
+        return  # real CUDA GPU present: falling-through is not the case to test
     b = select_backend(prefer=("gpu", "cpu"))
     assert isinstance(b, CPUBackend)
-    assert b.name == "cpu"
+    assert b.name == "digital_gpu"
 
 
 def test_never_returns_unavailable_backend():

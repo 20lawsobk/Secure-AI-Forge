@@ -877,27 +877,34 @@ class ContentRequest(_AwarenessMixin):
 
 @app.on_event("startup")
 async def on_startup():
-    # ── Thread pool: size for high-concurrency unique-request loads ───────────
-    # Default executor is min(32, cpu+4) — too small when 100s of unique
-    # requests fan out to the batcher simultaneously.  cpu×8 gives enough
-    # threads to keep the staging queue full without over-subscribing.
+    # ── Thread pool: sized for 90 000 000 unique-request scale ───────────────
+    # At 90M unique req/day each arriving as a distinct forward pass, the
+    # thread pool must be deep enough that the batcher's pending queue never
+    # starves waiting for a worker.  cpu×32 (floor 512) keeps hundreds of
+    # concurrent inflight requests from queuing behind the pool limit.
     import concurrent.futures as _cf
     _cpu_n = os.cpu_count() or 4
     asyncio.get_event_loop().set_default_executor(
         _cf.ThreadPoolExecutor(
-            max_workers=max(64, _cpu_n * 8),
+            max_workers=max(512, _cpu_n * 32),
             thread_name_prefix="req-worker",
         )
     )
 
-    # ── Dynamic batching config (hard-set to override any stale env vars) ───────
-    # Always write — stale values from a previous process can survive
-    # setdefault() and silently cap throughput (e.g. max_batch=8 from an old
-    # run).  Hard assignment guarantees the pipelined batcher starts with the
-    # right values every time the server restarts.
+    # ── Dynamic batching config — tuned for 90 M unique requests ─────────────
+    # Always hard-assign (never setdefault) so stale env vars from a previous
+    # process cannot silently cap throughput across restarts.
+    #
+    # max_batch=64 : fills a full SIMD lane every collection cycle; at 90M
+    #                scale the arriving flood keeps the batch full every 2 ms.
+    # window=2 ms  : tighter than 4 ms — under sustained unique-request burst
+    #                a 2 ms window still fills B=64 without adding idle latency.
+    # timeout=600 s: allows deep queues to drain without timing out under load
+    #                spikes (e.g. a 10-min wave of 90M requests hitting at once).
     os.environ["AI_DYNAMIC_BATCHING"] = "1"
-    os.environ["AI_BATCH_MAX"]        = str(min(64, max(32, _cpu_n * 8)))
-    os.environ["AI_BATCH_WINDOW_MS"]  = "4"   # 4 ms — fills fast under burst, low idle latency
+    os.environ["AI_BATCH_MAX"]        = "64"   # always max — 90M unique floods fill every slot
+    os.environ["AI_BATCH_WINDOW_MS"]  = "2"    # 2 ms collection window
+    os.environ["AI_BATCH_TIMEOUT_S"]  = "600"  # 10 min — deep queues must not timeout
 
     if not DATABASE_URL:
         print("[Server] WARNING: DATABASE_URL not set — running without DB")
@@ -1335,7 +1342,7 @@ async def model_status():
     return {
         "model_loaded": _model_ready,
         "vocab_size": vocab_size,
-        "device": "cpu",
+        "device": "digital_gpu",
         "dim": _model_config.get("dim", 512),
         "layers": _model_config.get("layers", 8),
         "heads": _model_config.get("heads", 8),

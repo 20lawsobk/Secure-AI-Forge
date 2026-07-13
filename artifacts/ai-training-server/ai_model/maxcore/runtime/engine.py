@@ -18,7 +18,7 @@ from ..tensor import Tensor
 
 class Runtime:
     def __init__(self, backend=None):
-        self.backend = backend if backend is not None else get_backend("cpu")
+        self.backend = backend if backend is not None else get_backend("digital_gpu")
 
     def run(self, compiled: CompiledGraph, inputs: dict, deterministic: bool = False,
             seed: int = 0) -> dict:

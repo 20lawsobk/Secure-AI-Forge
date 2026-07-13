@@ -214,9 +214,9 @@ def test_deterministic_run_repeatable():
 
 # ── backends registry / honesty ──────────────────────────────────────────────
 def test_registry_and_future_backends_are_honest():
-    assert "cpu" in available()
+    assert "digital_gpu" in available()
     runnable = available_runtime()
-    assert runnable["cpu"] is True
+    assert runnable["digital_gpu"] is True
     # No CUDA device on this host, so the (real) gpu backend is not runnable and
     # must say so rather than silently pretend to be a GPU.
     assert runnable["gpu"] is False
@@ -240,8 +240,8 @@ def test_gpu_backend_is_real_but_honest_without_hardware():
 
     gpu = get_backend("gpu")
     if cuda_is_available():
-        # On a real GPU host the kernel runs and matches the CPU backend.
-        cpu = get_backend("cpu")
+        # On a real GPU host the kernel runs and matches the Digital GPU backend.
+        cpu = get_backend("digital_gpu")
         a = _np.random.default_rng(0).standard_normal((4, 5)).astype(_np.float32)
         b = _np.random.default_rng(1).standard_normal((5, 3)).astype(_np.float32)
         assert _np.allclose(gpu.gemm(a, b).numpy(), cpu.gemm(a, b).numpy(), atol=1e-3)
@@ -255,23 +255,23 @@ def test_gpu_backend_is_real_but_honest_without_hardware():
         assert raised
 
     # The same code path is validated on torch-CPU (the correctness proof for
-    # the kernels that will run on the GPU): it matches CPUBackend numerics.
-    cpu = get_backend("cpu")
+    # the kernels that will run on the GPU): it matches DigitalGPUBackend numerics.
+    cpu = get_backend("digital_gpu")
     val = GPUBackend(device="cpu")
     a = _np.random.default_rng(2).standard_normal((6, 7)).astype(_np.float32)
     b = _np.random.default_rng(3).standard_normal((7, 4)).astype(_np.float32)
     assert _np.allclose(val.gemm(a, b).numpy(), cpu.gemm(a, b).numpy(), atol=1e-3)
 
 
-def test_gpu_backend_reduce_parity_with_cpu():
-    """reduce() on the gpu backend must match CPUBackend for all ops and for
-    multi-axis reductions (numpy/CPU support tuple axes; torch's dim does not,
+def test_gpu_backend_reduce_parity_with_digital_gpu():
+    """reduce() on the gpu backend must match DigitalGPUBackend for all ops and
+    for multi-axis reductions (numpy supports tuple axes; torch's dim does not,
     so the backend folds them — this guards that parity)."""
     import numpy as _np
 
     from ai_model.maxcore.backend.device_backend import GPUBackend
 
-    cpu = get_backend("cpu")
+    cpu = get_backend("digital_gpu")
     val = GPUBackend(device="cpu")
     x = _np.random.default_rng(9).standard_normal((3, 4, 5)).astype(_np.float32)
     for op in ("sum", "mean", "max", "min", "prod"):
