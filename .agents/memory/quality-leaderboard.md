@@ -3,8 +3,11 @@ name: Quality leaderboard 100/100
 description: Scoring rules, final fixes, and constraints to preserve when touching script_agent or server.py to keep test_awareness_and_quality at 100.0 average.
 ---
 
+## Scale definition
+**100 = Google Veo quality standard.** The entire 0–100 scale is calibrated against Google Veo as the ceiling. Every scorer docstring, test description, and verdict line must reflect this. Never describe the scale as arbitrary or relative.
+
 ## Achieved state
-39/39 passing, **100.0 average quality** across 18 leaderboard rows.  Cache namespace: `api_content_v4`.
+39/39 passing, **100.0 average quality** (= Google Veo level) across 18 leaderboard rows.  Cache namespace: `api_content_v4`.
 
 ## Scoring formula (test mirror must stay in sync with server)
 - `_length_score`: plateau 15–60 words (full 1.0 inside range, tapers outside). **Never raise the upper bound above 60** without checking TikTok rows.

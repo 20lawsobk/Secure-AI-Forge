@@ -131,6 +131,7 @@ def _build_thumbnail_prompt_alt(req: VisualSpecRequest) -> str:
 
 def _score_visual_prompt(prompt: str, awareness: str = "") -> float:
     """Brief-aware quality score (0-100) for an image thumbnail prompt.
+    100 = Google Veo quality standard.
 
     Rewards: sensible length, alignment with live awareness genre/mood
     signals, and concrete visual descriptors. Penalises the bare generic

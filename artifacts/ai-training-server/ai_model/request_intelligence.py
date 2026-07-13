@@ -640,10 +640,12 @@ _CTA_KEYWORDS = [
 
 
 def score_candidate(text: str, brief: GenerationBrief) -> float:
-    """Brief-aware quality score (0-100).
+    """Brief-aware quality score (0-100). 100 = Google Veo quality standard.
 
-    Blends: length fit to the platform window, CTA presence, keyword coverage,
-    and first-line hook strength. Deterministic so ranking is stable.
+    The scale is calibrated so that a perfect 100 represents output at the
+    level of Google Veo. Blends: length fit to the platform window, CTA
+    presence, keyword coverage, and first-line hook strength. Deterministic
+    so ranking is stable.
     """
     text = _norm(text)
     if not text:

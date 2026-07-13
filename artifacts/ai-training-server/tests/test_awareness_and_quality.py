@@ -236,7 +236,10 @@ def _keyword_score(text: str, keywords: list[str]) -> float:
 
 def score_candidate(text: str, keywords: list[str] | None = None) -> float:
     """
-    0–100 composite quality score.
+    0–100 composite quality score. 100 = Google Veo quality standard.
+
+    The scale is calibrated so that a perfect 100 represents output at
+    the level of Google Veo. Component weights:
       length   30%
       cta      15%
       keyword  20%

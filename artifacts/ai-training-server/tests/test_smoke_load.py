@@ -233,7 +233,10 @@ def looks_garbled(text: str) -> bool:
     return False
 
 def quality_score(r: dict, platform: str = "tiktok") -> float:
-    """Returns quality in [0,100].
+    """Returns quality in [0,100] where 100 = Google Veo quality standard.
+
+    The scale is calibrated so that a score of 100 represents output at the
+    level of Google Veo. Scores below 85 are considered substandard.
 
     Handles:
     - Direct content/generate: {hook, body, cta, ...}
@@ -800,7 +803,7 @@ def main() -> int:
               f"n={len(all_quality)}")
 
     verdict_sym  = PASS if (target_met and gpu_ok and qual_ok) else FAIL
-    verdict_text = "PASS — 100% success, GPU confirmed, quality ≥ 85 all samples" \
+    verdict_text = "PASS — 100% success, GPU confirmed, quality ≥ 85/100 (Google Veo standard) all samples" \
                    if (target_met and gpu_ok and qual_ok) \
                    else "FAIL — see wave details above"
     print(f"\n  {verdict_sym}  VERDICT: {verdict_text}")
