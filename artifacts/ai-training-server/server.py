@@ -271,6 +271,32 @@ async def _in_thread_gated(gate, fn, timeout):
     return await _in_thread(_run)
 
 
+# ─── Pocket GPU Pool: infinite per-request GPU lifecycle ─────────────────────
+# Each unique inference request gets its own GPU instance spawned from the
+# pocket dimension (born → working → dead).  The pool is unbounded — the
+# pocket's compression+filetree system absorbs any burst.  Identical requests
+# never reach the pool; the async coalescer above collapses them to one life.
+_gpu_pool = None
+_gpu_pool_lock = threading.Lock()
+
+
+def _get_gpu_pool():
+    """Process-wide PocketGPUPool singleton.  Lazily initialised on first use."""
+    global _gpu_pool
+    if _gpu_pool is None:
+        with _gpu_pool_lock:
+            if _gpu_pool is None:
+                from ai_model.gpu.pocket_pool import PocketGPUPool
+                _gpu_pool = PocketGPUPool()
+    return _gpu_pool
+
+
+def _digest_str(fields: dict) -> str:
+    """Stable digest string for a dict of request fields (used as pool spawn key)."""
+    payload = json.dumps(fields, sort_keys=True, default=str).encode()
+    return hashlib.blake2b(payload, digest_size=16).hexdigest()
+
+
 # ─── PDIM orchestrator: dedup + single-flight (default for content gen) ────────
 _pdim_orchestrator = None
 _pdim_orch_lock = threading.Lock()
@@ -1297,15 +1323,20 @@ async def model_status():
 @app.get("/gpu/status")
 async def gpu_status():
     global _digital_gpu_backend
+    pool_stats: dict = {}
+    try:
+        pool_stats = _get_gpu_pool().stats()
+    except Exception:
+        pass
     try:
         if _digital_gpu_backend is None:
             sys.path.insert(0, str(Path(__file__).parent))
             from ai_model.gpu.torch_backend import DigitalGPUBackend
             _digital_gpu_backend = DigitalGPUBackend(lanes=32)
         status = _digital_gpu_backend.status()
-        return {"available": True, "backend": "digital_gpu", **status}
+        return {"available": True, "backend": "digital_gpu", **status, **pool_stats}
     except Exception as e:
-        return {"available": False, "backend": "none", "error": str(e)}
+        return {"available": False, "backend": "none", "error": str(e), **pool_stats}
 
 @app.get("/gpu/hyper/status")
 async def hyper_gpu_status():
@@ -5319,11 +5350,12 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
                 return _sr
 
             try:
-                # Hold an adaptive-concurrency slot for the duration of inference.
-                with INFERENCE_GATE.slot(timeout=35.0):
+                # Spawn a GPU life from the pocket for this inference.
+                # No gate, no queue — each unique request gets its own instance
+                # (born → working → dead).  Identical requests are already
+                # collapsed by the coalescer above and never reach this branch.
+                with _get_gpu_pool().spawn_sync() as _glife:
                     sr = _infer()
-            except GateBusy:
-                raise HTTPException(status_code=503, detail="AI server at capacity — retry shortly")
             except Exception:
                 sr = None
             if sr is not None:
@@ -5439,10 +5471,13 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
             "awareness": str(req.awareness or ""),
         }
         async def _coalesced_content():
+            # Leader spawns ONE GPU life from the pocket for this unique request.
+            # Followers share the result via the coalescer — zero extra spawns.
             _orch = _get_pdim_orchestrator()
-            return await _in_thread(
-                lambda: _orch.compute(req, _build, namespace="api_content_v4")
-            )
+            async with _get_gpu_pool().spawn(_digest_str(_key)) as _glife:
+                return await _in_thread(
+                    lambda: _orch.compute(req, _build, namespace="api_content_v4")
+                )
         _out = await _get_async_coalescer().compute(_key, _coalesced_content)
         result = dict(_out["result"])
         if _out.get("source") in ("cache", "coalesced"):
@@ -5791,16 +5826,14 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
                 ))
 
             try:
-                # Hold an adaptive-concurrency slot for the duration of inference.
-                with INFERENCE_GATE.slot(timeout=35.0):
+                # Spawn a GPU life from the pocket for this inference.
+                with _get_gpu_pool().spawn_sync() as _glife:
                     sr = _infer()
                 candidates.append(f"{sr.hook}\n{sr.body}\n{sr.cta}")
                 # Add a hook-swapped variant so we can rank for the best opener.
                 alt_hook, _, _ = ri.best_hook(idea, "the artist", sr.hook, brief)
                 if alt_hook and alt_hook != sr.hook:
                     candidates.append(f"{alt_hook}\n{sr.body}\n{sr.cta}")
-            except GateBusy:
-                raise HTTPException(status_code=503, detail="AI server at capacity — retry shortly")
             except Exception:
                 pass
 
@@ -5846,10 +5879,13 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
             "awareness": str(getattr(req, "awareness", "") or ""),
         }
         async def _coalesced_social():
+            # Leader spawns ONE GPU life from the pocket for this unique request.
+            # Followers share the result via the coalescer — zero extra spawns.
             _orch = _get_pdim_orchestrator()
-            return await _in_thread(
-                lambda: _orch.compute(req, _build, namespace="api_text")
-            )
+            async with _get_gpu_pool().spawn(_digest_str(_key)) as _glife:
+                return await _in_thread(
+                    lambda: _orch.compute(req, _build, namespace="api_text")
+                )
         _out = await _get_async_coalescer().compute(_key, _coalesced_social)
         result = dict(_out["result"])
         if _out.get("source") in ("cache", "coalesced"):
