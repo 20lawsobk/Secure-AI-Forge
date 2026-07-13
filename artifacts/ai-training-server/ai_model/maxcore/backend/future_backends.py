@@ -1,7 +1,7 @@
 """Future backend plug-points — declared, contract-documented, NOT faked.
 
 These backends are part of the architecture but are not implemented on this
-CPU-only host. Per the "no placeholders / honest engineering" rule, they do not
+Digital GPU host. Per the "no placeholders / honest engineering" rule, they do not
 silently pretend to work: ``is_available()`` returns ``False`` and every kernel
 raises ``NotImplementedError`` carrying the contract a real implementation must
 satisfy. They exist so the registry, runtime, and API are already

@@ -3,14 +3,14 @@
 The deployed AI server runs a single Python worker that holds a large in-memory
 transformer model. When the consuming platform (MaxBooster) bursts many requests
 at once, the old code accepted them all unconditionally: every video request span
-its own render threads and every inference request contended for CPU, so the
+its own render threads and every inference request contended for compute, so the
 server thrashed and requests timed out en masse.
 
 These gates bound how much heavy work runs concurrently and *auto-size that bound
-from the container's actual CPU and available memory* — re-checked periodically so
-the limit shrinks under pressure and grows again when resources free up. Excess
-work waits (queues) on ``acquire`` instead of all starting at once, so a burst
-degrades gracefully (slower) rather than failing (crashes/timeouts).
+from the container's actual compute capacity and available memory* — re-checked
+periodically so the limit shrinks under pressure and grows again when resources
+free up. Excess work waits (queues) on ``acquire`` instead of all starting at
+once, so a burst degrades gracefully (slower) rather than failing (crashes/timeouts).
 
 Pure stdlib — no psutil dependency. Memory is read cgroup-v2-aware so the limit
 reflects the container's real allowance, not the host's.
@@ -190,8 +190,8 @@ class _GateSlot:
 
 
 # ── Global gates ────────────────────────────────────────────────────────────
-# Model inference (captions/hooks/CTAs/scripts): CPU-bound, shares the loaded
-# model so marginal memory per call is modest.
+# Model inference (captions/hooks/CTAs/scripts): compute-bound on the Digital GPU
+# engine, shares the loaded model so marginal memory per call is modest.
 INFERENCE_GATE = AdaptiveGate(
     name="inference",
     mem_per_slot_gb=0.5,
@@ -201,8 +201,8 @@ INFERENCE_GATE = AdaptiveGate(
 )
 
 # Video scene rendering: each scene spawns an ffmpeg encode that is itself
-# multi-threaded and CPU-hungry, so budget ~2 cores per concurrent render to
-# avoid oversubscribing the CPU (which slows every encode and trips timeouts).
+# multi-threaded and compute-intensive, so budget ~2 cores per concurrent render
+# to avoid oversubscribing the engine (which slows every encode and trips timeouts).
 # Dev (4 vCPU) -> 2 concurrent; production Reserved VM (8 vCPU) -> 4 concurrent.
 RENDER_GATE = AdaptiveGate(
     name="render",

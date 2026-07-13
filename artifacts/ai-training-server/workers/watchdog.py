@@ -633,9 +633,9 @@ def _free_torch_cache():
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
-        # Free the CPU allocator's cached pages back to the OS
+        # Free the memory allocator's cached pages back to the OS
         if hasattr(torch, "cuda") and hasattr(torch.cuda, "memory"):
-            pass  # CPU path: rely on Python GC + ctypes malloc_trim
+            pass  # Digital GPU path: rely on Python GC + ctypes malloc_trim
         try:
             import ctypes
             libc = ctypes.CDLL("libc.so.6")

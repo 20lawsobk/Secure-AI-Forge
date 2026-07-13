@@ -1,7 +1,7 @@
 """Tensor wrapper for the DigitalGPU / MaxCore public layer.
 
-A thin, backend-agnostic handle over a contiguous numpy buffer. The CPU backend
-materializes these as numpy arrays; future backends (GPU/cluster/ASIC) may keep
+A thin, backend-agnostic handle over a contiguous numpy buffer. The Digital GPU
+backend materializes these as numpy arrays; future backends (GPU/cluster/ASIC) may keep
 the payload on a device and only realize it lazily. Keeping a single ``Tensor``
 type at the API boundary means model code never touches a concrete backend
 buffer directly.
@@ -29,7 +29,7 @@ class Tensor:
     device: str
     __slots__ = ("data", "device")
 
-    def __init__(self, data: Any, dtype: str | None = "float32", device: str = "cpu"):
+    def __init__(self, data: Any, dtype: str | None = "float32", device: str = "digital_gpu"):
         if isinstance(data, Tensor):
             data = data.data
         arr = np.asarray(data)
@@ -63,7 +63,7 @@ class Tensor:
         return f"Tensor(shape={self.shape}, dtype={self.dtype}, device={self.device})"
 
 
-def as_tensor(x: Any, dtype: str | None = None, device: str = "cpu") -> Tensor:
+def as_tensor(x: Any, dtype: str | None = None, device: str = "digital_gpu") -> Tensor:
     """Coerce ``x`` to a ``Tensor`` without copying when it already is one."""
     if isinstance(x, Tensor):
         return x

@@ -52,7 +52,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DEVICE = "cpu"
+_TORCH_DEVICE = "cpu"   # PyTorch hardware device string — must be "cpu" on this host
 WEIGHTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "weights")
 WEIGHTS_PATH = os.path.join(WEIGHTS_DIR, "model.pt")
 
@@ -235,7 +235,7 @@ async def startup():
 
     if os.path.exists(WEIGHTS_PATH):
         print(f"[AI Model] Loading weights from {WEIGHTS_PATH}")
-        checkpoint = torch.load(WEIGHTS_PATH, map_location=DEVICE)
+        checkpoint = torch.load(WEIGHTS_PATH, map_location=_TORCH_DEVICE)
         if isinstance(checkpoint, dict) and "vocab" in checkpoint:
             tokenizer.vocab = checkpoint["vocab"]
             tokenizer.inv_vocab = checkpoint["inv_vocab"]
@@ -283,7 +283,7 @@ async def startup():
             max_len=max_len,
         )
 
-    creative_model = CreativeModel(base_model, tokenizer, device=DEVICE)
+    creative_model = CreativeModel(base_model, tokenizer, device=_TORCH_DEVICE)
     script_agent = ScriptAgent(creative_model)
     visual_spec_agent = VisualSpecAgent(creative_model)
     distribution_agent = DistributionAgent(creative_model)
@@ -294,7 +294,7 @@ async def startup():
 
     print(f"[AI Model] Model initialized (dim={dim}, layers={n_layers}, heads={n_heads})")
     print(f"[AI Model] Vocab size: {len(tokenizer.vocab)}")
-    print(f"[AI Model] Device: {DEVICE}")
+    print(f"[AI Model] Device: {_TORCH_DEVICE}")
     print("[AI Model] Ready to serve requests on port 9878")
 
 
@@ -304,7 +304,7 @@ async def health():
         status="healthy",
         model_loaded=creative_model is not None,
         vocab_size=len(tokenizer.vocab) if tokenizer else 0,
-        device=DEVICE,
+        device=_TORCH_DEVICE,
     )
 
 
@@ -635,9 +635,9 @@ async def train_model(req: TrainRequest):
     creative_model.resize_embeddings()
 
     print(f"[AI Model] Training with {len(dataset)} samples, vocab={tokenizer.vocab_size}")
-    run_train(creative_model.model, dataset, tokenizer, cfg, device=DEVICE)
+    run_train(creative_model.model, dataset, tokenizer, cfg, device=_TORCH_DEVICE)
 
-    ppl = evaluate(creative_model.model, dataset, tokenizer, device=DEVICE)
+    ppl = evaluate(creative_model.model, dataset, tokenizer, device=_TORCH_DEVICE)
     print(f"[AI Model] Training complete. Perplexity: {ppl}")
 
     os.makedirs(WEIGHTS_DIR, exist_ok=True)

@@ -53,7 +53,7 @@ def train_on_hyper_gpu(
     print(f"SIMD Lanes: {gpu_s['lanes']}")
     print(f"Tensor Cores: {gpu_s['tensor_cores']}")
     print(f"Precision: {gpu_s['precision']}")
-    print(f"CPU threads: {torch.get_num_threads()}")
+    print(f"Threads: {torch.get_num_threads()}")
     print(f"{'='*70}\n")
 
     tokenizer = SimpleTokenizer()

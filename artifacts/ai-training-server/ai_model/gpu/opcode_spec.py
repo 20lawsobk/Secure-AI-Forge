@@ -49,7 +49,7 @@ class OpcodeSpec:
     numeric_profile: NumericProfile
     deterministic: bool
     doc: str
-    # Truth about the substrate. False everywhere on this CPU-only host.
+    # Truth about the substrate. False everywhere on this Digital GPU host.
     is_hardware_execution: bool = False
     # Architecture whose numerics/behaviour this op *models* (label of intent).
     target_arch: Optional[str] = None
@@ -66,7 +66,7 @@ class OpcodeSpec:
     def describe(self) -> str:
         substrate = (
             f"executes on {self.target_arch}" if self.is_hardware_execution
-            else f"CPU numerics model"
+            else f"Digital GPU numerics model"
             + (f" of {self.target_arch}" if self.target_arch else "")
         )
         return f"{self.key} [{self.numeric_profile}, {substrate}]"

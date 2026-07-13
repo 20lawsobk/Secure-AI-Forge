@@ -51,11 +51,11 @@ def train_on_digital_gpu(
             print(f"Resumed from GPU checkpoint (epoch {total_epochs_done}, best_val={best_val_loss:.4f})")
         except FileNotFoundError:
             try:
-                cpu_ckpt = torch.load("ai_model/weights/model.pt", map_location="cpu", weights_only=False)
-                tokenizer.vocab = cpu_ckpt["vocab"]
-                tokenizer.inv_vocab = cpu_ckpt["inv_vocab"]
-                tokenizer.next_id = cpu_ckpt["next_id"]
-                print(f"Loaded vocab from CPU checkpoint (vocab={tokenizer.vocab_size})")
+                base_ckpt = torch.load("ai_model/weights/model.pt", map_location="cpu", weights_only=False)
+                tokenizer.vocab = base_ckpt["vocab"]
+                tokenizer.inv_vocab = base_ckpt["inv_vocab"]
+                tokenizer.next_id = base_ckpt["next_id"]
+                print(f"Loaded vocab from base model checkpoint (vocab={tokenizer.vocab_size})")
             except FileNotFoundError:
                 pass
 

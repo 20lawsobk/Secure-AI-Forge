@@ -1,6 +1,6 @@
 """Fleet-wide generation deduplication cache.
 
-Identical generation requests are expensive to recompute on the CPU/NumPy
+Identical generation requests are expensive to recompute on the Digital GPU/NumPy
 inference path. This module stores successful generation results in the shared
 pdim store (``storage_client``) keyed by a stable hash of the request's
 semantic fields, so a repeat of the *same* request — from any node/account in

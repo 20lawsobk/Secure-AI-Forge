@@ -41,7 +41,7 @@ Endpoints (all prefixed /):
   GET  /train/status                  — live training metrics
 
 Remote control (proxied via Replit /api/maxcore/*):
-  GET  /control/status                — full snapshot (CPU/RAM/disk + training + curriculum)
+  GET  /control/status                — full snapshot (compute/RAM/disk + training + curriculum)
   GET  /control/logs?n=300            — last N lines from training log
   DELETE /control/logs                — clear all log files
   POST /control/restart               — graceful restart (watchdog relaunches in ~5 s)

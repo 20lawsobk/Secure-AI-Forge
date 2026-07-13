@@ -455,7 +455,7 @@ def _init_ai_model():
         print("[AI Model] Initializing MaxBooster AI Content Model...")
         _tokenizer = BPETokenizer()
 
-        DEVICE = "cpu"
+        _TORCH_DEVICE = "cpu"   # PyTorch hardware device string — must be "cpu" on this host
         dim      = int(os.environ.get("AI_MODEL_DIM",     "512"))
         n_layers = int(os.environ.get("AI_MODEL_LAYERS",  "8"))
         n_heads  = int(os.environ.get("AI_MODEL_HEADS",   "8"))
@@ -497,7 +497,7 @@ def _init_ai_model():
         state_dict = None
         if weights_path.exists():
             print(f"[AI Model] Loading weights from {weights_path}")
-            checkpoint = torch.load(str(weights_path), map_location=DEVICE)
+            checkpoint = torch.load(str(weights_path), map_location=_TORCH_DEVICE)
             if isinstance(checkpoint, dict) and "vocab" in checkpoint:
                 _tokenizer.vocab    = checkpoint["vocab"]
                 _tokenizer.inv_vocab = checkpoint["inv_vocab"]
@@ -578,7 +578,7 @@ def _init_ai_model():
 
         print(f"[AI Model] Backend: {backend_name}")
 
-        _creative_model      = CreativeModel(base_model, _tokenizer, device=DEVICE)
+        _creative_model      = CreativeModel(base_model, _tokenizer, device=_TORCH_DEVICE)
         _script_agent        = ScriptAgent(_creative_model)
         _visual_spec_agent   = VisualSpecAgent(_creative_model)
         _distribution_agent  = DistributionAgent(_creative_model)
@@ -798,7 +798,7 @@ class HyperScaleUpRequest(BaseModel):
     The Digital GPU executes matmul/attention/layer-norm/SiLU via NumPy
     tensor-core simulation with hand-written autograd, so this is genuine
     backend compute (~100-1000x slower per op than native torch). Defaults are
-    intentionally modest so a real run completes in this CPU-only environment;
+    intentionally modest so a real run completes in this Digital GPU environment;
     ``max_samples`` caps the corpus and can be raised if you accept the time cost.
     The trained weights are transferred into the fast KV-cache serving model."""
     epochs: int = 2
@@ -1637,8 +1637,8 @@ def _run_bpe_scaleup(req: BPEScaleUpRequest, job_id: str):
         if len(dataset) == 0:
             raise ValueError("Empty dataset after BPE encoding")
 
-        # Free the old model/tokenizer before allocating the new one — CPU-only,
-        # no swap, so holding both resident simultaneously risks OOM-kill.
+        # Free the old model/tokenizer before allocating the new one — no swap,
+        # so holding both resident simultaneously risks OOM-kill.
         import gc
         if _creative_model is not None:
             del _creative_model.model
@@ -1903,7 +1903,7 @@ def _run_hyper_scaleup(req: HyperScaleUpRequest, job_id: str):
         if len(dataset) == 0:
             raise ValueError("Empty dataset after BPE encoding")
 
-        # Free the old model before allocating the new one (CPU-only, no swap).
+        # Free the old model before allocating the new one (no swap).
         import gc
         if _creative_model is not None:
             del _creative_model.model
@@ -7562,7 +7562,7 @@ async def api_cancel_video_job(job_id: str, _key=Depends(require_scope("generate
 async def api_concurrency_stats(_key=Depends(require_scope("read"))):
     """Live snapshot of the adaptive concurrency gates.
 
-    ``capacity`` is recomputed from the container's current usable CPU and
+    ``capacity`` is recomputed from the container's current usable compute and
     available memory, so it shrinks under pressure and grows when resources free
     up — i.e. it auto-adjusts to whatever load MaxBooster sends."""
     from ai_model import dedup_cache

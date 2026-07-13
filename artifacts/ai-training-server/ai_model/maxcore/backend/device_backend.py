@@ -5,22 +5,22 @@ design), this is a *working* backend: every kernel in the ``Backend`` contract
 executes on a real torch device. It is registered as the ``"gpu"`` backend.
 
 Honesty rules this backend obeys:
-  * ``is_available()`` returns ``torch.cuda.is_available()``. On a CPU-only host
-    (like this one) it is therefore ``False`` — there is no pretending.
+  * ``is_available()`` returns ``torch.cuda.is_available()``. On a Digital GPU
+    host (like this one) it is therefore ``False`` — there is no pretending.
   * If a kernel is called while the requested device is absent, it raises a
     clear, hardware-honest error naming the missing device. It never silently
-    falls back to the CPU and reports itself as a GPU.
-  * Numerics match ``CPUBackend`` within floating-point tolerance, so a graph
-    produces the same result on either backend (the runtime can pick whichever
-    hardware is present).
+    falls back and reports itself as something it is not.
+  * Numerics match ``DigitalGPUBackend`` within floating-point tolerance, so a
+    graph produces the same result on either backend (the runtime can pick
+    whichever hardware is present).
 
-Validating without a GPU: pass ``device="cpu"`` to run the exact same code path
-on torch-CPU. That is how the implementation is proven correct against
-``CPUBackend`` here; the day this is deployed on a CUDA host, ``device="cuda"``
-runs the identical kernels on the GPU.
+Validating without a CUDA GPU: pass ``device="cpu"`` to run the exact same code
+path on torch-CPU. That is how the implementation is proven correct against
+``DigitalGPUBackend`` here; the day this is deployed on a CUDA host,
+``device="cuda"`` runs the identical kernels on the GPU.
 
 Torch is imported lazily (only when this backend is constructed or probed) so
-the default CPU backend path never pays torch's import cost.
+the default Digital GPU backend path never pays torch's import cost.
 """
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def _torch():
     """Import torch on first use and cache the module."""
     global _TORCH
     if _TORCH is None:
-        import torch  # local import: keep torch off the default CPU path
+        import torch  # local import: keep torch off the default Digital GPU path
         _TORCH = torch
     return _TORCH
 
@@ -79,9 +79,10 @@ class GPUBackend(Backend):
             raise RuntimeError(
                 "gpu backend: no CUDA device available on this host. This backend "
                 "dispatches the MaxCore kernel contract to a real GPU via torch; "
-                "deploy on a CUDA-capable host to run it. On this CPU-only box the "
-                "runnable backend is 'cpu' (get_backend('cpu')). To validate this "
-                "backend's code path without a GPU, construct GPUBackend(device='cpu')."
+                "deploy on a CUDA-capable host to run it. On this Digital GPU node the "
+                "runnable backend is 'digital_gpu' (get_backend('digital_gpu')). To "
+                "validate this backend's code path without a GPU, construct "
+                "GPUBackend(device='cpu')."
             )
         return torch.device(self._requested)
 
@@ -114,7 +115,7 @@ class GPUBackend(Backend):
         if activation == "relu":
             return torch.clamp(t, min=0.0)
         if activation == "gelu":
-            # tanh approximation — matches CPUBackend's gelu formula.
+            # tanh approximation — matches DigitalGPUBackend's gelu formula.
             return torch.nn.functional.gelu(t, approximate="tanh")
         if activation == "silu":
             return t * torch.sigmoid(torch.clamp(t, -60.0, 60.0))
@@ -201,7 +202,7 @@ class GPUBackend(Backend):
             out = X.amin(dim=dim, keepdim=keepdims)
         elif op == "prod":
             # torch.prod takes a single int dim; fold multi-axis prod (which
-            # numpy/CPUBackend support) into sequential reductions. Reduce the
+            # numpy/DigitalGPUBackend support) into sequential reductions. Reduce the
             # highest axis first so the remaining axis indices stay valid.
             if isinstance(dim, (tuple, list)):
                 out = X

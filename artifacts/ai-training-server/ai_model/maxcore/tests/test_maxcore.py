@@ -233,7 +233,7 @@ def test_registry_and_future_backends_are_honest():
 def test_gpu_backend_is_real_but_honest_without_hardware():
     """The gpu backend is a genuine torch implementation, not a stub. Without a
     CUDA device it reports unavailable and raises a clear, hardware-honest error
-    (naming the missing device) instead of faking GPU compute on the CPU."""
+    (naming the missing device) instead of faking GPU compute on the Digital GPU engine."""
     import numpy as _np
 
     from ai_model.maxcore.backend.device_backend import GPUBackend, cuda_is_available
@@ -241,10 +241,10 @@ def test_gpu_backend_is_real_but_honest_without_hardware():
     gpu = get_backend("gpu")
     if cuda_is_available():
         # On a real GPU host the kernel runs and matches the Digital GPU backend.
-        cpu = get_backend("digital_gpu")
+        dgpu = get_backend("digital_gpu")
         a = _np.random.default_rng(0).standard_normal((4, 5)).astype(_np.float32)
         b = _np.random.default_rng(1).standard_normal((5, 3)).astype(_np.float32)
-        assert _np.allclose(gpu.gemm(a, b).numpy(), cpu.gemm(a, b).numpy(), atol=1e-3)
+        assert _np.allclose(gpu.gemm(a, b).numpy(), dgpu.gemm(a, b).numpy(), atol=1e-3)
     else:
         assert gpu.is_available() is False
         raised = False
@@ -256,11 +256,11 @@ def test_gpu_backend_is_real_but_honest_without_hardware():
 
     # The same code path is validated on torch-CPU (the correctness proof for
     # the kernels that will run on the GPU): it matches DigitalGPUBackend numerics.
-    cpu = get_backend("digital_gpu")
+    dgpu = get_backend("digital_gpu")
     val = GPUBackend(device="cpu")
     a = _np.random.default_rng(2).standard_normal((6, 7)).astype(_np.float32)
     b = _np.random.default_rng(3).standard_normal((7, 4)).astype(_np.float32)
-    assert _np.allclose(val.gemm(a, b).numpy(), cpu.gemm(a, b).numpy(), atol=1e-3)
+    assert _np.allclose(val.gemm(a, b).numpy(), dgpu.gemm(a, b).numpy(), atol=1e-3)
 
 
 def test_gpu_backend_reduce_parity_with_digital_gpu():
@@ -271,16 +271,16 @@ def test_gpu_backend_reduce_parity_with_digital_gpu():
 
     from ai_model.maxcore.backend.device_backend import GPUBackend
 
-    cpu = get_backend("digital_gpu")
+    dgpu = get_backend("digital_gpu")
     val = GPUBackend(device="cpu")
     x = _np.random.default_rng(9).standard_normal((3, 4, 5)).astype(_np.float32)
     for op in ("sum", "mean", "max", "min", "prod"):
         for axis in (1, (1, 2), (0, 2)):
             for keepdims in (False, True):
                 r_gpu = val.reduce(x, op, axis=axis, keepdims=keepdims).numpy()
-                r_cpu = cpu.reduce(x, op, axis=axis, keepdims=keepdims).numpy()
-                assert r_gpu.shape == r_cpu.shape, (op, axis, keepdims)
-                assert _np.allclose(r_gpu, r_cpu, atol=1e-3, rtol=1e-3), (op, axis, keepdims)
+                r_dgpu = dgpu.reduce(x, op, axis=axis, keepdims=keepdims).numpy()
+                assert r_gpu.shape == r_dgpu.shape, (op, axis, keepdims)
+                assert _np.allclose(r_gpu, r_dgpu, atol=1e-3, rtol=1e-3), (op, axis, keepdims)
 
 
 # ── PDIM ──────────────────────────────────────────────────────────────────────
@@ -404,27 +404,27 @@ def test_batched_gemm_is_engine_served():
     A = rng.standard_normal((3, 5, 7)).astype(np.float32)    # [B, M, K]
     W = rng.standard_normal((7, 4)).astype(np.float32)       # [K, N]    (shared)
     Bb = rng.standard_normal((3, 7, 4)).astype(np.float32)   # [B, K, N] (batched)
-    n0, f0 = _counter("cpu.gemm.numpy"), _counter("cpu.gemm.engine_fallback")
+    n0, f0 = _counter("dgpu.gemm.numpy"), _counter("dgpu.gemm.engine_fallback")
     o1 = dg.gemm(A, W).numpy()
     o2 = dg.gemm(A, Bb).numpy()
     assert np.allclose(o1, A @ W, atol=TOL)
     assert np.allclose(o2, A @ Bb, atol=TOL)
-    assert _counter("cpu.gemm.numpy") == n0              # never bypassed to numpy
-    assert _counter("cpu.gemm.engine_fallback") == f0   # engine served it all
+    assert _counter("dgpu.gemm.numpy") == n0              # never bypassed to numpy
+    assert _counter("dgpu.gemm.engine_fallback") == f0   # engine served it all
 
 
 def test_softmax_any_axis_is_engine_served():
     dg = DigitalGPU()
     rng = np.random.default_rng(12)
     X = rng.standard_normal((2, 6, 4)).astype(np.float32)
-    n0, f0 = _counter("cpu.softmax.numpy"), _counter("cpu.softmax.engine_fallback")
+    n0, f0 = _counter("dgpu.softmax.numpy"), _counter("dgpu.softmax.engine_fallback")
     out = dg.softmax(X, axis=1).numpy()                  # non-last axis
     ref = np.exp(X - X.max(1, keepdims=True))
     ref = ref / ref.sum(1, keepdims=True)
     assert np.allclose(out, ref, atol=TOL)
     assert np.allclose(out.sum(axis=1), 1.0, atol=TOL)
-    assert _counter("cpu.softmax.numpy") == n0
-    assert _counter("cpu.softmax.engine_fallback") == f0
+    assert _counter("dgpu.softmax.numpy") == n0
+    assert _counter("dgpu.softmax.engine_fallback") == f0
 
 
 def test_masked_multihead_attention_is_engine_served():
@@ -435,7 +435,7 @@ def test_masked_multihead_attention_is_engine_served():
     k = rng.standard_normal((B, H, Tk, D)).astype(np.float32)
     v = rng.standard_normal((B, H, Tk, D)).astype(np.float32)
     mask = np.where(rng.random((Tq, Tk)) < 0.3, -1e9, 0.0).astype(np.float32)
-    n0, f0 = _counter("cpu.attention.numpy"), _counter("cpu.attention.engine_fallback")
+    n0, f0 = _counter("dgpu.attention.numpy"), _counter("dgpu.attention.engine_fallback")
     out = dg.attention(q, k, v, mask=mask).numpy()       # masked, 4D multi-head
     scores = (q @ np.swapaxes(k, -1, -2)) / np.sqrt(D) + mask
     p = np.exp(scores - scores.max(-1, keepdims=True))
@@ -443,8 +443,8 @@ def test_masked_multihead_attention_is_engine_served():
     ref = p @ v
     assert out.shape == (B, H, Tq, D)
     assert np.allclose(out, ref, atol=1e-2)
-    assert _counter("cpu.attention.numpy") == n0         # masked path stayed on engine
-    assert _counter("cpu.attention.engine_fallback") == f0
+    assert _counter("dgpu.attention.numpy") == n0         # masked path stayed on engine
+    assert _counter("dgpu.attention.engine_fallback") == f0
 
 
 # ── pocket-dimension multiplication ──────────────────────────────────────────

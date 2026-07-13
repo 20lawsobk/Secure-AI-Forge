@@ -98,7 +98,6 @@ def available_runtime() -> dict[str, bool]:
 
 
 register("digital_gpu", lambda **kw: DigitalGPUBackend(**kw))
-register("cpu",         lambda **kw: DigitalGPUBackend(**kw))   # alias — same engine
 register("gpu",         lambda **kw: GPUBackend(**kw))
 register("cluster",     lambda **kw: ClusterBackend())
 register("asic",        lambda **kw: ASICBackend())

@@ -1,6 +1,6 @@
 """90M-scale concurrency smoke / load test for the MaxCore DigitalGPU stack.
 
-What it proves (honestly, on a CPU-only box):
+What it proves (on this Digital GPU node):
 
   Phase 0  Real compute     — each *unique* request runs a real DigitalGPU graph
                               (text -> embedding -> 2-layer MLP) through the engine.
@@ -256,7 +256,7 @@ def main() -> int:
     print("RESULT: PASS — single-flight collapsed all duplicates, zero engine "
           "fallbacks, all results correct.")
     print(f"        {_fmt(TARGET)} requests projected at {_secs(proj_st)} single-thread "
-          f"on this CPU box via the dedup fast path (process-per-core scales further).")
+          f"on this Digital GPU node via the dedup fast path (process-per-core scales further).")
     print("=" * 72)
     return 0
 

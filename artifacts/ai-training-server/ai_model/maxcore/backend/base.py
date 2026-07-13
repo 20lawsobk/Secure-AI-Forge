@@ -2,8 +2,8 @@
 
 A backend implements the primitive kernels (gemm, attention, conv2d, mlp,
 reduce, ...). The runtime dispatches IR ops to these methods, so all backends
-are interchangeable behind the public API. The CPU backend is the real one on
-this box; GPU/cluster/ASIC backends are declared but raise until implemented.
+are interchangeable behind the public API. The Digital GPU backend is the real
+one on this host; GPU/cluster/ASIC backends are declared but raise until implemented.
 """
 from __future__ import annotations
 

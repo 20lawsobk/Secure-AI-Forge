@@ -7,8 +7,8 @@ each opcode against the :mod:`ai_model.gpu.opcode_spec` contract, executes it on
 :class:`~ai_model.gpu.digital_gpu.DigitalGPU`, and records honest telemetry.
 
 Honesty enforcement: a node whose spec sets ``is_hardware_execution=True`` is
-refused unless a real hardware backend is wired in — on this CPU host nothing
-claims hardware, so nothing is silently run as if it were.
+refused unless a real hardware backend is wired in — on this Digital GPU host
+nothing claims CUDA hardware, so nothing is silently run as if it were.
 
 FLOP derivation
 ---------------
@@ -453,7 +453,7 @@ class DigitalScheduler:
             if spec.is_hardware_execution:
                 raise GPUError(
                     f"{spec.key} is marked is_hardware_execution=True but no real "
-                    f"hardware backend is attached; refusing to run it on CPU.")
+                    f"hardware backend is attached; refusing to run it on the Digital GPU engine.")
             fn = self._dispatch.get(spec.name)
             if fn is None:
                 raise InvalidOpcodeError(

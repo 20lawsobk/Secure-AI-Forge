@@ -2,11 +2,11 @@
 
 The server runs every text-generation call (captions, hooks, CTAs, scripts,
 distribution copy) through ``CreativeModel.generate`` inside worker threads. On a
-CPU box each call is a single-stream (B=1) forward pass; when many requests
-arrive at once they each spin up their own B=1 forward and thrash the cores.
+Digital GPU node each call is a single-stream (B=1) forward pass; when many
+requests arrive at once they each spin up their own B=1 forward and thrash the engine.
 
 A batched forward is far cheaper per token than N separate ones (measured ~5.9×
-prefill throughput at B=32 on this box). This module coalesces concurrent
+prefill throughput at B=32 on this Digital GPU node). This module coalesces concurrent
 ``generate`` calls into ONE batched forward via
 ``CreativeModel.generate_batch_rows`` (left-padded + key_padding_mask, so each
 row's per-step logits match running it alone — exact text parity for B=1/greedy,

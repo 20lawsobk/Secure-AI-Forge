@@ -19,7 +19,7 @@ A defensive numpy path remains behind every engine call **only** as a safety net
 it increments a ``*.engine_fallback`` counter so its use is observable. In a
 correctly built system that counter stays at zero — the load test asserts it.
 
-``CPUBackend`` is kept as a backwards-compatible alias.
+``CPUBackend`` is kept as a backwards-compatible import alias for ``DigitalGPUBackend``.
 """
 from __future__ import annotations
 

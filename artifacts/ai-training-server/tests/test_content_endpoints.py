@@ -2,8 +2,8 @@
 Content endpoint tests — digital GPU integration.
 
 Verifies every content-generation route returns valid, non-empty output and
-that the HyperGPU accumulates ops across the run (proving the digital GPU
-stack — not torch/CPU aot_eager — executed the inference).
+that the HyperGPU accumulates ops across the run (proving the Digital GPU
+stack — not torch aot_eager — executed the inference).
 
 Run:
     uv run python -m pytest tests/test_content_endpoints.py -v
