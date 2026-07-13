@@ -288,6 +288,8 @@ class DistributionAgent:
         except Exception:
             pass
 
+        platform_key = req.platform.lower().replace(" ", "_")
+
         if not caption:
             # Append a platform CTA if the script doesn't already contain one —
             # ensures the caption always carries a CTA keyword for scoring and
@@ -298,8 +300,6 @@ class DistributionAgent:
             else:
                 plat_cta = _FALLBACK_CTAS.get(platform_key, "Follow for more content!")
                 caption = f"{req.script}\n\n{plat_cta}"
-
-        platform_key = req.platform.lower().replace(" ", "_")
         awareness = req.awareness or ""
 
         if awareness:

@@ -41,12 +41,22 @@ def merge_awareness(req: Any) -> str:
             _as_text(getattr(req, "instruction", None)),
             _as_text(getattr(req, "extra_context", None)),
         ) if s)
+        def _coerce_aw(v: Any) -> str:
+            """Normalize awareness to str regardless of whether the caller sent
+            a plain string or a structured ``{contextString, ...}`` dict."""
+            if isinstance(v, dict):
+                return (v.get("contextString", "") or "").strip()
+            return (v or "").strip() if v is not None else ""
+
         return "\n".join(p for p in (
             ri.awareness_from_direction(direction, getattr(req, "content_themes", None)),
-            (getattr(req, "awareness", "") or "").strip(),
+            _coerce_aw(getattr(req, "awareness", "")),
         ) if p)
     except Exception:
-        return (getattr(req, "awareness", "") or "").strip()
+        _aw_raw = getattr(req, "awareness", "")
+        if isinstance(_aw_raw, dict):
+            return (_aw_raw.get("contextString", "") or "").strip()
+        return (_aw_raw or "").strip()
 
 
 @dataclass

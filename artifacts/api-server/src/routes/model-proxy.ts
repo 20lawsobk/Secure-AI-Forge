@@ -115,6 +115,41 @@ function setCached(path: string, status: number, data: unknown): void {
 // proxying to the Python AI server. Always additive — never blocks generation.
 // A 3 s race guard prevents cold-cache RSS fetches from delaying responses.
 
+// ─── Body normalisation ─────────────────────────────────────────────────────
+// Renames mis-cased or aliased fields and injects missing required defaults
+// before forwarding to the Python AI server.  The Python schemas use strict
+// FastAPI validation (422 on any missing required field), so we fix things
+// here rather than in every caller / dashboard page.
+
+function _resolveUserId(body: Record<string, unknown>): string {
+  return (
+    (body["user_id"] as string | undefined)?.trim() ||
+    (body["userId"] as string | undefined)?.trim() ||
+    (body["artistProfileId"] as string | undefined)?.trim() ||
+    "default_user"
+  );
+}
+
+function normalizeBody(
+  req: Request,
+  renames: Array<[from: string, to: string]>,
+  defaults: Array<[key: string, value: unknown]>,
+): void {
+  const body = req.body as Record<string, unknown>;
+  for (const [from, to] of renames) {
+    if (body[from] !== undefined && (body[to] === undefined || body[to] === null || body[to] === "")) {
+      body[to] = body[from];
+    }
+    // always remove the aliased key so Python never sees both
+    if (from !== to) delete body[from];
+  }
+  for (const [key, value] of defaults) {
+    if (body[key] === undefined || body[key] === null || body[key] === "") {
+      body[key] = value;
+    }
+  }
+}
+
 async function enrichWithAwareness(
   req: Request,
   mode: ContentGenerationMode,
@@ -575,6 +610,16 @@ router.get("/platform/video/generate", async (req, res) => {
 });
 
 router.post("/platform/video/generate", async (req, res) => {
+  // Python: PlatformVideoRequest { user_id, topic, ... }
+  // Dashboard sends: { idea, ...} with no user_id
+  const b = req.body as Record<string, unknown>;
+  normalizeBody(req,
+    [["idea", "topic"]],  // rename idea → topic
+    [
+      ["user_id", _resolveUserId(b)],
+      ["topic",   (b["topic"] ?? b["idea"] ?? "") as string],
+    ],
+  );
   await enrichWithAwareness(req, "video_script");
   await proxyRequest(req, res, "/platform/video/generate");
 });
@@ -667,21 +712,61 @@ router.post("/training/start-from-storage", async (req, res) => {
 // ─── Platform API Routes — Main Music Platform Integration ───────────────────
 
 router.post("/platform/social/generate", async (req, res) => {
+  // Python: PlatformSocialRequest { user_id, topic, platform, ... }
+  const b = req.body as Record<string, unknown>;
+  normalizeBody(req,
+    [["userId", "user_id"]],
+    [
+      ["user_id", _resolveUserId(b)],
+      ["topic",   (b["topic"] ?? b["idea"] ?? b["content"] ?? "") as string],
+    ],
+  );
   await enrichWithAwareness(req, "social");
   await proxyRequest(req, res, "/platform/social/generate");
 });
 
 router.post("/platform/social/autopilot", async (req, res) => {
+  // Python: PlatformAutopilotRequest { user_id, ... }
+  // Dashboard sends userId (camelCase)
+  const b = req.body as Record<string, unknown>;
+  normalizeBody(req,
+    [["userId", "user_id"]],
+    [["user_id", _resolveUserId(b)]],
+  );
   await enrichWithAwareness(req, "social");
   await proxyRequest(req, res, "/platform/social/autopilot");
 });
 
 router.post("/platform/daw/generate", async (req, res) => {
+  // Python: PlatformDAWRequest { user_id, mode, topic, ... }
+  const b = req.body as Record<string, unknown>;
+  normalizeBody(req,
+    [["userId", "user_id"]],
+    [
+      ["user_id", _resolveUserId(b)],
+      ["mode",    "lyrics"],
+    ],
+  );
   await enrichWithAwareness(req, "songwriting");
   await proxyRequest(req, res, "/platform/daw/generate");
 });
 
 router.post("/platform/distribution/plan", async (req, res) => {
+  // Python: PlatformDistributionRequest { user_id, track_title, ... }
+  const b = req.body as Record<string, unknown>;
+  normalizeBody(req,
+    [
+      ["userId",     "user_id"],
+      ["title",      "track_title"],
+      ["track",      "track_title"],
+      ["trackTitle", "track_title"],
+      ["song",       "track_title"],
+    ],
+    [
+      ["user_id",     _resolveUserId(b)],
+      ["track_title", (b["track_title"] ?? b["trackTitle"] ?? b["title"] ?? b["track"] ?? b["song"] ?? "Untitled") as string],
+    ],
+  );
   await enrichWithAwareness(req, "distribution");
   await proxyRequest(req, res, "/platform/distribution/plan");
 });
@@ -697,20 +782,69 @@ router.post("/platform/model/reload", async (req, res) => {
 // ─── AI Ad System & Autopilot ────────────────────────────────────────────────
 
 router.post("/platform/ads/record", async (req, res) => {
+  // Python: AdRecordRequest { user_id, platform, ad_type, ... }
+  const b = req.body as Record<string, unknown>;
+  normalizeBody(req,
+    [["userId", "user_id"]],
+    [
+      ["user_id",  _resolveUserId(b)],
+      ["platform", "meta"],
+      ["ad_type",  "video"],
+    ],
+  );
   await proxyRequest(req, res, "/platform/ads/record");
 });
 
 router.post("/platform/ads/generate", async (req, res) => {
+  // Python: AdGenerateRequest { user_id, product, platform, goal, ... }
+  const b = req.body as Record<string, unknown>;
+  normalizeBody(req,
+    [
+      ["userId",     "user_id"],
+      ["name",       "product"],
+      ["artistName", "product"],
+      ["artist",     "product"],
+    ],
+    [
+      ["user_id",  _resolveUserId(b)],
+      ["product",  (b["product"] ?? b["name"] ?? b["artistName"] ?? b["artist"] ?? "Artist") as string],
+      ["platform", "meta"],
+      ["goal",     "streams"],
+    ],
+  );
   await enrichWithAwareness(req, "ad_copy");
   await proxyRequest(req, res, "/platform/ads/generate");
 });
 
 router.post("/platform/ads/autopilot", async (req, res) => {
+  // Python: AdAutopilotRequest { user_id, ... }
+  // Dashboard sends userId (camelCase)
+  const b = req.body as Record<string, unknown>;
+  normalizeBody(req,
+    [["userId", "user_id"]],
+    [["user_id", _resolveUserId(b)]],
+  );
   await enrichWithAwareness(req, "ad_copy");
   await proxyRequest(req, res, "/platform/ads/autopilot");
 });
 
 router.post("/platform/ads/audience", async (req, res) => {
+  // Python: AdAudienceRequest { user_id, product, platform, goal, ... }
+  const b = req.body as Record<string, unknown>;
+  normalizeBody(req,
+    [
+      ["userId",     "user_id"],
+      ["name",       "product"],
+      ["artistName", "product"],
+      ["artist",     "product"],
+    ],
+    [
+      ["user_id",  _resolveUserId(b)],
+      ["product",  (b["product"] ?? b["name"] ?? b["artistName"] ?? b["artist"] ?? "Artist") as string],
+      ["platform", "meta"],
+      ["goal",     "streams"],
+    ],
+  );
   await enrichWithAwareness(req, "advertising");
   await proxyRequest(req, res, "/platform/ads/audience");
 });
@@ -745,6 +879,20 @@ router.post("/audio/analyze", async (req, res) => {
   await proxyRequest(req, res, "/api/audio/analyze");
 });
 
+// ─── RTA / Concurrency / Awareness stats ────────────────────────────────────
+
+router.get("/rta/status", async (req, res) => {
+  await proxyRequest(req, res, "/api/rta/status");
+});
+
+router.get("/concurrency/stats", async (req, res) => {
+  await proxyRequest(req, res, "/api/concurrency/stats");
+});
+
+router.get("/awareness/quality/status", async (req, res) => {
+  await proxyRequest(req, res, "/api/awareness/quality/status");
+});
+
 // ─── Watchdog ──────────────────────────────────────────────────────────────
 
 router.get("/watchdog/status", async (req, res) => {
@@ -768,6 +916,12 @@ router.post("/generate/content", async (req, res) => {
 });
 
 router.post("/generate/text", async (req, res) => {
+  // Python: ApiGenerateTextRequest { mode, ... } — mode defaults to "content"
+  // but FastAPI 422s if the field is explicitly absent from callers that omit it.
+  normalizeBody(req,
+    [],
+    [["mode", "content"]],
+  );
   await enrichWithAwareness(req, "content");
   await proxyRequest(req, res, "/api/generate/text");
 });
@@ -838,6 +992,20 @@ router.post("/campaigns/:id/schedule", async (req, res) => {
 // ─── Analysis ──────────────────────────────────────────────────────────────
 
 router.post("/analyze", async (req, res) => {
+  // Python: MaxcoreAnalyzeRequest { modality, payload, ... }
+  // Both fields have defaults but FastAPI still 422s if they're explicitly null.
+  const b = req.body as Record<string, unknown>;
+  normalizeBody(req,
+    [
+      ["text",    "payload"],
+      ["content", "payload"],
+      ["input",   "payload"],
+    ],
+    [
+      ["modality", "text"],
+      ["payload",  (b["payload"] ?? b["text"] ?? b["content"] ?? b["input"] ?? "") as string],
+    ],
+  );
   await enrichWithAwareness(req, "content");
   await proxyRequest(req, res, "/api/analyze");
 });
@@ -847,6 +1015,12 @@ router.post("/analyze/sentiment", async (req, res) => {
 });
 
 router.post("/analyze/audio", async (req, res) => {
+  // Python: ApiAnalyzeAudioRequest { audio_url }
+  // Dashboard sends { url } instead.
+  normalizeBody(req,
+    [["url", "audio_url"]],
+    [],
+  );
   await proxyRequest(req, res, "/api/analyze/audio");
 });
 

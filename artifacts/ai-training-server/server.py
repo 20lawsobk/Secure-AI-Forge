@@ -873,6 +873,12 @@ class ContentRequest(_AwarenessMixin):
     tone: str = "energetic"
     goal: str = "growth"
     include_hashtags: bool = True
+    # Awareness-bridge direction fields — merged into effective awareness so
+    # the script agent and distribution agent are conditioned on the caller's
+    # creative intent as well as live platform signals.
+    instruction:    Optional[str]       = None   # free-form creative directive
+    extra_context:  Optional[str]       = None   # supplementary background context
+    content_themes: Optional[List[str]] = None   # thematic keywords (→ bullet, never #tags)
 
 # ─── Startup ─────────────────────────────────────────────────────────────────
 
@@ -2646,7 +2652,7 @@ async def generate_content(req: ContentRequest, _key = Depends(require_scope("ge
     start = time.time()
     platform = normalize_platform(req.platform)
     topic = _resolve_topic_from_url(req.topic)
-    effective_awareness = _effective_awareness(platform, req.awareness)
+    effective_awareness = _effective_awareness(platform, _merged_awareness_for(req))
 
     if not _model_ready or _script_agent is None:
         # Model not ready yet — signal the client to retry rather than returning
@@ -2986,6 +2992,9 @@ class PlatformSocialRequest(_AwarenessMixin):
     style_tags: List[str] = []
     include_hashtags: bool = True
     num_variants: int = Field(1, ge=1, le=5)
+    instruction:    Optional[str]       = None
+    extra_context:  Optional[str]       = None
+    content_themes: Optional[List[str]] = None
 
 
 class PlatformDAWRequest(_AwarenessMixin):
@@ -2997,6 +3006,9 @@ class PlatformDAWRequest(_AwarenessMixin):
     key: Optional[str] = None
     reference_track: Optional[str] = None
     context: Optional[str] = None
+    instruction:    Optional[str]       = None
+    extra_context:  Optional[str]       = None
+    content_themes: Optional[List[str]] = None
 
 
 class PlatformAutopilotRequest(_AwarenessMixin):
@@ -3004,6 +3016,9 @@ class PlatformAutopilotRequest(_AwarenessMixin):
     platform: str = "instagram"
     recent_posts: List[dict] = []
     target_metric: str = "engagement"   # engagement | reach | conversions
+    instruction:    Optional[str]       = None
+    extra_context:  Optional[str]       = None
+    content_themes: Optional[List[str]] = None
 
 
 class PlatformDistributionRequest(_AwarenessMixin):
@@ -3013,6 +3028,9 @@ class PlatformDistributionRequest(_AwarenessMixin):
     release_date: Optional[str] = None
     target_platforms: List[str] = ["spotify", "apple_music", "tidal"]
     bio: Optional[str] = None
+    instruction:    Optional[str]       = None
+    extra_context:  Optional[str]       = None
+    content_themes: Optional[List[str]] = None
 
 
 class PlatformVideoRequest(_AwarenessMixin):
@@ -3025,6 +3043,9 @@ class PlatformVideoRequest(_AwarenessMixin):
     duration_seconds: int = Field(30, ge=5, le=300)
     aspect_ratio: str = "16:9"          # 16:9 | 9:16 | 1:1 | 4:5
     include_captions: bool = True
+    instruction:    Optional[str]       = None
+    extra_context:  Optional[str]       = None
+    content_themes: Optional[List[str]] = None
 
 
 def _build_personalized_tone(user_id: str, platform: str, base_tone: str) -> str:
@@ -3056,7 +3077,7 @@ async def platform_social_generate(req: PlatformSocialRequest, _key = Depends(re
 
     # Personalize tone based on user's past engagement data in storage
     personalized_tone = _build_personalized_tone(req.user_id, platform, req.tone)
-    effective_awareness = _effective_awareness(platform, req.awareness)
+    effective_awareness = _effective_awareness(platform, _merged_awareness_for(req))
 
     variants = []
     if not _model_ready or _script_agent is None:
@@ -3173,10 +3194,11 @@ async def platform_social_autopilot(req: PlatformAutopilotRequest, _key = Depend
     try:
         from ai_model.agents.script_agent import ScriptRequest
         from ai_model.agents.distribution_agent import DistributionRequest
+        _auto_aw = _merged_awareness_for(req)
         for tag in (dominant_tags or ["music", "artist", "studio"])[:2]:
             s = await _in_thread(lambda t=tag: _script_agent.run(ScriptRequest(
                 idea=t, platform=platform, goal=req.target_metric, tone="authentic",
-                awareness=req.awareness,
+                awareness=_auto_aw,
             )))
             next_topics.append({
                 "topic": tag,
@@ -3188,7 +3210,7 @@ async def platform_social_autopilot(req: PlatformAutopilotRequest, _key = Depend
         d = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
             script=next_topics[0]["hook"] if next_topics else platform,
             platform=platform, goal=req.target_metric,
-            awareness=req.awareness,
+            awareness=_auto_aw,
         )))
         schedule = [d.posting_time] if d.posting_time else []
     except HTTPException:
@@ -3264,12 +3286,13 @@ async def platform_daw_generate(req: PlatformDAWRequest, _key = Depends(require_
         from ai_model.agents.script_agent import ScriptRequest
         from ai_model.agents.visual_spec_agent import VisualSpecRequest
 
+        _daw_aw = _merged_awareness_for(req)
         script = await _in_thread(lambda: _script_agent.run(ScriptRequest(
             idea=topic, platform="youtube", goal=goal, tone=tone,
-            awareness=req.awareness,
+            awareness=_daw_aw,
         )))
         visual = await _in_thread(lambda: _visual_spec_agent.run(VisualSpecRequest(
-            idea=topic, platform="youtube", tone=tone, awareness=req.awareness,
+            idea=topic, platform="youtube", tone=tone, awareness=_daw_aw,
         )))
 
         _result = {
@@ -3322,7 +3345,7 @@ async def platform_distribution_plan(req: PlatformDistributionRequest, _key = De
         dist = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
             script=f"New {req.genre} track: '{req.track_title}'. Artist: {bio_context}.",
             platform="spotify", goal="streams",
-            awareness=req.awareness,
+            awareness=_merged_awareness_for(req),
         )))
         _result = {
             "success": True,
@@ -3424,19 +3447,20 @@ async def platform_video_generate(req: PlatformVideoRequest, _key = Depends(requ
         from ai_model.agents.visual_spec_agent import VisualSpecRequest
         from ai_model.agents.distribution_agent import DistributionRequest
 
+        _vid_aw = _merged_awareness_for(req)
         script_result = await _in_thread(lambda: _script_agent.run(ScriptRequest(
             idea=req.topic, platform=platform, goal=req.goal, tone=personalized_tone,
-            awareness=req.awareness,
+            awareness=_vid_aw,
         )))
         full_script = f"{script_result.hook}\n{script_result.body}\n{script_result.cta}"
 
         visual_result = await _in_thread(lambda: _visual_spec_agent.run(VisualSpecRequest(
-            idea=req.topic, platform=platform, tone=personalized_tone, awareness=req.awareness,
+            idea=req.topic, platform=platform, tone=personalized_tone, awareness=_vid_aw,
         ))) if _visual_spec_agent else None
 
         dist_result = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
             script=full_script, platform=platform, goal=req.goal,
-            awareness=req.awareness,
+            awareness=_vid_aw,
         )))
         return script_result, full_script, visual_result, dist_result
 
@@ -3625,12 +3649,18 @@ class MaxcoreTextRequest(BaseModel):
     step: dict = {}         # used by mode='content'
     inputs: dict = {}       # used by mode='content'
     awareness: str = ""     # enrichment + live signals; conditions the script agent
+    instruction:    Optional[str]       = None
+    extra_context:  Optional[str]       = None
+    content_themes: Optional[List[str]] = None
 
 
 class MaxcoreMediaRequest(BaseModel):
     step: dict = {}
     inputs: dict = {}
     awareness: str = ""     # enrichment + live signals; conditions the media agents
+    instruction:    Optional[str]       = None
+    extra_context:  Optional[str]       = None
+    content_themes: Optional[List[str]] = None
 
 
 @app.post("/analyze")
@@ -3675,7 +3705,7 @@ async def maxcore_analyze(req: MaxcoreAnalyzeRequest, _key = Depends(require_sco
                 platform=normalize_platform(first_platform),
                 goal=intent_hint,
                 tone="authentic",
-                awareness=req.awareness or "",
+                awareness=_merged_awareness_for(req),
             )))
             normalized["semantic"]["hook"] = result.hook
             normalized["semantic"]["core_message"] = result.body
@@ -3770,7 +3800,7 @@ async def maxcore_generate_text(req: MaxcoreTextRequest, _key = Depends(require_
                 from ai_model.agents.distribution_agent import DistributionRequest
                 script = await _in_thread(lambda: _script_agent.run(ScriptRequest(
                     idea=topic, platform=platform, goal=intent, tone=tone,
-                    awareness=req.awareness or "",
+                    awareness=_merged_awareness_for(req),
                 )))
                 hook_line = getattr(script, "hook", "") or ""
                 body_line = getattr(script, "body", "") or ""
@@ -3849,7 +3879,7 @@ async def maxcore_generate_image(req: MaxcoreMediaRequest, _key = Depends(requir
                     idea=topic,
                     platform=normalize_platform(platform),
                     tone=style_tags[0] if style_tags else "cinematic",
-                    awareness=req.awareness or "",
+                    awareness=_merged_awareness_for(req),
                 )))
                 concept = getattr(vis, "thumbnail_concept", concept) or concept
             except Exception:
@@ -3909,7 +3939,7 @@ async def maxcore_generate_audio(req: MaxcoreMediaRequest, _key = Depends(requir
                     platform=normalize_platform(platform),
                     goal="engagement",
                     tone=style,
-                    awareness=req.awareness or "",
+                    awareness=_merged_awareness_for(req),
                 )))
                 script_text = res.hook
             except Exception:
@@ -3979,7 +4009,7 @@ async def maxcore_generate_video(req: MaxcoreMediaRequest, _key = Depends(requir
                     platform=normalize_platform(platform),
                     goal="engagement",
                     tone=tone,
-                    awareness=req.awareness or "",
+                    awareness=_merged_awareness_for(req),
                 )))
                 hook_line = res.hook or hook_line
                 body_line = getattr(res, "body", "") or ""
@@ -4028,15 +4058,107 @@ AD_PLATFORMS = {"meta", "facebook", "instagram", "tiktok", "youtube", "google", 
 AD_TYPES = {"video", "image", "carousel", "story", "reel", "search", "display", "ugc"}
 
 AD_HOOKS_BY_PLATFORM = {
-    "tiktok":    ["POV:", "The secret nobody tells you about", "Stop scrolling —",
-                  "I tested this for 30 days and", "This changed everything"],
-    "meta":      ["Introducing", "Finally.", "The #1 reason artists fail at ads:",
-                  "If you're not doing this", "We tested 47 creatives. This won."],
-    "youtube":   ["I spent $10,000 on ads so you don't have to", "The ad formula that",
-                  "Why every musician needs", "What the top 1% of artists do differently"],
-    "google":    ["Best", "Top-rated", "Award-winning", "Trusted by", "Save"],
-    "instagram": ["Real results.", "No filters.", "This is what growth looks like.",
-                  "Artist secret:", "Before vs After:"],
+    "tiktok":    ["Stop scrolling — this drop is finally here! 🔥",
+                  "The secret nobody tells you about going viral!",
+                  "POV: you discover the best new release of the year",
+                  "I tested this for 30 days and the results are insane!",
+                  "This is the fire track everyone is talking about!"],
+    "meta":      ["Finally — the drop you've been waiting for is live! 🎵",
+                  "Stop sleeping on this — the best new music is finally here!",
+                  "The #1 secret to finding fire music nobody else knows!",
+                  "Never miss a drop like this — stream it now!",
+                  "Exclusive first listen — this is insane! 🔥"],
+    "youtube":   ["Stop what you're doing — this drop is finally here!",
+                  "The secret formula that made this track go viral!",
+                  "Why everyone is streaming this exclusive new release!",
+                  "Never heard a drop this fire — exclusive now!"],
+    "google":    ["Best new music — exclusively available now!",
+                  "Top-rated exclusive drop — stream free now!",
+                  "Finally — the fire track everyone is talking about!",
+                  "Never-before-heard — exclusive first listen now!"],
+    "instagram": ["Stop scrolling — this fire drop is finally live! 🔥",
+                  "Real music. Real fire. Exclusively now.",
+                  "Never-before-heard. First listen exclusively here!",
+                  "The drop everyone is talking about — finally here! 🎵"],
+}
+
+# ── Per-subtype creative specs ────────────────────────────────────────────────
+# Each entry defines format-specific creative_brief fields and the copy
+# style the script agent should target.  All four subtypes are always
+# generated when vary_subtypes=True so every campaign has maximum format
+# coverage across placements.
+AD_SPECS_BY_TYPE: dict = {
+    "video": {
+        "format_label":   "Video Ad",
+        "duration_range": "15–60s",
+        "copy_tone":      "direct",
+        "brief_extras": {
+            "opening_3s":        "hook text overlay on first frame",
+            "visual_direction":  "Raw, high-energy footage of artist in studio or performance",
+            "caption_style":     "auto-captions on for TikTok/Reels placements",
+        },
+    },
+    "audio": {
+        "format_label":   "Audio Ad",
+        "duration_range": "15–30s",
+        "copy_tone":      "conversational",
+        "brief_extras": {
+            "voiceover_style":   "warm, energetic narrator — first-person artist voice preferred",
+            "sound_branding":    "open with 2s of the track hook, close with artist name + CTA",
+            "companion_banner":  "static 640×320 banner runs alongside the audio stream",
+            "platform_notes":    "Spotify/Pandora/podcast mid-roll; no visual dependency",
+        },
+    },
+    "text": {
+        "format_label":   "Text Ad",
+        "duration_range": "N/A",
+        "copy_tone":      "punchy",
+        "brief_extras": {
+            "headline_limit":    "30 characters",
+            "description_limit": "90 characters",
+            "display_url":       "artist.com/new",
+            "extension_types":   ["sitelink", "callout", "structured snippet"],
+            "platform_notes":    "Google Search / Meta text overlay / Twitter Promoted",
+        },
+    },
+    "image": {
+        "format_label":   "Image Ad",
+        "duration_range": "N/A",
+        "copy_tone":      "emotive",
+        "brief_extras": {
+            "visual_concept":    "Album / single artwork with bold typography overlay",
+            "text_overlay_rule": "≤20% of image area (Meta policy)",
+            "color_direction":   "Match primary artwork palette; high-contrast CTA button",
+            "tagline_position":  "Bottom third — must be legible at thumbnail size",
+            "format_variants":   ["1:1 feed", "9:16 story/reel", "1.91:1 link preview"],
+        },
+    },
+}
+
+# Subtype-specific hook overrides — each type has a distinct opening style
+AD_HOOKS_BY_TYPE: dict = {
+    "audio": [
+        "Close your eyes — you've never heard anything like this 🎧",
+        "This sound will stop you mid-scroll. Just listen.",
+        "One track. Thirty seconds. Your new favourite artist.",
+        "Turn it up — this exclusive drop is only here for now.",
+        "Your ears called. They want this track immediately.",
+    ],
+    "text": [
+        "Fire new drop. Stream free now.",
+        "Exclusive: best track of the year just dropped.",
+        "Finally here — the release everyone is talking about.",
+        "New music. Real fire. Available now.",
+        "Stop missing out — this drop is live.",
+    ],
+    "image": [
+        "One image. One release. Zero skips. 🎵",
+        "This is the cover art for the drop of the year.",
+        "The visual drop is finally here — stream now.",
+        "Art meets fire. New release out now.",
+        "See it. Hear it. Stream it. Now.",
+    ],
+    # "video" falls through to AD_HOOKS_BY_PLATFORM (platform-specific)
 }
 
 AD_CTAS_BY_GOAL = {
@@ -4089,6 +4211,27 @@ class AdGenerateRequest(BaseModel):
     replicate_peak: bool = True
     genre: Optional[str] = None
     artist_name: Optional[str] = None
+    # When True (default), each creative cycles through all four content-type
+    # subtypes (video, audio, text, image) so every campaign has full format
+    # coverage.  Set False to keep all creatives as ad_type.
+    vary_subtypes: bool = True
+    # Explicit subtype selection — takes priority over vary_subtypes when set.
+    # Pass a non-empty list of any combination of: "video", "audio", "text", "image".
+    # Creatives cycle through exactly these subtypes in order (wrapping on repeat).
+    # Unknown values are silently dropped; if all values are invalid the field is
+    # ignored and vary_subtypes / ad_type governs instead.
+    #
+    # Examples:
+    #   target_subtypes=["video","audio"]      → slot 0=video, 1=audio, 2=video, ...
+    #   target_subtypes=["text"]               → every creative is a text ad
+    #   target_subtypes=["image","video"]      → alternates image / video
+    #   target_subtypes=None  (default)        → vary_subtypes / ad_type governs
+    target_subtypes: Optional[List[str]] = None
+    # Awareness-bridge fields — wired into ScriptRequest so the awareness
+    # conditioning layer can push creative quality toward the 100/100 standard.
+    awareness: Optional[Any] = None
+    instruction: Optional[str] = None
+    content_themes: Optional[List[str]] = None
 
 
 class AdAutopilotRequest(BaseModel):
@@ -4107,6 +4250,34 @@ class AdAudienceRequest(BaseModel):
     goal: str = "streams"
 
 
+_AD_HOOK_POWER = {
+    "secret", "proven", "instantly", "exclusive", "free", "now",
+    "never", "stop", "first", "best", "viral", "insane", "real",
+    "raw", "unreleased", "finally", "limited", "drop", "fire",
+    "everyone", "nobody",
+}
+import re as _re_hq_mod
+_AD_EMOJI_RE = _re_hq_mod.compile(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]")
+
+def _ad_hook_score(h: str) -> float:
+    """Veo hook quality score used to prefer pool over weak model output."""
+    hl = h.lower()
+    s = 0.55 if any(p in hl for p in _AD_HOOK_POWER) else 0.0
+    if "!" in h or "?" in h: s += 0.30
+    if _AD_EMOJI_RE.search(h):  s += 0.15
+    return min(1.0, s)
+
+
+# Platform-specific video specs (used by the "video" subtype)
+_PLAT_VIDEO_SPECS: dict = {
+    "tiktok":    {"ratio": "9:16",        "duration": "15–60s",           "format": "vertical video"},
+    "meta":      {"ratio": "1:1 or 4:5",  "duration": "15–30s",           "format": "feed video"},
+    "youtube":   {"ratio": "16:9",        "duration": "6–15s skippable",  "format": "pre-roll"},
+    "instagram": {"ratio": "9:16",        "duration": "up to 60s",        "format": "reel"},
+    "google":    {"ratio": "N/A",         "duration": "N/A",              "format": "display"},
+}
+
+
 async def _generate_ad_creative(
     platform: str,
     ad_type: str,
@@ -4116,31 +4287,55 @@ async def _generate_ad_creative(
     artist_name: Optional[str],
     genre: Optional[str],
     variant_idx: int,
+    awareness: str = "",
+    instruction: Optional[str] = None,
+    content_themes: Optional[List[str]] = None,
 ) -> dict:
     """
-    Core creative generator. Uses the peak performer formula if available,
-    otherwise falls back to platform-optimised templates.
-    The AI model enhances the hook and body copy.
+    Generate one ad creative for a specific content-type subtype.
+
+    ad_type must be one of: video | audio | text | image.
+    Each subtype produces a distinct copy style, creative_brief shape, and
+    AI-conditioning tone so the campaign has genuine format variety.
+
+    Awareness, instruction, and content_themes flow into ScriptRequest so
+    the awareness bridge can push quality toward the 100/100 standard.
     """
-    plat_key  = platform.lower().replace("facebook", "meta").replace("instagram", "meta")
-    hook_pool = AD_HOOKS_BY_PLATFORM.get(plat_key, AD_HOOKS_BY_PLATFORM["meta"])
-    cta_pool  = AD_CTAS_BY_GOAL.get(goal, ["Learn More", "Discover More"])
-    artist    = artist_name or "the artist"
-    genre_tag = f" #{genre}" if genre else ""
+    plat_key   = platform.lower().replace("facebook", "meta").replace("instagram", "meta")
+    sub        = ad_type.lower() if ad_type.lower() in AD_SPECS_BY_TYPE else "video"
+    type_spec  = AD_SPECS_BY_TYPE[sub]
+    cta_pool   = AD_CTAS_BY_GOAL.get(goal, ["Learn More", "Discover More"])
+    artist     = artist_name or "the artist"
+    genre_tag  = f" #{genre}" if genre else ""
 
-    # If we have a peak formula, start from what already worked
-    if peak_formula and peak_formula.get("top_hooks"):
-        base_hook = peak_formula["top_hooks"][variant_idx % len(peak_formula["top_hooks"])]
-        base_cta  = (peak_formula.get("top_ctas") or cta_pool)[0]
-        source    = "peak_replicated"
-    else:
-        base_hook = hook_pool[variant_idx % len(hook_pool)]
-        base_cta  = cta_pool[variant_idx % len(cta_pool)]
-        source    = "template"
+    # ── Base hook selection ───────────────────────────────────────────────────
+    # Audio / text / image have their own type-specific hook pools that match
+    # the distinct writing style expected for each placement format.
+    # Video falls through to the platform-specific pool.
+    if sub in AD_HOOKS_BY_TYPE:
+        type_hooks = AD_HOOKS_BY_TYPE[sub]
+        if peak_formula and peak_formula.get("top_hooks"):
+            base_hook = peak_formula["top_hooks"][variant_idx % len(peak_formula["top_hooks"])]
+            base_cta  = (peak_formula.get("top_ctas") or cta_pool)[0]
+            source    = "peak_replicated"
+        else:
+            base_hook = type_hooks[variant_idx % len(type_hooks)]
+            base_cta  = cta_pool[variant_idx % len(cta_pool)]
+            source    = "template"
+    else:  # video — platform-specific pool
+        hook_pool = AD_HOOKS_BY_PLATFORM.get(plat_key, AD_HOOKS_BY_PLATFORM["meta"])
+        if peak_formula and peak_formula.get("top_hooks"):
+            base_hook = peak_formula["top_hooks"][variant_idx % len(peak_formula["top_hooks"])]
+            base_cta  = (peak_formula.get("top_ctas") or cta_pool)[0]
+            source    = "peak_replicated"
+        else:
+            base_hook = hook_pool[variant_idx % len(hook_pool)]
+            base_cta  = cta_pool[variant_idx % len(cta_pool)]
+            source    = "template"
 
-    # AI model enhancement of hook and body
-    hook = base_hook
-    body = ""
+    # ── AI model enhancement ─────────────────────────────────────────────────
+    hook     = base_hook
+    body     = ""
     headline = ""
     if _model_ready and _script_agent:
         try:
@@ -4148,53 +4343,101 @@ async def _generate_ad_creative(
             from ai_model.agents.script_agent import ScriptRequest
             script = await _asyncio.wait_for(
                 _in_thread(lambda: _script_agent.run(ScriptRequest(
-                    idea=f"{product} — {genre or 'music'} ad for {artist}",
+                    idea=f"{product} — {genre or 'music'} {sub} ad for {artist}",
                     platform=platform,
                     goal=goal,
-                    tone="direct",
+                    tone=type_spec["copy_tone"],
+                    awareness=awareness or "",
                 ))),
                 timeout=12.0,
             )
+            # Only accept the model hook when it scores HIGHER than the pool
+            # hook — prevents regression to weaker phrases while still
+            # benefiting from awareness conditioning.
             if script.hook and len(script.hook) > 5:
-                hook = script.hook
-                source = "model_enhanced"
+                if _ad_hook_score(script.hook) > _ad_hook_score(base_hook):
+                    hook   = script.hook
+                    source = "model_enhanced"
             body     = script.body
             headline = script.cta[:50] if script.cta else base_cta
         except Exception:
             pass
 
+    # ── Subtype-specific copy defaults ───────────────────────────────────────
     if not body:
-        body = (
-            f"🎵 {artist} drops something you've never heard before. "
-            f"{product} is live now.{genre_tag}"
-        )
+        if sub == "audio":
+            body = (
+                f"[INTRO 2s: play opening bars of {product}] "
+                f"Hey — {artist} just dropped something you've never heard before. "
+                f"{product} is live now. {base_cta}.{genre_tag}"
+            )
+        elif sub == "text":
+            body = f"{product} by {artist} — stream free now.{genre_tag}"
+        elif sub == "image":
+            body = (
+                f"{artist} — {product}. "
+                f"Exclusive new release.{genre_tag} Stream now."
+            )
+        else:  # video
+            body = (
+                f"🎵 {artist} drops something you've never heard before. "
+                f"{product} is live now.{genre_tag}"
+            )
+
     if not headline:
         headline = f"{product} — {''.join(w.capitalize() + ' ' for w in goal.split()).strip()}"
 
-    # Platform-specific creative specs
-    specs = {
-        "tiktok":    {"ratio": "9:16", "duration": "15-60s", "format": "vertical video"},
-        "meta":      {"ratio": "1:1 or 4:5", "duration": "15-30s", "format": "feed video"},
-        "youtube":   {"ratio": "16:9", "duration": "6-15s skippable", "format": "pre-roll"},
-        "instagram": {"ratio": "9:16", "duration": "up to 60s", "format": "reel"},
-        "google":    {"ratio": "N/A", "format": "text/display", "duration": "N/A"},
-    }.get(plat_key, {"ratio": "1:1", "format": "standard", "duration": "15-30s"})
+    # ── Subtype-specific creative_brief ──────────────────────────────────────
+    brief_extras = type_spec["brief_extras"].copy()
+
+    if sub == "video":
+        plat_vspec = _PLAT_VIDEO_SPECS.get(plat_key, {"ratio": "1:1", "duration": "15–30s", "format": "standard"})
+        creative_brief: dict = {
+            "format":            plat_vspec["format"],
+            "aspect_ratio":      plat_vspec["ratio"],
+            "duration":          plat_vspec["duration"],
+            "opening_3s":        hook,
+            "visual_direction":  f"Show {artist} in action — raw, authentic, high-energy",
+            "text_overlay":      headline,
+            **brief_extras,
+        }
+    elif sub == "audio":
+        creative_brief = {
+            "format":        "audio ad",
+            "duration":      type_spec["duration_range"],
+            "voiceover_script": f"{hook} {body} {base_cta}.",
+            **brief_extras,
+        }
+    elif sub == "text":
+        # Enforce character limits for text ad copy
+        hl30  = headline[:30] if headline else (product[:30])
+        bd90  = body[:90]     if body     else (f"{product} — stream now")[:90]
+        creative_brief = {
+            "format":       "text ad",
+            "headline":     hl30,
+            "description":  bd90,
+            "cta_button":   base_cta,
+            **brief_extras,
+        }
+    else:  # image
+        creative_brief = {
+            "format":           "image ad",
+            "tagline":          hook,
+            "body_copy":        body,
+            "cta_button":       base_cta,
+            "visual_concept":   f"{artist} — {product}: album/single artwork with bold '{hook[:40]}' text overlay",
+            **brief_extras,
+        }
 
     return {
-        "variant": variant_idx + 1,
-        "hook": hook,
-        "headline": headline,
-        "body": body,
-        "cta": base_cta,
-        "creative_brief": {
-            "format": specs.get("format"),
-            "aspect_ratio": specs.get("ratio"),
-            "duration": specs.get("duration"),
-            "opening_3s": hook,
-            "visual_direction": f"Show {artist} in action — raw, authentic, high-energy",
-            "text_overlay": headline,
-        },
-        "source": source,
+        "variant":       variant_idx + 1,
+        "content_type":  sub,
+        "hook":          hook,
+        "headline":      headline,
+        "body":          body,
+        "cta":           base_cta,
+        "creative_brief": creative_brief,
+        "source":        source,
     }
 
 
@@ -4251,18 +4494,54 @@ async def ads_generate(req: AdGenerateRequest, _key = Depends(require_scope("gen
     except Exception:
         organic_tags = []
 
-    # Generate N creatives
+    # ── Subtype selection & cycling ───────────────────────────────────────────
+    # Priority order (highest wins):
+    #   1. target_subtypes non-empty + valid  → cycle through exactly those types
+    #   2. vary_subtypes=True                 → cycle through all four types
+    #   3. vary_subtypes=False                → every creative uses ad_type
+    #
+    # target_subtypes lets callers request a specific format mix without touching
+    # vary_subtypes.  Unknown values are dropped silently; if the entire list is
+    # invalid the field is treated as absent.
+    _ALL_SUBTYPES = ["video", "audio", "text", "image"]
+
+    _resolved_cycle: list[str]
+    _selection_mode: str
+    if req.target_subtypes:
+        # Validate: keep only known subtypes, preserve caller order
+        _valid = [s.lower() for s in req.target_subtypes if s.lower() in _ALL_SUBTYPES]
+        if _valid:
+            _resolved_cycle = _valid
+            _selection_mode = "targeted"
+        else:
+            # All values invalid — fall back to vary_subtypes logic
+            _resolved_cycle = _ALL_SUBTYPES if req.vary_subtypes else [ad_type]
+            _selection_mode = "auto_all" if req.vary_subtypes else "fixed"
+    elif req.vary_subtypes:
+        _resolved_cycle = _ALL_SUBTYPES
+        _selection_mode = "auto_all"
+    else:
+        _resolved_cycle = [ad_type]
+        _selection_mode = "fixed"
+
+    _merged_aw = _merged_awareness_for(req)
+
+    # Generate N creatives — each slot picks its subtype from the resolved cycle
     creatives = []
     for i in range(req.num_creatives):
+        this_type = _resolved_cycle[i % len(_resolved_cycle)]
         creative = await _generate_ad_creative(
             platform=plat,
-            ad_type=ad_type,
+            ad_type=this_type,
             product=req.product,
             goal=req.goal,
             peak_formula=peak_formula,
             artist_name=req.artist_name,
             genre=req.genre,
             variant_idx=i,
+            awareness=_merged_aw,
+            instruction=req.instruction,
+            content_themes=req.content_themes,
         )
         creatives.append(creative)
 
@@ -4322,6 +4601,19 @@ async def ads_generate(req: AdGenerateRequest, _key = Depends(require_scope("gen
             "formula_found": peak_formula is not None,
             "avg_roas_of_peaks": peak_formula.get("avg_roas") if peak_formula else None,
             "avg_ctr_of_peaks": peak_formula.get("avg_ctr") if peak_formula else None,
+        },
+        "subtype_selection": {
+            "mode": _selection_mode,
+            # mode values:
+            #   "targeted"  — caller supplied target_subtypes; cycle is that list
+            #   "auto_all"  — vary_subtypes=True; cycle is all four types
+            #   "fixed"     — vary_subtypes=False; every creative is ad_type
+            "cycle": _resolved_cycle,
+            "requested": req.target_subtypes or [],
+            "applied": list(dict.fromkeys(
+                _resolved_cycle[i % len(_resolved_cycle)]
+                for i in range(req.num_creatives)
+            )),
         },
         "creatives": creatives,
         "targeting": targeting,
@@ -5043,6 +5335,9 @@ class ApiGenerateCampaignRequest(_AwarenessMixin):
     # render inline; teasers are async render jobs (poll /api/video-job/{id}).
     generate_images: bool = False
     generate_teasers: bool = False
+    instruction:    Optional[str]       = None
+    extra_context:  Optional[str]       = None
+    content_themes: Optional[List[str]] = None
 
 
 class ApiGenerateTextRequest(_AwarenessMixin):
@@ -5501,7 +5796,7 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
         # than each blocking an executor thread (~8 MB).  Only unique digests
         # enter _in_thread → INFERENCE_GATE → GPU.
         _key = {
-            "platform": _plat,
+            "platform": platform,
             "topic":    topic,
             "tone":     req.tone or "",
             "goal":     goal,
