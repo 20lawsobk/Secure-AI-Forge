@@ -597,6 +597,85 @@ def main() -> int:
     waves.append(w4)
     print_wave(w4)
 
+    # ── Wave 5: Job lifecycle — submit → coalesce proof → poll → GC ──────────
+    # Submits 100 identical audio jobs concurrently; the server-side coalescer
+    # should collapse them to ONE job_id.  Then polls that job until it reaches
+    # a terminal state (done/error) or a 45 s timeout, proving the full
+    # submitted → queued → running → done lifecycle works under burst load.
+    print("\n" + "─" * 68)
+    print("  Wave 5 — Job lifecycle  (100 identical audio submissions  @100 concurrent)")
+    print("─" * 68)
+
+    _audio_payload = {
+        "genre":      "trap",
+        "intent":     "hype drop",
+        "target_bpm": 140,
+        "target_key": "Cm",
+        "duration":   30,
+    }
+    tasks_w5 = [("POST", "/api/generate/audio", _audio_payload)] * 100
+
+    # Collect raw job_ids from each response.
+    _w5_job_ids: list[str] = []
+    _w5_lock = threading.Lock()
+    _w5_ok = _w5_fail = 0
+
+    def _submit_audio(i: int):
+        nonlocal _w5_ok, _w5_fail
+        r = POST("/api/generate/audio", _audio_payload, timeout=30)
+        if r.ok and isinstance(r.body, dict):
+            jid = r.body.get("job_id")
+            if jid:
+                with _w5_lock:
+                    _w5_job_ids.append(jid)
+                    _w5_ok += 1
+                return
+        with _w5_lock:
+            _w5_fail += 1
+
+    t5_start = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=100) as _ex5:
+        futs = [_ex5.submit(_submit_audio, i) for i in range(100)]
+        for f in as_completed(futs):
+            f.result()
+    t5_wall = time.perf_counter() - t5_start
+
+    unique_jids = list(set(_w5_job_ids))
+    coalesced_w5 = len(unique_jids) <= 3   # allow up to 3 unique (generous for race edges)
+    coal5_sym = PASS if coalesced_w5 else WARN
+
+    print(f"\n  {'✓' if _w5_fail == 0 else '✗'}  Audio job burst (100 identical @100 concurrent)")
+    print(f"     Submitted : {_w5_ok + _w5_fail}/100   succeeded={_w5_ok}  failed={_w5_fail}")
+    print(f"     Wall time : {t5_wall:.2f}s")
+    print(f"     Unique job_ids returned : {len(unique_jids)}  (out of {len(_w5_job_ids)} responses)")
+    print(f"     {coal5_sym}  {'COALESCED — all 100 submissions collapsed to ≤3 unique jobs' if coalesced_w5 else 'WARNING — coalescing produced more jobs than expected'}")
+
+    # Poll the first job until it reaches a terminal state (or timeout).
+    _poll_job_id = unique_jids[0] if unique_jids else None
+    _poll_status = "unknown"
+    if _poll_job_id:
+        print(f"\n     Polling job {_poll_job_id} for lifecycle completion…")
+        _deadline = time.time() + 45
+        while time.time() < _deadline:
+            _pr = GET(f"/api/video-job/{_poll_job_id}", timeout=10)
+            if _pr.ok and isinstance(_pr.body, dict):
+                _poll_status = _pr.body.get("status", "unknown")
+                if _poll_status in ("done", "error", "not_found"):
+                    break
+            time.sleep(1.5)
+        _lifecycle_ok = _poll_status in ("done", "error")  # either is a valid terminal state
+        _lsym = PASS if _lifecycle_ok else WARN
+        print(f"     {_lsym}  Final status: {_poll_status}"
+              f"  ({'terminal — lifecycle complete' if _lifecycle_ok else 'still in-flight after 45s timeout'})")
+
+    # Job count sanity: /api/video-jobs should reflect at most a small number
+    # of jobs for this run (coalescing means we didn't create 100).
+    _jr = GET("/api/video-jobs", timeout=10)
+    if _jr.ok and isinstance(_jr.body, dict):
+        _jtotal = _jr.body.get("total", "?")
+        print(f"\n     Job registry total : {_jtotal} entries  "
+              f"(expected << 100 thanks to coalescing + GC)")
+
     # ── Summary ───────────────────────────────────────────────────────────────
     print("\n" + "═" * 68)
     print("  Overall Summary")

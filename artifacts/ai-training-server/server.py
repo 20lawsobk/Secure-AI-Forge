@@ -4803,6 +4803,69 @@ _JOBS_DIR = "/tmp/maxbooster_jobs"
 os.makedirs(_JOBS_DIR, exist_ok=True)
 _api_jobs_lock = threading.Lock()   # kept for legacy; file ops are the real store
 
+# ── File-based job lifecycle: coalescing + TTL eviction ──────────────────────
+# At 90M concurrent submissions, identical requests must collapse to one job
+# rather than flooding _JOBS_DIR with 90M JSON files.  Completed jobs are
+# evicted after _JOB_TTL_S seconds by a background GC thread so /tmp stays
+# bounded regardless of burst volume.
+
+_JOB_TTL_S        = 600   # evict done/error/cancelled jobs after 10 min
+_active_jobs: dict[str, str] = {}   # digest → job_id (in-flight only)
+_active_jobs_lock = threading.Lock()
+
+
+def _job_digest(fields: dict) -> str:
+    """Deterministic dedup key for identical concurrent job submissions."""
+    payload = json.dumps(fields, sort_keys=True, default=str).encode()
+    return hashlib.blake2b(payload, digest_size=16).hexdigest()
+
+
+def _job_gc() -> int:
+    """Delete expired completed/errored job files; purge stale _active_jobs.
+    Returns number of files evicted.  Never raises."""
+    threshold = time.time() - _JOB_TTL_S
+    evicted   = 0
+    try:
+        for fname in os.listdir(_JOBS_DIR):
+            if not fname.endswith(".json") or fname.endswith(".tmp"):
+                continue
+            fpath = os.path.join(_JOBS_DIR, fname)
+            try:
+                if os.path.getmtime(fpath) >= threshold:
+                    continue
+                with open(fpath) as _f:
+                    status = json.load(_f).get("status", "")
+                if status in ("done", "error", "cancelled"):
+                    os.unlink(fpath)
+                    evicted += 1
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # Purge _active_jobs entries whose file is gone or whose status is terminal.
+    stale: list[str] = []
+    with _active_jobs_lock:
+        for digest, jid in list(_active_jobs.items()):
+            j = _job_read(jid)
+            if j is None or j.get("status") in ("done", "error", "cancelled"):
+                stale.append(digest)
+        for k in stale:
+            _active_jobs.pop(k, None)
+    return evicted
+
+
+def _job_gc_loop() -> None:
+    while True:
+        time.sleep(60)
+        try:
+            _job_gc()
+        except Exception:
+            pass
+
+
+# Start GC daemon immediately — runs for the lifetime of the process.
+threading.Thread(target=_job_gc_loop, daemon=True, name="job-file-gc").start()
+
 
 def _job_path(job_id: str) -> str:
     return os.path.join(_JOBS_DIR, f"{job_id}.json")
@@ -6783,7 +6846,31 @@ def _arc_spectral_clean_file(audio_path) -> None:
 @app.post("/api/generate/audio")
 async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_scope("generate"))):
     """Async audio generation — style-conditioned via AI model for concept, BPM/key, creative direction."""
+    # Coalesce: identical concurrent submissions (same genre/intent/bpm/key/duration)
+    # share one job rather than spawning 90M separate audio renders.
+    _adigest = _job_digest({
+        "type":       "audio",
+        "genre":      req.genre or "",
+        "intent":     req.intent or "",
+        "target_bpm": req.target_bpm,
+        "target_key": req.target_key or "",
+        "duration":   req.duration,
+    })
+    with _active_jobs_lock:
+        _existing_id = _active_jobs.get(_adigest)
+    if _existing_id:
+        _ejob = _job_read(_existing_id)
+        if _ejob and _ejob.get("status") in ("pending", "running"):
+            return {
+                "job_id":   _existing_id,
+                "status":   "coalesced",
+                "poll_url": f"/api/video-job/{_existing_id}",
+                "duration": req.duration,
+            }
+
     job_id = str(uuid.uuid4())
+    with _active_jobs_lock:
+        _active_jobs[_adigest] = job_id
     _job_write(job_id, {
         "status":     "pending",
         "created_at": datetime.utcnow().isoformat() + "Z",
@@ -7184,6 +7271,27 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
     if not idea:
         raise HTTPException(status_code=422, detail="'idea' is required")
 
+    # Coalesce: identical concurrent video AI gen requests (same idea/platform/
+    # goal/tone/genre) share one plan+render rather than running N copies.
+    _vdigest = _job_digest({
+        "type":     "video_ai_gen",
+        "idea":     idea,
+        "platform": platform,
+        "goal":     goal,
+        "tone":     tone,
+        "genre":    genre,
+    })
+    with _active_jobs_lock:
+        _vexisting = _active_jobs.get(_vdigest)
+    if _vexisting:
+        _vj = _job_read(_vexisting)
+        if _vj and _vj.get("status") in ("pending", "running"):
+            return {
+                "job_id":   _vexisting,
+                "status":   "coalesced",
+                "poll_url": f"/api/video-job/{_vexisting}",
+            }
+
     # ── Request intelligence: analyse intent & cinematic strategy up front ─
     from ai_model import request_intelligence as ri
     brief = ri.build_brief(
@@ -7229,6 +7337,8 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
     scenes_data = [{"type": s.scene_type, "text": s.text} for s in production.scenes]
 
     job_id = str(uuid.uuid4())
+    with _active_jobs_lock:
+        _active_jobs[_vdigest] = job_id
     _job_write(job_id, {
         "status":          "pending",
         "created_at":      datetime.utcnow().isoformat() + "Z",
