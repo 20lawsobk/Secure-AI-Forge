@@ -123,15 +123,19 @@ class GenerateCoalescer:
         self.max_batch        = max(1, _env_int("AI_BATCH_MAX", max_batch or _default_max_batch()))
         self.window_s         = max(0.0, _env_float("AI_BATCH_WINDOW_MS", window_ms) / 1000.0)
         self.submit_timeout_s = max(1.0, _env_float("AI_BATCH_TIMEOUT_S", submit_timeout_s))
+        # Staging-queue depth: how many ready batches the collector may buffer
+        # ahead of the executor.  AI_PIPE_DEPTH=4 lets the collector stay 3
+        # batches ahead so the forward-pass thread is never starved during
+        # 90M-scale unique-request burst.  Raise for deeper pipelines on boxes
+        # with enough RAM; lower to 1 to revert to the original serial design.
+        self.pipe_depth       = max(1, _env_int("AI_PIPE_DEPTH", 4))
 
         # Pending queue (unbounded — callers add, collector drains).
         self._cv      = threading.Condition()
         self._pending: list[_Pending] = []
 
         # Staging queue between collector and executor (bounded = backpressure).
-        # Depth=4 lets the collector stay 3 batches ahead of the executor so
-        # the forward-pass thread is never starved during 90M-scale unique burst.
-        self._ready_q: queue.Queue[list[_Pending]] = queue.Queue(maxsize=4)
+        self._ready_q: queue.Queue[list[_Pending]] = queue.Queue(maxsize=self.pipe_depth)
 
         self._started = False
         self._collector = threading.Thread(
@@ -215,7 +219,7 @@ class GenerateCoalescer:
 
         Runs independently of the executor — while the forward pass is running
         this thread is already collecting the next batch.  The ``_ready_q``
-        backpressure (maxsize=2) prevents runaway buffering."""
+        backpressure (maxsize=pipe_depth) prevents runaway buffering."""
         while True:
             try:
                 batch = self._collect_batch()

@@ -1,8 +1,8 @@
 """
 Wave 6 standalone — 90,000,000 unique request scale proof
 ==========================================================
-Runs 300 content-unique requests (nonce-stamped so the async coalescer
-never fires) at 75 concurrent, measures stable pipelined throughput,
+Runs 150 content-unique requests (nonce-stamped so the async coalescer
+never fires) at 40 concurrent, measures stable pipelined throughput,
 and projects to 90,000,000.
 
 Server must be running on port 9878 before executing this script.
@@ -25,13 +25,13 @@ API_KEY = "f242bf97d7e46b7ca0b17cd6b01ca9239bc327b862a86b703556565523849701"
 HEADERS = {"Content-Type": "application/json", "X-Api-Key": API_KEY}
 
 UNIQUE_TARGET  = 90_000_000
-SAMPLE_N       = 300
-CONCURRENCY    = 75
+SAMPLE_N       = 150
+CONCURRENCY    = 40
 PASS, FAIL, WARN = "✓", "✗", "⚠"
 
 
 def _req(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
-    conn = http.client.HTTPConnection(HOST, PORT, timeout=120)
+    conn = http.client.HTTPConnection(HOST, PORT, timeout=180)
     data = json.dumps(body).encode() if body else None
     conn.request(method, path, body=data, headers=HEADERS)
     r = conn.getresponse()

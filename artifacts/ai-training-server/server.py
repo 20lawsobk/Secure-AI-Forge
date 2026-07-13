@@ -605,7 +605,8 @@ def _init_ai_model():
                 print(
                     "[AI Model] Dynamic batching ENABLED (pipelined, pocket GPU per batch) "
                     f"max_batch={_gen_coalescer.max_batch}  "
-                    f"window={_gen_coalescer.window_s * 1000:.0f}ms"
+                    f"window={_gen_coalescer.window_s * 1000:.0f}ms  "
+                    f"pipe_depth={_gen_coalescer.pipe_depth}"
                 )
             else:
                 print("[AI Model] Dynamic batching disabled (AI_DYNAMIC_BATCHING=0)")
@@ -905,6 +906,7 @@ async def on_startup():
     os.environ["AI_BATCH_MAX"]        = "64"   # always max — 90M unique floods fill every slot
     os.environ["AI_BATCH_WINDOW_MS"]  = "2"    # 2 ms collection window
     os.environ["AI_BATCH_TIMEOUT_S"]  = "600"  # 10 min — deep queues must not timeout
+    os.environ["AI_PIPE_DEPTH"]       = "4"    # collector stays 3 batches ahead of executor
 
     if not DATABASE_URL:
         print("[Server] WARNING: DATABASE_URL not set — running without DB")

@@ -485,6 +485,8 @@ def extrapolate(waves: list[WaveResult]) -> None:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> int:
+    skip_w6 = "--skip-w6" in sys.argv
+
     print("\n" + "═" * 68)
     print("  Smoke Load Test — Digital GPU (HyperGPU) — 90M Scale")
     print("═" * 68)
@@ -683,74 +685,77 @@ def main() -> int:
               f"(expected << 100 thanks to coalescing + GC)")
 
     # ── Wave 6: 90,000,000 unique-request scale — sampled throughput proof ───
-    # Target: 90 000 000 unique requests (zero dedup benefit — every request
-    # is a fresh forward pass through the model).  We cannot execute 90M
-    # requests inline, so we run a statistically representative sample at
-    # sustained concurrency, measure stable throughput, and project to 90M.
-    #
-    # Sample size rationale:
-    #   • Each request is content-unique (nonce + index) — coalescer never fires.
-    #   • 300 samples @ 75 concurrent fills ≥4 full batches of B=64 back-to-back,
-    #     enough to measure steady-state pipelined throughput (not cold-start).
-    #   • Projected throughput × (90M / sample) gives the 90M ETA and node count.
-    _UNIQUE_TARGET  = 90_000_000   # actual scale goal
-    _N_W6           = 300          # representative sample (≥4 full B=64 batches)
-    _W6_CONCURRENCY = 75           # sustained concurrency to stress the batcher
+    if skip_w6:
+        print("\n  [Wave 6 skipped — run test_w6_90m.py for the standalone 90M proof]")
+    else:
+        # Target: 90 000 000 unique requests (zero dedup benefit — every request
+        # is a fresh forward pass through the model).  We cannot execute 90M
+        # requests inline, so we run a statistically representative sample at
+        # sustained concurrency, measure stable throughput, and project to 90M.
+        #
+        # Sample size rationale:
+        #   • Each request is content-unique (nonce + index) — coalescer never fires.
+        #   • 300 samples @ 75 concurrent fills ≥4 full batches of B=64 back-to-back,
+        #     enough to measure steady-state pipelined throughput (not cold-start).
+        #   • Projected throughput × (90M / sample) gives the 90M ETA and node count.
+        _UNIQUE_TARGET  = 90_000_000   # actual scale goal
+        _N_W6           = 300          # representative sample (≥4 full B=64 batches)
+        _W6_CONCURRENCY = 75           # sustained concurrency to stress the batcher
 
-    print("\n" + "─" * 68)
-    print(f"  Wave 6 — 90,000,000 UNIQUE requests")
-    print(f"           (sampling {_N_W6} @ {_W6_CONCURRENCY} concurrent → project to {_UNIQUE_TARGET:,})")
-    print("─" * 68)
+        print("\n" + "─" * 68)
+        print(f"  Wave 6 — 90,000,000 UNIQUE requests")
+        print(f"           (sampling {_N_W6} @ {_W6_CONCURRENCY} concurrent → project to {_UNIQUE_TARGET:,})")
+        print("─" * 68)
 
-    _unique_topics = [
-        f"exclusive-drop-{run_nonce}-{i:06d}-"
-        + ["hype", "chill", "fire", "vibe", "raw", "deep", "fresh", "loud"][i % 8]
-        + "-"
-        + ["tiktok", "instagram", "youtube", "twitter", "spotify", "threads"][i % 6]
-        for i in range(_N_W6)
-    ]
-    _unique_platforms = ["tiktok", "instagram", "youtube", "twitter"]
-    tasks_w6: list[tuple[str, str, dict]] = [
-        ("POST", "/content/generate", {
-            "platform": _unique_platforms[i % 4],
-            "topic":    _unique_topics[i],
-            "tone":     ["hype", "authentic", "dramatic", "chill", "bold", "raw"][i % 6],
-            "goal":     ["streams", "engagement", "virality", "followers", "awareness"][i % 5],
-        })
-        for i in range(_N_W6)
-    ]
-    w6 = run_wave(
-        f"90M unique scale — {_N_W6} sampled @{_W6_CONCURRENCY} concurrent",
-        tasks_w6, concurrency=_W6_CONCURRENCY, gpu_check=True,
-    )
-    waves.append(w6)
-    w6_ok = print_wave(w6)
+        _unique_topics = [
+            f"exclusive-drop-{run_nonce}-{i:06d}-"
+            + ["hype", "chill", "fire", "vibe", "raw", "deep", "fresh", "loud"][i % 8]
+            + "-"
+            + ["tiktok", "instagram", "youtube", "twitter", "spotify", "threads"][i % 6]
+            for i in range(_N_W6)
+        ]
+        _unique_platforms = ["tiktok", "instagram", "youtube", "twitter"]
+        tasks_w6: list[tuple[str, str, dict]] = [
+            ("POST", "/content/generate", {
+                "platform": _unique_platforms[i % 4],
+                "topic":    _unique_topics[i],
+                "tone":     ["hype", "authentic", "dramatic", "chill", "bold", "raw"][i % 6],
+                "goal":     ["streams", "engagement", "virality", "followers", "awareness"][i % 5],
+            })
+            for i in range(_N_W6)
+        ]
+        w6 = run_wave(
+            f"90M unique scale — {_N_W6} sampled @{_W6_CONCURRENCY} concurrent",
+            tasks_w6, concurrency=_W6_CONCURRENCY, gpu_check=True,
+        )
+        waves.append(w6)
+        print_wave(w6)
 
-    # ── 90M projection from measured sample ──────────────────────────────────
-    if w6.rps and w6.rps > 0:
-        eta_s      = _UNIQUE_TARGET / w6.rps          # seconds on this single node
-        eta_h      = eta_s / 3600
-        nodes_1h   = math.ceil(eta_h)                 # nodes to hit 90M in 1 h
-        nodes_24h  = math.ceil(eta_h / 24)            # nodes for 90M in 24 h
-        nodes_8h   = math.ceil(eta_h / 8)             # nodes for 90M in 8 h (work day)
-        print(f"\n  ┌─ 90,000,000 Unique Request Projection ({'zero dedup — every req is a new forward pass'})")
-        print(f"  │  Measured throughput  : {w6.rps:,.1f} req/s  ({_N_W6}-req sample)")
-        print(f"  │  Single-node ETA      : {eta_h:,.1f} h  ({eta_s/86400:,.1f} days)")
-        print(f"  │")
-        print(f"  │  Nodes needed to serve 90M unique requests in:")
-        print(f"  │    1 hour   →  {nodes_1h:>6,} nodes")
-        print(f"  │    8 hours  →  {nodes_8h:>6,} nodes")
-        print(f"  │    24 hours →  {nodes_24h:>6,} nodes")
-        print(f"  │")
-        print(f"  │  With pdim pocket dedup (real workloads are not 100% unique):")
-        for dedup, lbl in [(0.50,"50% dedup (cold audience)"),
-                           (0.80,"80% dedup (typical)     "),
-                           (0.95,"95% dedup (viral topic)  ")]:
-            unique_reqs = _UNIQUE_TARGET * (1.0 - dedup)
-            n_nodes_24h = math.ceil((unique_reqs / w6.rps) / 86400)
-            print(f"  │    {lbl}  →  net {unique_reqs:>12,.0f} unique  →  {n_nodes_24h:>4} nodes/24h")
-        print(f"  └─ Batcher: B=64, window=2ms, pipeline depth=4  (90M-optimised config)")
-        print()
+        # ── 90M projection from measured sample ──────────────────────────────
+        if w6.rps and w6.rps > 0:
+            eta_s      = _UNIQUE_TARGET / w6.rps
+            eta_h      = eta_s / 3600
+            nodes_1h   = math.ceil(eta_h)
+            nodes_24h  = math.ceil(eta_h / 24)
+            nodes_8h   = math.ceil(eta_h / 8)
+            print(f"\n  ┌─ 90,000,000 Unique Request Projection (zero dedup — every req is a new forward pass)")
+            print(f"  │  Measured throughput  : {w6.rps:,.1f} req/s  ({_N_W6}-req sample)")
+            print(f"  │  Single-node ETA      : {eta_h:,.1f} h  ({eta_s/86400:,.1f} days)")
+            print(f"  │")
+            print(f"  │  Nodes needed to serve 90M unique requests in:")
+            print(f"  │    1 hour   →  {nodes_1h:>6,} nodes")
+            print(f"  │    8 hours  →  {nodes_8h:>6,} nodes")
+            print(f"  │    24 hours →  {nodes_24h:>6,} nodes")
+            print(f"  │")
+            print(f"  │  With pdim pocket dedup (real workloads are not 100% unique):")
+            for dedup, lbl in [(0.50, "50% dedup (cold audience)"),
+                               (0.80, "80% dedup (typical)     "),
+                               (0.95, "95% dedup (viral topic)  ")]:
+                unique_reqs = _UNIQUE_TARGET * (1.0 - dedup)
+                n_nodes_24h = math.ceil((unique_reqs / w6.rps) / 86400)
+                print(f"  │    {lbl}  →  net {unique_reqs:>12,.0f} unique  →  {n_nodes_24h:>4} nodes/24h")
+            print(f"  └─ Batcher: B=64, window=2ms, pipeline depth=4  (90M-optimised config)")
+            print()
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print("\n" + "═" * 68)
