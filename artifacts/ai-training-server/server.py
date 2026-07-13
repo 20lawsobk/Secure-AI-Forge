@@ -890,12 +890,14 @@ async def on_startup():
         )
     )
 
-    # ── Dynamic batching defaults (set before _init_ai_model reads them) ──────
-    # Enable by default; derive batch cap from core count so the batcher
-    # fills up quickly under unique-request burst.
-    os.environ.setdefault("AI_DYNAMIC_BATCHING", "1")
-    os.environ.setdefault("AI_BATCH_MAX",       str(min(64, max(16, _cpu_n * 4))))
-    os.environ.setdefault("AI_BATCH_WINDOW_MS", "6")   # tight window = fast dispatch
+    # ── Dynamic batching config (hard-set to override any stale env vars) ───────
+    # Always write — stale values from a previous process can survive
+    # setdefault() and silently cap throughput (e.g. max_batch=8 from an old
+    # run).  Hard assignment guarantees the pipelined batcher starts with the
+    # right values every time the server restarts.
+    os.environ["AI_DYNAMIC_BATCHING"] = "1"
+    os.environ["AI_BATCH_MAX"]        = str(min(64, max(32, _cpu_n * 8)))
+    os.environ["AI_BATCH_WINDOW_MS"]  = "4"   # 4 ms — fills fast under burst, low idle latency
 
     if not DATABASE_URL:
         print("[Server] WARNING: DATABASE_URL not set — running without DB")
@@ -5366,20 +5368,22 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
                 # above): the user's own creative direction plus external trend
                 # data, both driving the model's conditioning and the
                 # awareness-composed fallback. This mirrors the video path.
-                _sr = _script_agent.run(ScriptRequest(
+                #
+                # Distribution telemetry is not called on the hot path —
+                # the result is never used and adding it floods the batcher
+                # with extra submissions that degrade unique-request throughput.
+                # It is collected offline via the training pipeline instead.
+                return _script_agent.run(ScriptRequest(
                     idea=topic, platform=_plat, goal=goal, tone=brief.tone,
                     awareness=_merged_awareness,
                 ))
-                _distribution_agent.run(DistributionRequest(script=f"{_sr.hook}\n{_sr.body}\n{_sr.cta}", platform=_plat, goal=goal))
-                return _sr
 
             try:
-                # Spawn a GPU life from the pocket for this inference.
-                # No gate, no queue — each unique request gets its own instance
-                # (born → working → dead).  Identical requests are already
-                # collapsed by the coalescer above and never reach this branch.
-                with _get_gpu_pool().spawn_sync() as _glife:
-                    sr = _infer()
+                # No per-request GPU spawn needed here — the batcher owns GPU
+                # lifecycle (one pocket life per batched forward pass).
+                # Identical requests are already collapsed by the async
+                # coalescer above and never reach this branch.
+                sr = _infer()
             except Exception:
                 sr = None
             if sr is not None:
@@ -5850,9 +5854,8 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
                 ))
 
             try:
-                # Spawn a GPU life from the pocket for this inference.
-                with _get_gpu_pool().spawn_sync() as _glife:
-                    sr = _infer()
+                # No per-request GPU spawn — batcher owns GPU lifecycle.
+                sr = _infer()
                 candidates.append(f"{sr.hook}\n{sr.body}\n{sr.cta}")
                 # Add a hook-swapped variant so we can rank for the best opener.
                 alt_hook, _, _ = ri.best_hook(idea, "the artist", sr.hook, brief)

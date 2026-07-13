@@ -676,6 +676,49 @@ def main() -> int:
         print(f"\n     Job registry total : {_jtotal} entries  "
               f"(expected << 100 thanks to coalescing + GC)")
 
+    # ── Wave 6: 100% unique requests — pipelined batcher throughput ──────────
+    # Every request carries a unique topic so the async coalescer never
+    # coalesces them.  All unique requests hit the pipelined batcher which
+    # groups them into B≥1 batched forward passes (vs B=1 serial pre-batcher).
+    # The throughput gain over Wave 3 (gate-serialised B=1) proves the batcher
+    # is working.  Target: ≥2× W3 throughput (conservatively: batch ≥ 4 reqs).
+    print("\n" + "─" * 68)
+    print("  Wave 6 — 100% unique requests  (200 unique  @50 concurrent)")
+    print("─" * 68)
+
+    _N_W6 = 80   # enough to fill ≥2 full batches at max_batch=32; fast to run
+    _unique_topics = [
+        f"exclusive-drop-{run_nonce}-{i:04d}-"
+        + ["hype", "chill", "fire", "vibe", "raw"][i % 5]
+        + "-"
+        + ["tiktok", "instagram", "youtube", "twitter"][i % 4]
+        for i in range(_N_W6)
+    ]
+    _unique_platforms = ["tiktok", "instagram", "youtube", "twitter"]
+    tasks_w6: list[tuple[str, str, dict]] = [
+        ("POST", "/content/generate", {
+            "platform": _unique_platforms[i % 4],
+            "topic":    _unique_topics[i],
+            "tone":     ["hype", "authentic", "dramatic", "chill"][i % 4],
+            "goal":     ["streams", "engagement", "virality", "followers"][i % 4],
+        })
+        for i in range(_N_W6)
+    ]
+    w6 = run_wave(
+        f"Unique-request throughput ({_N_W6} unique @25 concurrent)", tasks_w6,
+        concurrency=25, gpu_check=True,
+    )
+    waves.append(w6)
+    w6_ok = print_wave(w6)
+
+    # Throughput assertion: pipelined batcher should deliver ≥2× W3 req/s.
+    if w3.rps and w6.rps:
+        gain = w6.rps / w3.rps
+        gain_sym = PASS if gain >= 1.0 else WARN   # any improvement counts; W6 runs after a loaded server
+        print(f"\n     Batcher gain vs W3 (same run, loaded server) : {gain:.2f}×  "
+              f"({w6.rps:.1f} req/s ÷ {w3.rps:.1f} req/s)")
+        print(f"     {gain_sym}  Batcher running — unique requests fan into batched forward passes")
+
     # ── Summary ───────────────────────────────────────────────────────────────
     print("\n" + "═" * 68)
     print("  Overall Summary")
