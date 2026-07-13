@@ -16,6 +16,12 @@ Required env vars: `DATABASE_URL`, `PORT`, `MODEL_API_PORT`, `ADMIN_KEY`, `STORA
 
 Required Replit Secrets (must NOT be stored in source or `.replit` env): `SESSION_SECRET`. The server validates this at startup and exits immediately if it is missing — set it in the Replit Secrets panel so it flows into both dev and production automatically.
 
+Optional Replit Secrets for content awareness (set in the Replit Secrets panel):
+- `TAVILY_API_KEY` — Tavily web search (https://tavily.com). Enables real-time news intelligence for content generation.
+- `EXA_API_KEY` — Exa semantic search (https://exa.ai). Enables deep trend discovery for content generation.
+
+Without these, `ContentGenerationAwarenessService` and `IndustryMonitorService` still function using RSS feeds only — web search enrichment is skipped gracefully. With them, every content generation call is enriched with live music industry signals.
+
 ## Stack
 
 - **Frontend**: React 19, Vite 7, Tailwind CSS v4, Radix UI, TanStack Query, Framer Motion, Wouter
