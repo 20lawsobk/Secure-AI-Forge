@@ -990,6 +990,109 @@ def _warm_content_cache() -> None:
     print(f"[CacheWarm] Pre-warmed {warmed}/{total} content slots into PDIM cache")
 
 
+def _reconcile_audio_manifest(storage) -> None:
+    """Reconcile mb:dataset:audio:meta against the chunks actually on disk.
+
+    On every server start we count the real ``mb:dataset:audio:chunk:{idx}``
+    keys that the disk store (SQLite) still holds and compare that count to
+    the ``num_chunks`` field recorded in the manifest.  If the manifest is
+    missing or records a lower count than what is actually stored (the common
+    "stale low count" case caused by the direct-Python test path overwriting
+    the manifest), we update ``num_chunks`` and rebuild any missing index
+    entries so generation can reach every track that survived the restart.
+
+    Cost when the dataset is healthy: one disk scan (fast) + one storage GET.
+    Never raises — any error is logged and we continue with what we have.
+    """
+    try:
+        # ── Count real chunks on disk ──────────────────────────────────────
+        # The disk store is always available (SQLite); pdim may be offline.
+        # We read from the disk store directly so we count what survived the
+        # restart, not what a possibly-stale pdim thinks exists.
+        disk = getattr(storage, "_disk", None)
+        if disk is None or not disk.available:
+            return
+
+        prefix = "mb:dataset:audio:chunk:"
+        all_keys = disk.all_keys()
+        chunk_keys = [k for k in all_keys if k.startswith(prefix)]
+        actual_count = len(chunk_keys)
+
+        if actual_count == 0:
+            # Nothing seeded yet — nothing to reconcile.
+            return
+
+        # Derive the highest idx present so the manifest range is correct.
+        max_idx = -1
+        for k in chunk_keys:
+            try:
+                idx = int(k[len(prefix):])
+                if idx > max_idx:
+                    max_idx = idx
+            except ValueError:
+                pass
+
+        num_chunks = max_idx + 1  # contiguous manifest up to highest idx
+
+        # ── Read (or synthesise) the current manifest ──────────────────────
+        meta = storage.get("mb:dataset:audio:meta")
+        current_count = int((meta or {}).get("num_chunks", 0))
+
+        if meta and current_count >= num_chunks:
+            # Manifest already covers every stored chunk — nothing to do.
+            print(
+                f"[Storage] audio manifest OK — num_chunks={current_count}, "
+                f"disk chunks={actual_count}"
+            )
+            return
+
+        # ── Rebuild the index for chunks not listed in the existing meta ───
+        existing_index: list = list((meta or {}).get("index", []))
+        existing_idxs = {int(e.get("idx", -1)) for e in existing_index}
+
+        for k in sorted(chunk_keys):
+            try:
+                idx = int(k[len(prefix):])
+            except ValueError:
+                continue
+            if idx in existing_idxs:
+                continue
+            sample = disk.get(k)
+            if not sample or not isinstance(sample, dict):
+                continue
+            existing_index.append(
+                {
+                    "idx": idx,
+                    "bpm": float(sample.get("bpm") or 0.0),
+                    "key": sample.get("key") or "",
+                    "genres": sample.get("genres") or [],
+                }
+            )
+            existing_idxs.add(idx)
+
+        existing_index.sort(key=lambda e: int(e.get("idx", 0)))
+
+        # ── Write the corrected manifest ───────────────────────────────────
+        new_meta = dict(meta) if meta else {
+            "name": "audio",
+            "description": "Real CC-licensed music samples",
+            "content_type": "audio",
+            "source": "disk-reconciled",
+        }
+        new_meta["num_chunks"] = num_chunks
+        new_meta["index"] = existing_index
+
+        storage.set("mb:dataset:audio:meta", new_meta)
+        print(
+            f"[Storage] audio manifest reconciled — "
+            f"was num_chunks={current_count}, "
+            f"now num_chunks={num_chunks} "
+            f"(disk chunks={actual_count})"
+        )
+    except Exception as exc:  # never crash startup
+        print(f"[Storage] audio manifest reconciliation skipped: {exc}")
+
+
 def _init_storage():
     """Connect to storage server, load checkpoint, and start workers."""
     global _data_puller, _continuous_trainer, _watchdog
@@ -1002,6 +1105,9 @@ def _init_storage():
         _load_checkpoint_from_storage()
     else:
         print("[Storage] Storage server offline — using in-process fallback")
+
+    # ── Audio manifest reconciliation (runs on every boot, cheap when healthy)
+    _reconcile_audio_manifest(storage)
 
     sys.path.insert(0, str(Path(__file__).parent))
     from workers.data_puller import DataPuller
