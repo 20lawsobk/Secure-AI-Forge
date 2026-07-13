@@ -140,30 +140,115 @@ CTA_LIBRARY: Dict[str, str] = {
 }
 
 # Hook scaffolds per hook style (used to generate ranked candidate variants).
+# Every template targets ≥1 _POWER_WORD, ends with strong punctuation, emoji-ready.
 HOOK_TEMPLATES: Dict[str, List[str]] = {
     "pattern_interrupt": [
-        "Stop scrolling — {artist} just changed the game with {topic}",
-        "You weren't ready for this: {topic} 🔥",
+        "Stop scrolling — {artist} just changed the game with {topic} 🔥",
+        "You weren't ready for this: {topic} — and that's exactly the point! 🔥",
+        "Wait. {topic} just dropped and nobody is prepared for it! 💥",
+        "Don't skip this — {topic} earns every second of your attention! 🎧",
+        "Pause everything. {artist} just released {topic} and it's finally here! 🔥",
+        "Never heard anything like {topic} before — stop and listen right now! ⚡",
+        "This is your sign to stop and play {topic} immediately! 🔥",
+        "Everyone who scrolled past {topic} is going to come back — don't be that person! 🎵",
+        "The drop nobody saw coming: {topic} — {artist} went off! 💥",
+        "Stop. Play {topic}. Come back and tell me I was wrong! 🔥",
     ],
     "aesthetic_curiosity": [
         "{artist} — {topic}. The vibe is everything ✨",
-        "This is what {topic} feels like 🌙",
+        "This is what {topic} feels like when you finally let it 🌙",
+        "The aesthetic of {topic} is unlike anything dropping right now ✨",
+        "{topic} sounds like the feeling you've been trying to describe for years 🌙",
+        "Some music creates a world. {topic} is that world — go live in it ✨",
+        "{artist} built {topic} for the ones who actually feel music ✨",
+        "The mood of {topic} is something {artist} has never shown before — exclusive ✨",
+        "There's a stillness in {topic} that hits harder than noise ever could 🌙",
+        "{topic} is the kind of record you put on when words aren't enough ✨",
+        "Everything about the way {topic} sounds is intentional — and perfect 🎵",
     ],
     "value_promise": [
-        "Here's why {topic} is about to be everywhere",
-        "{artist} breaks down {topic} — watch till the end",
+        "Here's why {topic} is about to be everywhere — and why you should be first! 🔥",
+        "{artist} breaks down {topic} — watch till the end and you'll understand! 🎬",
+        "The real story behind {topic} — and why it changes everything for {artist}! 🔥",
+        "What {topic} reveals about where {artist} is going next — exclusive! 🎵",
+        "The production secrets in {topic} that nobody is talking about yet! 🔥",
+        "Everything {artist} learned before making {topic} — finally revealed! 🎬",
+        "Why {topic} is being called the most important drop of the season! 🔥",
+        "{topic} explained — and why the context makes it even better! 🎵",
+        "The creative decision in {topic} that {artist} almost didn't make — and why it's fire! 🔥",
+        "What happens when you actually sit with {topic} all the way through — a breakdown! 🎬",
     ],
     "bold_claim": [
-        "{topic} is the best thing {artist} has ever made. Period.",
-        "Nobody is talking about {topic} yet. They will be.",
+        "{topic} is the best thing {artist} has ever made. Period. 🔥",
+        "Nobody is talking about {topic} yet. They will be. Soon. 🎵",
+        "{artist} just set a new standard with {topic} — and it's not close! 💥",
+        "Unpopular opinion: {topic} is the best drop of 2026. I'll wait. 🔥",
+        "{topic} is what everyone else in the genre is going to spend years trying to match! 💯",
+        "{artist} made something on {topic} that simply cannot be ignored — fire! 🔥",
+        "Hot take: {topic} is already legendary and it just dropped today! 💥",
+        "The records that define eras are obvious in hindsight. {topic} is one of them! 🔥",
+        "Nobody does this better than {artist} — and {topic} is the permanent proof! 💯",
+        "Genuinely insane: {topic} is better than anything I expected — and I expected a lot! 🔥",
     ],
     "relatable_story": [
-        "{artist} made {topic} for nights like these.",
-        "We've all needed something like {topic} 🤍",
+        "{artist} made {topic} for nights like these — you know the ones! 🌙",
+        "We've all needed something like {topic} at exactly the wrong time 🤍",
+        "If you've ever felt too much all at once, {topic} was made for you 🌙",
+        "{topic} is the record {artist} made when silence wasn't enough 🎵",
+        "Some songs find you at the exact moment you need them. {topic} is that song! 🤍",
+        "{artist} wrote {topic} for the moments that don't make the highlight reel 🌙",
+        "The feeling {topic} captures is the one you never knew had a name 🎵",
+        "{topic} is for everyone who's ever sent a song instead of saying the words! 🤍",
+        "Real ones know: {topic} hits different when it finds you at the right time 🌙",
+        "{artist} made {topic} honest when they could have made it safe — and it shows! 🔥",
     ],
     "curiosity": [
         "🎵 {artist} just dropped something you need to hear — {topic}",
-        "There's a reason everyone's on {topic} right now",
+        "There's a reason everyone's on {topic} right now — go find out why! 🔥",
+        "What's inside {topic} that nobody is explaining yet — exclusive first look! 🎧",
+        "The question everyone's asking after hearing {topic}: how did {artist} do this? 🔥",
+        "First time I played {topic} I didn't understand it. By the third time, I was obsessed! 🎵",
+        "There's a moment in {topic} that nobody warned me about — and I can't stop thinking about it! 🔥",
+        "{topic} keeps revealing new things with every listen — what are you hearing? 🎵",
+        "The detail in {topic} that {artist} buried there on purpose — find it! 🔥",
+        "Why is {topic} already in everyone's conversation? Let me show you! 🎵",
+        "Something in {topic} is different from everything {artist} has done before — hear it! 🔥",
+    ],
+    "identity_call": [
+        "If {topic} is what you've been waiting for — this is your record! 🔥",
+        "This is for everyone who plays a song until they feel it in their bones: {topic} 🎵",
+        "Real listeners knew {artist} had {topic} in them — this is the proof! 💯",
+        "For the ones who find music before it's everywhere — {topic} is finally here! 🔥",
+        "If late nights and honest emotions are your thing — {topic} was built for you 🌙",
+        "The ones who need music that actually means something: {artist}'s {topic} is yours! 🔥",
+        "This one's for the ones who never skip — {topic} earns every second! 🎵",
+        "If you've ever felt like nobody makes music for you specifically — listen to {topic}! 🔥",
+        "Built for the people who actually pay attention: {topic} is {artist} at full power! 💯",
+        "Every generation has records made for the real ones. {topic} is ours! 🔥",
+    ],
+    "social_proof_artist": [
+        "{artist} — {topic} — already the conversation nobody can stop having! 🔥",
+        "The reaction to {topic} in the first 24 hours says everything you need to know! 🔥",
+        "Everyone who's heard {topic} keeps sending it to people — here's why! 🎧",
+        "{artist} dropped {topic} and the first-day response was impossible to ignore! 🔥",
+        "The early listeners of {topic} already know — now the rest of the world catches up! 🎵",
+        "The community found {topic} before the algorithm did — and they're not stopping! 🔥",
+        "Real listeners, real reaction: {topic} is the record that travels by word of mouth! 🎧",
+        "The DMs about {topic} are flooding in and the answer is always the same: it's fire! 🔥",
+        "Three plays in and {topic} already lives in the send-to-everyone folder! 🔁",
+        "{artist}'s {topic} is spreading because it's genuine — and genuine always wins! 💯",
+    ],
+    "emotional_reveal": [
+        "{artist} didn't plan for {topic} to be this honest — but it is! 🔥",
+        "The version of {topic} that {artist} almost didn't release — and why it's the best one! 🎵",
+        "Every emotion {artist} couldn't put into words went into {topic} — fire! 🔥",
+        "There's no performance in {topic}. Just {artist} being completely real! 💯",
+        "{topic} is what happens when an artist stops holding back — finally! 🔥",
+        "{artist} made {topic} for themselves first — and it shows in the best way! 🎵",
+        "The rawness of {topic} is not an accident. {artist} wanted you to feel this! 🔥",
+        "Six months of silence, then {topic}. {artist} was saving the best for exactly now! 💥",
+        "Nothing prepared me for how vulnerable {topic} actually is — {artist} went there! 🔥",
+        "{topic} is the most honest {artist} has ever sounded — and it's undeniably fire! 💯",
     ],
 }
 
@@ -179,6 +264,10 @@ _POWER_WORDS = {
     "secret", "proven", "instantly", "exclusive", "free", "now", "never",
     "stop", "first", "best", "viral", "insane", "real", "raw", "unreleased",
     "finally", "limited", "drop", "fire", "everyone", "nobody",
+    "impossible", "unstoppable", "legendary", "elite", "extraordinary",
+    "electric", "explosive", "breathtaking", "devastating", "euphoric",
+    "honest", "vulnerable", "authentic", "undeniable", "immaculate",
+    "wait", "obsessed", "alive", "survived", "rewind", "loop",
 }
 
 
@@ -747,12 +836,20 @@ def hook_variants(
     artist: str,
     brief: GenerationBrief,
     weave_active: Optional[bool] = None,
+    genre: Optional[str] = None,
+    platform: Optional[str] = None,
 ) -> List[str]:
-    """Deterministic stylistic hook candidates for the brief's hook style."""
+    """Deterministic stylistic hook candidates for the brief's hook style.
+
+    Now also pulls genre-conditioned hooks and platform-native hooks from the
+    expanded content playbook, dramatically broadening the candidate pool.
+    """
     if weave_active is None:
         weave_active = _weave_active()
     topic = _norm(topic) or "this"
     artist = _norm(artist) or "the artist"
+
+    # ── Primary hook style templates (now 10+ per style) ──────────────────────
     templates = HOOK_TEMPLATES.get(brief.hook_style, HOOK_TEMPLATES["curiosity"])
     out: List[str] = []
     for tpl in templates:
@@ -761,10 +858,45 @@ def hook_variants(
         except (KeyError, IndexError):
             continue
 
-    # Request-specific hooks: reference the actual story/track/themes so the
-    # hook can only belong to THIS release. This is hand-authored borrowed
-    # weave, so it retires with the corpus (see _weave_active) — once the model
-    # can render the direction itself, these stop competing.
+    # ── Genre-conditioned hooks from expanded playbook ─────────────────────────
+    # Uses the genre-specific voice pool (drill/afrobeats/lofi/pop/rnb/etc.)
+    # plus the best hook style for the detected genre.
+    try:
+        from ai_model.content_playbook import (
+            genre_hook_candidates as _pb_genre_hooks,
+            platform_hook_candidates as _pb_platform_hooks,
+            hook_candidates as _pb_hooks,
+            best_genre_hook_style as _pb_genre_style,
+        )
+        # Genre-specific voice hooks
+        g = genre or getattr(brief, "genre", None)
+        if g:
+            genre_hooks = _pb_genre_hooks(topic, artist, g)
+            out.extend(genre_hooks)
+            # Also add hooks from the genre's best-performing archetype style
+            best_style = _pb_genre_style(g)
+            if best_style and best_style != brief.hook_style:
+                alt_templates = HOOK_TEMPLATES.get(best_style, [])
+                for tpl in alt_templates[:5]:  # top 5 from alt style
+                    try:
+                        out.append(tpl.format(artist=artist, topic=topic))
+                    except (KeyError, IndexError):
+                        continue
+
+        # Platform-native hooks
+        plat = platform or getattr(brief, "platform", None)
+        if plat:
+            plat_hooks = _pb_platform_hooks(topic, artist, plat)
+            out.extend(plat_hooks)
+
+        # Archetype hooks (full pool — 80+ candidates across all archetypes)
+        # These are blended in so the ranker has maximum diversity to work with.
+        archetype_hooks = _pb_hooks(topic, artist)
+        out.extend(archetype_hooks)
+    except Exception:  # noqa: BLE001 — playbook must never break generation
+        pass
+
+    # ── Weave: release-specific hooks (artist/track/themes) ───────────────────
     if weave_active:
         track = _norm(brief.track) or topic
         themes = [t for t in (brief.themes or []) if _norm(t)][:2]
@@ -774,7 +906,13 @@ def hook_variants(
             if track:
                 out.append(f"{clause} — and then came {track}.")
         if themes and artist.lower() != "the artist":
-            out.append(f"Nobody turns {themes[0]} into a record like {artist}.")
+            out.append(f"Nobody turns {themes[0]} into a record like {artist}. 🔥")
+        if themes and track:
+            out.append(
+                f"{track} is {themes[0]} and {themes[1]} in one record — "
+                f"finally. 🎵" if len(themes) >= 2
+                else f"{track} brings {themes[0]} like nothing else this year. 🔥"
+            )
     return out
 
 
@@ -1232,6 +1370,18 @@ def _body_candidates(
             f"no skips, all intent."
         )
 
+    # ── Playbook body archetypes (emotional arc: setup → tension → payoff) ────
+    # These are high-quality, multi-sentence bodies that score better on the
+    # structure_score metric. They compete in the ranker alongside the above.
+    try:
+        from ai_model.content_playbook import body_candidates as _pb_bodies
+        art = _norm(brief.artist) or "the artist"
+        aud = brief.audience or "listeners"
+        playbook_bodies = _pb_bodies(topic_n, art, genre=genre, audience=aud)
+        out.extend(playbook_bodies)
+    except Exception:  # noqa: BLE001 — playbook must never break composition
+        pass
+
     # Brand voice as copy, when the caller supplied one (competes in both modes).
     bv = _norm(brand_voice)
     if bv:
@@ -1241,7 +1391,7 @@ def _body_candidates(
 
 
 def _cta_candidates(topic: str, brief: GenerationBrief, agent_cta: str = "") -> List[str]:
-    """CTA candidates: agent output + intent CTA + research-playbook bank."""
+    """CTA candidates: agent output + intent CTA + full expanded playbook bank."""
     out: List[str] = []
     if _norm(agent_cta):
         out.append(_norm(agent_cta))
@@ -1249,11 +1399,23 @@ def _cta_candidates(topic: str, brief: GenerationBrief, agent_cta: str = "") -> 
     # Research-playbook CTAs are borrowed world knowledge — same retirement
     # contract as directives/hooks: once the platform's own corpus graduates
     # (self-sufficiency retired), the playbook stops contributing.
+    # The expanded CTA_BANK now has 8+ entries per intent vs 3 before.
     try:
         from ai_model.quality_awareness import self_sufficiency
         if not self_sufficiency()["retired"]:
             from ai_model.content_playbook import cta_candidates as _pb_ctas
             out.extend(_pb_ctas(brief.intent, topic))
+            # Also pull all CTA intents for broader competition
+            from ai_model.content_playbook import CTA_BANK
+            idea = _norm(topic) or "this"
+            for intent_key, tpls in CTA_BANK.items():
+                if intent_key == brief.intent:
+                    continue  # already added above
+                for tpl in tpls[:3]:  # top 3 from each non-primary intent
+                    try:
+                        out.append(tpl.format(idea=idea))
+                    except (KeyError, IndexError, ValueError):
+                        continue
     except Exception:  # noqa: BLE001 - playbook must never break composition
         pass
     return out
