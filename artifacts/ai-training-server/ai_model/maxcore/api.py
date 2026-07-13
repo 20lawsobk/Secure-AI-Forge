@@ -3,7 +3,7 @@
 This is the single entry point model/training code calls. It exposes eager
 primitives (gemm/attention/conv2d/mlp/reduce/softmax), graph construction +
 compilation + execution, sessions, and a metrics snapshot — all backed by a
-pluggable backend (default: the in-house CPU engine).
+pluggable backend (default: the in-house Digital GPU engine).
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from .tensor import Tensor
 
 
 class DigitalGPU:
-    def __init__(self, backend: str | Backend = "cpu", deterministic: bool = False,
+    def __init__(self, backend: str | Backend = "digital_gpu", deterministic: bool = False,
                  compiler: Compiler | None = None, **backend_kwargs):
         self.backend: Backend = (
             backend if isinstance(backend, Backend) else get_backend(backend, **backend_kwargs)
@@ -31,7 +31,7 @@ class DigitalGPU:
         self.deterministic = deterministic
 
     # ── tensors / graph construction ─────────────────────────────────────────
-    def tensor(self, data: Any, dtype: str = "float32", device: str = "cpu") -> Tensor:
+    def tensor(self, data: Any, dtype: str = "float32", device: str = "digital_gpu") -> Tensor:
         return self.backend.create_tensor(data, dtype=dtype)
 
     def graph_builder(self) -> GraphBuilder:

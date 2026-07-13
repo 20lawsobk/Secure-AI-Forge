@@ -1,5 +1,5 @@
 from .base import Backend
-from .cpu_backend import CPUBackend
+from .cpu_backend import DigitalGPUBackend, CPUBackend   # CPUBackend = alias
 from .device_backend import GPUBackend
 from .future_backends import ASICBackend, ClusterBackend
 from .registry import (
@@ -12,7 +12,8 @@ from .registry import (
 
 __all__ = [
     "Backend",
-    "CPUBackend",
+    "DigitalGPUBackend",
+    "CPUBackend",          # backwards-compatible alias
     "GPUBackend",
     "ClusterBackend",
     "ASICBackend",

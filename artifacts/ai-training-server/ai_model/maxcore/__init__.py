@@ -1,9 +1,9 @@
 """MaxCore — the in-house software-defined GPU stack.
 
-A backend-agnostic compute layer wrapping the existing NumPy/SIMD Digital GPU
-engine: a public ``DigitalGPU`` API, a hardware-agnostic IR + graph builder, a
-caching compiler with fusion, a runtime executor, sessions/KV stores, a unified
-backend registry (CPU real; GPU/cluster/ASIC honest plug-points), and a PDIM
+A backend-agnostic compute layer wrapping the NumPy/SIMD Digital GPU engine:
+a public ``DigitalGPU`` API, a hardware-agnostic IR + graph builder, a caching
+compiler with fusion, a runtime executor, sessions/KV stores, a unified backend
+registry (DigitalGPU primary; GPU/cluster/ASIC honest plug-points), and a PDIM
 orchestrator (dedup + single-flight + durable micro-batch queue).
 
 All additive — importing this package has no effect on the running server.
@@ -15,7 +15,8 @@ from .backend import (
     ASICBackend,
     Backend,
     ClusterBackend,
-    CPUBackend,
+    CPUBackend,           # backwards-compatible alias for DigitalGPUBackend
+    DigitalGPUBackend,
     GPUBackend,
     available,
     available_runtime,
@@ -47,7 +48,7 @@ __all__ = [
     "Compiler", "CompiledGraph",
     "Runtime",
     "Session", "KVStore", "Stream",
-    "Backend", "CPUBackend", "GPUBackend", "ClusterBackend", "ASICBackend",
+    "Backend", "DigitalGPUBackend", "CPUBackend", "GPUBackend", "ClusterBackend", "ASICBackend",
     "get_backend", "register", "available", "available_runtime",
     "PDIMOrchestrator", "PDIMStorage", "PDIMWorker", "PDIMConfig",
     "METRICS", "Metrics",

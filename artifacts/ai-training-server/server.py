@@ -252,7 +252,7 @@ app.add_middleware(
 
 async def _in_thread(fn):
     """Run a synchronous callable in the default thread-pool executor so that
-    CPU-bound / blocking agent inference does not stall uvicorn's event loop."""
+    Digital GPU / blocking agent inference does not stall uvicorn's event loop."""
     return await asyncio.get_event_loop().run_in_executor(None, fn)
 
 
@@ -554,7 +554,7 @@ def _init_ai_model():
                 base_model = None
 
         if base_model is None:
-            # Fallback: plain TransformerLM on CPU
+            # Fallback: plain TransformerLM routed through the Digital GPU engine
             from ai_model.model.transformer import TransformerLM
             base_model = TransformerLM(
                 vocab_size=vocab_size,
@@ -567,11 +567,10 @@ def _init_ai_model():
                     or v.shape == base_model.state_dict()[k].shape
                 }
                 base_model.load_state_dict(filtered, strict=False)
-            backend_name = "CPU / aot_eager"
-            # torch.compile only for the plain CPU fallback path
+            backend_name = "Digital GPU / aot_eager"
             try:
                 base_model = torch.compile(base_model, backend="aot_eager", fullgraph=False)
-                print("[AI Model] torch.compile applied (aot_eager / CPU fallback)")
+                print("[AI Model] torch.compile applied (aot_eager / Digital GPU path)")
             except Exception as ce:
                 print(f"[AI Model] torch.compile skipped: {ce}")
         else:
@@ -592,19 +591,24 @@ def _init_ai_model():
         _image_engine = ImageEngine()
         print("[AI Model] ImageEngine ready (PIL renderer)")
 
-        # ── Cross-request dynamic batching (opt-in: AI_DYNAMIC_BATCHING=1) ─────
-        # Coalesces concurrent generate() calls into one batched forward. When
-        # the flag is unset, _creative_model.generate is left untouched and
-        # behavior is byte-for-byte identical to before.
+        # ── Cross-request dynamic batching (on by default) ───────────────────
+        # Coalesces concurrent unique generate() calls into one batched forward.
+        # Each batch gets its own pocket GPU life (born → working → dead).
+        # Disable with AI_DYNAMIC_BATCHING=0.
         try:
             from ai_model.dynamic_batching import install as _install_coalescer
-            _gen_coalescer = _install_coalescer(_creative_model)
+            _gen_coalescer = _install_coalescer(
+                _creative_model,
+                gpu_pool=_get_gpu_pool(),
+            )
             if _gen_coalescer is not None:
                 print(
-                    "[AI Model] Dynamic batching ENABLED "
-                    f"(max_batch={_gen_coalescer.max_batch}, "
-                    f"window={_gen_coalescer.window_s * 1000:.0f}ms)"
+                    "[AI Model] Dynamic batching ENABLED (pipelined, pocket GPU per batch) "
+                    f"max_batch={_gen_coalescer.max_batch}  "
+                    f"window={_gen_coalescer.window_s * 1000:.0f}ms"
                 )
+            else:
+                print("[AI Model] Dynamic batching disabled (AI_DYNAMIC_BATCHING=0)")
         except Exception as be:
             print(f"[AI Model] Dynamic batching not installed: {be}")
 
@@ -873,6 +877,26 @@ class ContentRequest(_AwarenessMixin):
 
 @app.on_event("startup")
 async def on_startup():
+    # ── Thread pool: size for high-concurrency unique-request loads ───────────
+    # Default executor is min(32, cpu+4) — too small when 100s of unique
+    # requests fan out to the batcher simultaneously.  cpu×8 gives enough
+    # threads to keep the staging queue full without over-subscribing.
+    import concurrent.futures as _cf
+    _cpu_n = os.cpu_count() or 4
+    asyncio.get_event_loop().set_default_executor(
+        _cf.ThreadPoolExecutor(
+            max_workers=max(64, _cpu_n * 8),
+            thread_name_prefix="req-worker",
+        )
+    )
+
+    # ── Dynamic batching defaults (set before _init_ai_model reads them) ──────
+    # Enable by default; derive batch cap from core count so the batcher
+    # fills up quickly under unique-request burst.
+    os.environ.setdefault("AI_DYNAMIC_BATCHING", "1")
+    os.environ.setdefault("AI_BATCH_MAX",       str(min(64, max(16, _cpu_n * 4))))
+    os.environ.setdefault("AI_BATCH_WINDOW_MS", "6")   # tight window = fast dispatch
+
     if not DATABASE_URL:
         print("[Server] WARNING: DATABASE_URL not set — running without DB")
         return

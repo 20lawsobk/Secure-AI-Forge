@@ -1,6 +1,6 @@
-"""CPU backend — the real compute backend for this host.
+"""Digital GPU backend — the primary compute backend for this host.
 
-Every heavy kernel routes through the existing in-house Digital GPU engine
+Every heavy kernel routes through the in-house Digital GPU engine
 (``ai_model/gpu/digital_gpu.py`` — a NumPy/SIMD virtual ISA with a *numerically
 stable* softmax and a fused ``gemm_bias_relu``):
 
@@ -16,8 +16,10 @@ engine exposes no kernel for them — this is the implementation, not a fallback
 The engine is loaded directly from its file via importlib so importing this
 backend never pulls in ``ai_model.gpu``'s package __init__ (which imports torch).
 A defensive numpy path remains behind every engine call **only** as a safety net;
-it increments an ``*.engine_fallback`` counter so its use is observable. In a
+it increments a ``*.engine_fallback`` counter so its use is observable. In a
 correctly built system that counter stays at zero — the load test asserts it.
+
+``CPUBackend`` is kept as a backwards-compatible alias.
 """
 from __future__ import annotations
 
@@ -80,8 +82,10 @@ def _stable_softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
     return e / np.sum(e, axis=axis, keepdims=True)
 
 
-class CPUBackend(Backend):
-    name = "cpu"
+class DigitalGPUBackend(Backend):
+    """The Digital GPU backend — all compute routes through the in-house engine."""
+
+    name = "digital_gpu"
 
     def __init__(self, use_engine: bool = True):
         self.engine = _EngineGPU() if (use_engine and _EngineGPU is not None) else None
@@ -98,7 +102,7 @@ class CPUBackend(Backend):
         }
 
     def create_tensor(self, data, dtype: str = "float32"):
-        return Tensor(data, dtype=dtype, device="cpu")
+        return Tensor(data, dtype=dtype, device="digital_gpu")
 
     # ── engine-backed matmul: every 2D sub-GEMM runs on the in-house engine ────
     def _engine_2d(self, a2: np.ndarray, b2: np.ndarray):
@@ -109,15 +113,15 @@ class CPUBackend(Backend):
                     np.ascontiguousarray(b2, np.float32)))
                 return out, True
             except Exception:
-                METRICS.incr("cpu.gemm.engine_fallback")
+                METRICS.incr("dgpu.gemm.engine_fallback")
         return np.matmul(a2, b2), False
 
     def _matmul_engine(self, A: np.ndarray, B: np.ndarray):
         """matmul of any rank, routing EVERY 2D sub-product through the engine.
 
         Returns ``(out, used_engine)``; ``used_engine`` is False only if the
-        engine is absent or a kernel call raised (which also bumps an
-        ``cpu.gemm.engine_fallback`` counter). Batched operands are folded to a
+        engine is absent or a kernel call raised (which also bumps a
+        ``dgpu.gemm.engine_fallback`` counter). Batched operands are folded to a
         stack of 2D GEMMs so there is no NumPy matmul on the heavy path.
         """
         a1, b1 = A.ndim == 1, B.ndim == 1
@@ -156,7 +160,7 @@ class CPUBackend(Backend):
         bias_np = None if bias is None else to_numpy(bias).astype(np.float32, copy=False)
 
         def _compute() -> np.ndarray:
-            with METRICS.timer("cpu.gemm"):
+            with METRICS.timer("dgpu.gemm"):
                 out = None
                 used_engine = False
                 fused = False
@@ -169,14 +173,14 @@ class CPUBackend(Backend):
                         fused = True               # bias+relu consumed by kernel
                     except Exception:
                         out = None
-                        METRICS.incr("cpu.gemm.engine_fallback")
+                        METRICS.incr("dgpu.gemm.engine_fallback")
                 if out is None:
                     out, used_engine = self._matmul_engine(A, B)
                 if not fused:
                     if bias_np is not None:
                         out = out + bias_np
                     out = _activate(out, activation)
-            METRICS.incr("cpu.gemm.engine" if used_engine else "cpu.gemm.numpy")
+            METRICS.incr("dgpu.gemm.engine" if used_engine else "dgpu.gemm.numpy")
             return out
 
         flops = 2.0 * float(A.size) * float(B.shape[-1])
@@ -205,7 +209,7 @@ class CPUBackend(Backend):
     def softmax(self, x, axis: int = -1):
         X: np.ndarray = to_numpy(x).astype(np.float32, copy=False)
         ax = axis if axis >= 0 else X.ndim + axis
-        with METRICS.timer("cpu.softmax"):
+        with METRICS.timer("dgpu.softmax"):
             out = None
             used_engine = False
             if self.engine is not None:
@@ -218,10 +222,10 @@ class CPUBackend(Backend):
                     used_engine = True
                 except Exception:
                     out = None
-                    METRICS.incr("cpu.softmax.engine_fallback")
+                    METRICS.incr("dgpu.softmax.engine_fallback")
             if out is None:
                 out = _stable_softmax(X, axis=ax)
-        METRICS.incr("cpu.softmax.engine" if used_engine else "cpu.softmax.numpy")
+        METRICS.incr("dgpu.softmax.engine" if used_engine else "dgpu.softmax.numpy")
         return Tensor(out, dtype=None)
 
     # ── attention: engine-served incl. masked / multi-head / cross-attention ──
@@ -229,7 +233,7 @@ class CPUBackend(Backend):
         Q: np.ndarray = to_numpy(q).astype(np.float32, copy=False)
         K: np.ndarray = to_numpy(k).astype(np.float32, copy=False)
         V: np.ndarray = to_numpy(v).astype(np.float32, copy=False)
-        with METRICS.timer("cpu.attention"):
+        with METRICS.timer("dgpu.attention"):
             out = None
             used_engine = False
             # Native fused kernel for the common unmasked, same-shape [B,T,D] case.
@@ -240,7 +244,7 @@ class CPUBackend(Backend):
                     used_engine = True
                 except Exception:
                     out = None
-                    METRICS.incr("cpu.attention.engine_fallback")
+                    METRICS.incr("dgpu.attention.engine_fallback")
             # General path (masked / multi-head / cross-attention): both matmuls
             # AND the softmax run on the engine. Only the score scaling and the
             # additive mask are element-wise — the engine exposes no kernel for
@@ -261,10 +265,10 @@ class CPUBackend(Backend):
                     used_engine = ue1 and ue2
                 except Exception:
                     out = None
-                    METRICS.incr("cpu.attention.engine_fallback")
+                    METRICS.incr("dgpu.attention.engine_fallback")
             if out is None:
                 out = self._attention_np(Q, K, V, mask, causal)
-        METRICS.incr("cpu.attention.engine" if used_engine else "cpu.attention.numpy")
+        METRICS.incr("dgpu.attention.engine" if used_engine else "dgpu.attention.numpy")
         return Tensor(out, dtype=None)
 
     @staticmethod
@@ -291,7 +295,7 @@ class CPUBackend(Backend):
         if cw != c:
             raise ValueError(f"conv2d channel mismatch: input C={c} vs weight C={cw}")
         s, p = stride, padding
-        with METRICS.timer("cpu.conv2d"):
+        with METRICS.timer("dgpu.conv2d"):
             if p > 0:
                 X = np.pad(X, ((0, 0), (0, 0), (p, p), (p, p)))
             hp, wp = X.shape[2], X.shape[3]
@@ -311,19 +315,19 @@ class CPUBackend(Backend):
             out = gemm_out.reshape(o, n, ho, wo).transpose(1, 0, 2, 3)
             if bias is not None:
                 out = out + to_numpy(bias).reshape(1, o, 1, 1)
-        METRICS.incr("cpu.conv2d")
+        METRICS.incr("dgpu.conv2d")
         return Tensor(np.ascontiguousarray(out), dtype=None)
 
     # ── mlp: two engine GEMMs (first layer relu fully fused) ──────────────────
     def mlp(self, x, w1, b1, w2, b2, activation: str = "relu"):
         h = self.gemm(x, w1, bias=b1, activation=activation)
         out = self.gemm(h, w2, bias=b2)
-        METRICS.incr("cpu.mlp")
+        METRICS.incr("dgpu.mlp")
         return out
 
     def reduce(self, x, op: str, axis, keepdims: bool = False):
         X = to_numpy(x)
-        with METRICS.timer("cpu.reduce"):
+        with METRICS.timer("dgpu.reduce"):
             if op == "sum":
                 out = X.sum(axis=axis, keepdims=keepdims)
             elif op == "mean":
@@ -337,3 +341,7 @@ class CPUBackend(Backend):
             else:
                 raise ValueError(f"unsupported reduce op '{op}'")
         return Tensor(out, dtype=None)
+
+
+# Backwards-compatible alias — existing code that imports CPUBackend still works.
+CPUBackend = DigitalGPUBackend
