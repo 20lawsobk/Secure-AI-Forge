@@ -22,12 +22,35 @@ import base64
 import json
 import logging
 import tempfile
+import threading
 import time
 import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger("seed_audio")
+
+# ---------------------------------------------------------------------------
+# Process-wide single-flight guard
+# ---------------------------------------------------------------------------
+# The seeder does a read-then-write of mb:dataset:audio:meta (start_idx +
+# index snapshot), so concurrent runs from ANY entry point (HTTP endpoint,
+# DataPuller auto-growth, CLI) would race and corrupt the manifest.
+# This module-level lock is the canonical guard — all callers share it.
+
+_SEED_LOCK = threading.Lock()
+
+
+class AlreadySeedingError(RuntimeError):
+    """Raised by seed() when a seeding run is already in progress process-wide."""
+
+
+def is_seeding() -> bool:
+    """Return True when a seed run is currently in progress (non-blocking probe)."""
+    acquired = _SEED_LOCK.acquire(blocking=False)
+    if acquired:
+        _SEED_LOCK.release()
+    return not acquired
 
 _HF_DATASET = "benjamin-paine/free-music-archive-small"
 _HF_ROWS = (
@@ -211,7 +234,13 @@ def _estimate_bpm_key(mp3_bytes: bytes) -> tuple[float, str]:
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def seed(storage: Any, count: int = 12, *, replace: bool = False) -> dict[str, Any]:
+def seed(
+    storage: Any,
+    count: int = 12,
+    *,
+    replace: bool = False,
+    force_source: Optional[str] = None,
+) -> dict[str, Any]:
     """Download ``count`` real tracks and store them under ``mb:dataset:audio``.
 
     Primary source: HuggingFace datasets-server (FMA-small).
@@ -219,10 +248,37 @@ def seed(storage: Any, count: int = 12, *, replace: bool = False) -> dict[str, A
     available locally) — used automatically when the datasets-server is
     unreachable (503 / network error).
 
+    ``force_source`` overrides the automatic probe:
+      - ``"hf"``      — always attempt HF first (still falls back to librosa on error)
+      - ``"librosa"`` — skip HF entirely, use librosa bundled examples
+      - ``None``      — auto-detect (default: probe HF, fall back to librosa)
+
     Requires a live storage backend; raises if storage is unavailable so the
     caller fails explicitly instead of writing to the non-persistent in-process
     fallback.
+
+    Raises ``AlreadySeedingError`` when another seed is already running so that
+    DataPuller and other background callers can skip gracefully rather than wait.
     """
+    # Single-flight: one seed at a time across all callers in this process.
+    if not _SEED_LOCK.acquire(blocking=False):
+        raise AlreadySeedingError(
+            "audio dataset seeding already in progress — skipping this call"
+        )
+    try:
+        return _seed_locked(storage, count=count, replace=replace, force_source=force_source)
+    finally:
+        _SEED_LOCK.release()
+
+
+def _seed_locked(
+    storage: Any,
+    count: int = 12,
+    *,
+    replace: bool = False,
+    force_source: Optional[str] = None,
+) -> dict[str, Any]:
+    """Internal implementation — must only be called while _SEED_LOCK is held."""
     pdim_up = getattr(storage, "is_available", False)
     disk_up = getattr(storage, "disk_store_available", False)
     if not pdim_up and not disk_up:
@@ -239,7 +295,16 @@ def seed(storage: Any, count: int = 12, *, replace: bool = False) -> dict[str, A
         index = list(existing.get("index", []))
 
     # Decide which source to use for this seeding run.
-    use_hf = _hf_rows_available()
+    fs = (force_source or "").lower().strip()
+    if fs == "librosa":
+        use_hf = False
+        logger.info("[seed_audio] force_source=librosa — skipping HF probe")
+    elif fs == "hf":
+        use_hf = True
+        logger.info("[seed_audio] force_source=hf — attempting HuggingFace directly")
+    else:
+        use_hf = _hf_rows_available()
+
     if use_hf:
         logger.info("[seed_audio] using HuggingFace datasets-server as source")
         active_source = _SOURCE
@@ -356,6 +421,7 @@ def seed(storage: Any, count: int = 12, *, replace: bool = False) -> dict[str, A
     num_chunks = start_idx + stored
     meta = {
         "name": DATASET_NAME,
+        "seeded_at": time.time(),
         "description": (
             "Real music samples from the Free Music Archive (FMA-small)" if active_source == _SOURCE
             else "Real CC-licensed music samples (librosa bundled examples)"

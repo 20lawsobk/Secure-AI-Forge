@@ -2913,18 +2913,77 @@ async def register_dataset(dataset: DatasetRegister, _admin = Depends(verify_adm
     return {"status": "registered", "name": dataset.name}
 
 
-# Single-flight guard: the seeder reads-then-writes mb:dataset:audio:meta, so
-# concurrent runs would race on the start_idx/index snapshot and corrupt the
-# manifest. Only one seed may run per process at a time.
-_AUDIO_SEED_LOCK = threading.Lock()
+# Single-flight for audio seeding is now enforced inside
+# workers/seed_audio_dataset.py (_SEED_LOCK + AlreadySeedingError).
+# is_seeding() lets the HTTP endpoint return an immediate response without
+# waiting for the background thread to race-fail on the module lock.
+
+
+@app.get("/storage/datasets/audio/status")
+async def get_audio_dataset_status(_key = Depends(verify_api_key)):
+    """Return the current audio dataset manifest and auto-growth state.
+
+    Combines the stored dataset meta (num_chunks, source, seeded_at) with the
+    DataPuller's audio auto-growth counters so the dashboard can show dataset
+    size and freshness in one call.
+    """
+    from storage_client import get_storage
+    storage = get_storage()
+    meta: dict = {}
+    try:
+        raw = storage.get("mb:dataset:audio:meta")
+        if isinstance(raw, dict):
+            meta = {
+                "num_chunks": int(raw.get("num_chunks", 0)),
+                "source": str(raw.get("source", "")),
+                "seeded_at": raw.get("seeded_at"),
+                "description": str(raw.get("description", "")),
+            }
+    except Exception:
+        pass
+
+    auto_growth: dict = {}
+    if _data_puller is not None:
+        try:
+            s = _data_puller.get_state()
+            auto_growth = {
+                "enabled": True,
+                "threshold": s.get("audio_growth_threshold", 20),
+                "last_auto_seed_at": s.get("last_audio_seed_at"),
+                "auto_seed_count": s.get("audio_auto_seed_count", 0),
+                "interval_hours": s.get("audio_growth_interval_hours", 6),
+            }
+        except Exception:
+            auto_growth = {"enabled": False}
+    else:
+        auto_growth = {"enabled": False}
+
+    from workers.seed_audio_dataset import is_seeding as _is_seeding
+    seeding_now = _is_seeding()
+
+    return {
+        "dataset": meta,
+        "auto_growth": auto_growth,
+        "seeding_now": seeding_now,
+    }
 
 
 @app.post("/storage/datasets/audio/seed")
-async def seed_audio_dataset(count: int = 12, replace: bool = False,
-                             _admin = Depends(verify_admin)):
+async def seed_audio_dataset(
+    count: int = 12,
+    replace: bool = False,
+    source: Optional[str] = None,
+    _admin = Depends(verify_admin),
+):
     """Seed REAL music samples from a public dataset into pdim storage so that
     ``/api/generate/audio`` produces output from real audio. Runs in the
-    background; poll ``GET /storage/datasets`` for the ``audio`` manifest."""
+    background; poll ``GET /storage/datasets/audio/status`` for the manifest.
+
+    ``source`` overrides the automatic HF/librosa probe:
+      - ``"hf"``      — force HuggingFace FMA-small (falls back to librosa on error)
+      - ``"librosa"`` — use librosa bundled CC examples directly
+      - omit / ``null`` — auto-detect (probe HF, fall back to librosa)
+    """
     from storage_client import get_storage
     from workers import seed_audio_dataset as _seed
 
@@ -2935,19 +2994,30 @@ async def seed_audio_dataset(count: int = 12, replace: bool = False,
             detail="storage backend unavailable — cannot seed audio dataset",
         )
 
-    if not _AUDIO_SEED_LOCK.acquire(blocking=False):
+    from workers.seed_audio_dataset import is_seeding as _is_seeding
+    if _is_seeding():
         return {"status": "already_seeding"}
+
+    force_source = source.strip().lower() if source else None
 
     def _run():
         try:
-            _seed.seed(storage, count=int(count), replace=bool(replace))
+            _seed.seed(
+                storage,
+                count=int(count),
+                replace=bool(replace),
+                force_source=force_source,
+            )
         except Exception as exc:  # background — surface explicit failure
             print(f"[seed_audio] seeding failed: {exc}", flush=True)
-        finally:
-            _AUDIO_SEED_LOCK.release()
 
     threading.Thread(target=_run, daemon=True).start()
-    return {"status": "seeding", "count": int(count), "replace": bool(replace)}
+    return {
+        "status": "seeding",
+        "count": int(count),
+        "replace": bool(replace),
+        "source": force_source or "auto",
+    }
 
 
 @app.post("/storage/checkpoint/save")

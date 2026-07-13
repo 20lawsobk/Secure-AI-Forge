@@ -1,0 +1,13 @@
+# Runtime / generated artefacts — never commit these
+data/local_kv.db
+data/*.db
+data/*.db-wal
+data/*.db-shm
+uploads/
+ai_model/weights/*.pt
+ai_model/weights/*.npz
+ai_model/training_data/pull_*.json
+__pycache__/
+*.pyc
+*.pyo
+.env

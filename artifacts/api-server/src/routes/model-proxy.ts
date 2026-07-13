@@ -657,6 +657,10 @@ router.post("/storage/datasets/register", async (req, res) => {
   await proxyRequest(req, res, "/storage/datasets/register");
 });
 
+router.get("/storage/datasets/audio/status", async (req, res) => {
+  await proxyRequest(req, res, "/storage/datasets/audio/status");
+});
+
 router.post("/storage/datasets/audio/seed", async (req, res) => {
   await proxyRequest(req, res, "/storage/datasets/audio/seed");
 });

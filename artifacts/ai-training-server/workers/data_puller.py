@@ -111,6 +111,15 @@ class DataPuller:
     PULLED_KEY = "mb:training:puller:pulled"
     DATASET_KEY = "mb:training:puller:dataset"
 
+    # ── Audio dataset auto-growth config ──────────────────────────────────────
+    # When num_chunks falls below AUDIO_GROWTH_THRESHOLD, each DataPuller cycle
+    # triggers a top-up seed (replace=False) up to AUDIO_GROWTH_BATCH tracks.
+    # Auto-seeds are rate-limited to AUDIO_GROWTH_INTERVAL_HOURS between runs
+    # so that a slow-starting storage backend doesn't cause a flood of seeds.
+    AUDIO_GROWTH_THRESHOLD    = 20    # grow if dataset has fewer than this many chunks
+    AUDIO_GROWTH_BATCH        = 6     # tracks to add per auto-seed run
+    AUDIO_GROWTH_INTERVAL_SEC = 6 * 3600  # minimum 6 hours between auto-seeds
+
     def __init__(self, storage):
         self.storage = storage
         self._lock = threading.Lock()
@@ -128,6 +137,12 @@ class DataPuller:
             "pull_count": 0,
             "sources_available": len(PUBLIC_SOURCES),
             "last_error": None,
+            # Audio dataset auto-growth counters (visible in dashboard)
+            "audio_chunks": 0,
+            "audio_growth_threshold": self.AUDIO_GROWTH_THRESHOLD,
+            "audio_growth_interval_hours": self.AUDIO_GROWTH_INTERVAL_SEC // 3600,
+            "last_audio_seed_at": None,
+            "audio_auto_seed_count": 0,
         }
 
         TRAINING_DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -232,11 +247,91 @@ class DataPuller:
             f"{len(new_texts)} new samples "
             f"(pdim:{len(pulled_pdim)} public:{len(pulled_public)})"
         )
+
+        # Auto-grow the audio dataset when it's below the freshness threshold.
+        # Runs after every pull cycle; rate-limited by AUDIO_GROWTH_INTERVAL_SEC.
+        self._auto_seed_audio()
+
         return {
             "new_samples": len(new_texts),
             "pdim_samples": len(pulled_pdim),
             "public_samples": len(pulled_public),
         }
+
+    # ------------------------------------------------------------------ #
+    # Audio dataset auto-growth                                           #
+    # ------------------------------------------------------------------ #
+
+    def _audio_chunk_count(self) -> int:
+        """Return current num_chunks from the audio dataset manifest, or 0."""
+        try:
+            meta = self.storage.get("mb:dataset:audio:meta")
+            if isinstance(meta, dict):
+                return int(meta.get("num_chunks", 0))
+        except Exception:
+            pass
+        return 0
+
+    def _auto_seed_audio(self) -> None:
+        """Top up the audio dataset when it is below the freshness threshold.
+
+        Never raises — any failure is logged and counted as a non-fatal event.
+        Rate-limited: at most one auto-seed per AUDIO_GROWTH_INTERVAL_SEC seconds.
+        Uses replace=False so existing tracks are preserved (growth only).
+        """
+        if not self.storage.is_available and not getattr(
+            self.storage, "disk_store_available", False
+        ):
+            return  # storage offline — skip silently
+
+        with self._lock:
+            last_seed = self.state.get("last_audio_seed_at")
+            now = time.time()
+            if last_seed and (now - last_seed) < self.AUDIO_GROWTH_INTERVAL_SEC:
+                return  # too soon since last auto-seed
+
+        current = self._audio_chunk_count()
+        with self._lock:
+            self.state["audio_chunks"] = current
+
+        if current >= self.AUDIO_GROWTH_THRESHOLD:
+            return  # dataset is large enough — nothing to do
+
+        logger.info(
+            "[DataPuller] audio dataset has %d chunks (< threshold %d) — auto-seeding %d more",
+            current, self.AUDIO_GROWTH_THRESHOLD, self.AUDIO_GROWTH_BATCH,
+        )
+        from workers.seed_audio_dataset import (
+            seed as _seed_fn,
+            AlreadySeedingError as _AlreadySeedingError,
+        )
+        try:
+            summary = _seed_fn(
+                self.storage,
+                count=self.AUDIO_GROWTH_BATCH,
+                replace=False,
+            )
+        except _AlreadySeedingError:
+            # Another caller (e.g. HTTP endpoint) is already seeding — skip.
+            logger.info("[DataPuller] audio auto-seed skipped — seeding already in progress")
+            return
+        except Exception as exc:
+            logger.warning("[DataPuller] auto-seed failed (non-fatal): %s", exc)
+            return
+
+        # ── Success: update rate-limit timestamp and counters ──────────────
+        new_total = summary.get("total", current)
+        with self._lock:
+            self.state["last_audio_seed_at"] = time.time()
+            self.state["audio_chunks"] = new_total
+            self.state["audio_auto_seed_count"] = (
+                self.state.get("audio_auto_seed_count", 0) + 1
+            )
+        logger.info(
+            "[DataPuller] auto-seed complete — dataset now has %d chunks "
+            "(added %d, source=%s)",
+            new_total, summary.get("stored", 0), summary.get("source", "?"),
+        )
 
     # ------------------------------------------------------------------ #
     # pdim pull                                                            #

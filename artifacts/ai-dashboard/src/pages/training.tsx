@@ -15,6 +15,8 @@ import {
   Clock,
   RotateCcw,
   ChevronDown,
+  Music,
+  TrendingUp,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/use-auth";
@@ -162,6 +164,30 @@ export default function Training() {
       refetchPuller();
     },
     onError: () => toast({ variant: "destructive", title: "Pull failed" }),
+  });
+
+  // Audio dataset state
+  const [audioSource, setAudioSource] = useState<"auto" | "hf" | "librosa">("auto");
+
+  const { data: audioStatus, refetch: refetchAudio } = useQuery({
+    queryKey: ["audio-dataset-status", adminKey],
+    queryFn: () => apiFetch("/storage/datasets/audio/status", { headers }),
+    enabled: !!adminKey,
+    refetchInterval: 20_000,
+  });
+
+  const topUpMut = useMutation({
+    mutationFn: () =>
+      apiFetch(
+        `/storage/datasets/audio/seed?count=6&replace=false${audioSource !== "auto" ? `&source=${audioSource}` : ""}`,
+        { method: "POST", headers }
+      ),
+    onSuccess: () => {
+      toast({ title: "Audio top-up started", description: "6 tracks are being added in the background." });
+      setTimeout(() => refetchAudio(), 3000);
+    },
+    onError: () =>
+      toast({ variant: "destructive", title: "Top-up failed", description: "Storage may be unavailable." }),
   });
 
   const progress =
@@ -466,6 +492,94 @@ export default function Training() {
               />
               {pullNowMut.isPending ? "Pulling..." : "Pull Now"}
             </Button>
+          </div>
+
+          {/* Audio Dataset */}
+          <div className="glass-panel p-5 rounded-2xl space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-display font-semibold text-white flex items-center gap-2">
+                <Music
+                  className={`w-4 h-4 ${audioStatus?.seeding_now ? "text-purple-400 animate-pulse" : "text-muted-foreground"}`}
+                />
+                Audio Dataset
+              </h3>
+              <Badge
+                variant="outline"
+                className={
+                  audioStatus?.seeding_now
+                    ? "border-purple-500/40 text-purple-400"
+                    : (audioStatus?.dataset?.num_chunks ?? 0) >= 20
+                    ? "border-green-500/40 text-green-400"
+                    : "border-amber-500/40 text-amber-400"
+                }
+              >
+                {audioStatus?.seeding_now
+                  ? "Seeding…"
+                  : `${audioStatus?.dataset?.num_chunks ?? 0} tracks`}
+              </Badge>
+            </div>
+
+            {audioStatus && (
+              <div className="space-y-1.5 text-xs">
+                <div className="flex justify-between text-muted-foreground">
+                  <span>Total tracks</span>
+                  <span className="text-white font-mono">
+                    {audioStatus.dataset?.num_chunks ?? 0}
+                    <span className="text-muted-foreground ml-1">/ {audioStatus.auto_growth?.threshold ?? 20} threshold</span>
+                  </span>
+                </div>
+                {audioStatus.dataset?.source && (
+                  <div className="flex justify-between text-muted-foreground">
+                    <span>Source</span>
+                    <span className="text-white font-mono truncate max-w-[140px]" title={audioStatus.dataset.source}>
+                      {audioStatus.dataset.source.startsWith("huggingface") ? "HuggingFace FMA" : "librosa examples"}
+                    </span>
+                  </div>
+                )}
+                {audioStatus.dataset?.seeded_at && (
+                  <div className="flex justify-between text-muted-foreground">
+                    <span>Last seeded</span>
+                    <span className="text-white font-mono">
+                      {format(new Date(audioStatus.dataset.seeded_at * 1000), "MM/dd HH:mm")}
+                    </span>
+                  </div>
+                )}
+                {audioStatus.auto_growth?.enabled && (
+                  <div className="flex justify-between text-muted-foreground">
+                    <span className="flex items-center gap-1">
+                      <TrendingUp className="w-3 h-3" /> Auto-grows
+                    </span>
+                    <span className="text-white font-mono">
+                      {audioStatus.auto_growth.auto_seed_count ?? 0}× so far
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Source selector + Top-Up button */}
+            <div className="flex gap-2 pt-1">
+              <select
+                value={audioSource}
+                onChange={(e) => setAudioSource(e.target.value as typeof audioSource)}
+                className="flex-1 h-8 text-xs rounded bg-white/5 border border-white/10 text-white px-2 focus:outline-none focus:border-purple-500/50"
+              >
+                <option value="auto">Auto source</option>
+                <option value="hf">Force HuggingFace</option>
+                <option value="librosa">Force librosa</option>
+              </select>
+              <Button
+                size="sm"
+                disabled={topUpMut.isPending || audioStatus?.seeding_now}
+                onClick={() => topUpMut.mutate()}
+                className="h-8 text-xs bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 border border-purple-600/30 px-3"
+              >
+                <RefreshCw
+                  className={`w-3 h-3 mr-1 ${topUpMut.isPending ? "animate-spin" : ""}`}
+                />
+                {topUpMut.isPending || audioStatus?.seeding_now ? "Seeding…" : "Top Up"}
+              </Button>
+            </div>
           </div>
         </div>
 
