@@ -5,6 +5,19 @@ import net from "net";
 
 const PYTHON_PORT = parseInt(process.env.MODEL_API_PORT || "9878", 10);
 
+// Proxy-only mode: this instance must NEVER try to own (spawn or restart) the
+// Python server.  Two conditions each independently set this flag:
+//
+//  1. DISABLE_PYTHON_SPAWN=1   — explicit override; can be set on any workflow.
+//  2. MODEL_API_PORT not set   — "Start application" is the only workflow that
+//     explicitly sets MODEL_API_PORT=9878.  Artifact-managed workflows
+//     (artifacts/api-server: API Server) run the same command without it, so
+//     they fall into proxy-only mode automatically.  This prevents the startup
+//     race where two api-server instances compete for the Python lock.
+const PYTHON_SPAWN_DISABLED =
+  process.env.DISABLE_PYTHON_SPAWN === "1" ||
+  process.env.MODEL_API_PORT === undefined;
+
 const PYTHON_SCRIPT = (() => {
   const metaUrl = import.meta?.url;
   if (metaUrl) {
@@ -178,6 +191,23 @@ function startHealthMonitor() {
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 export async function ensurePythonServer(): Promise<void> {
+  if (PYTHON_SPAWN_DISABLED) {
+    console.log(
+      `[Python] DISABLE_PYTHON_SPAWN=1 — proxy-only mode, waiting for Python on port ${PYTHON_PORT}…`,
+    );
+    // Still wait so the process doesn't report ready before Python is up,
+    // but never spawn or monitor — that's the owner's job.
+    const alreadyUp = await pollUntilOpen(PYTHON_PORT, 60_000);
+    if (!alreadyUp) {
+      console.warn(
+        `[Python] Proxy-only: port ${PYTHON_PORT} not yet open — requests will be retried by circuit breaker.`,
+      );
+    } else {
+      console.log(`[Python] AI training server ready on port ${PYTHON_PORT}`);
+    }
+    return;
+  }
+
   const alreadyUp = await pollUntilOpen(PYTHON_PORT, 6_000);
 
   if (alreadyUp) {
