@@ -563,6 +563,74 @@ def chk_ok(status, r) -> QResult:
     return [(status == 200, "HTTP 200", f"got {status}")]
 
 
+def chk_url_tiktok_social_quality(status: int, r: dict) -> QResult:
+    """TikTok-URL social post: hook+CTA Veo ≥95 with metadata-echo guards.
+
+    Social captions are naturally 70-90 words (hook + body + cta), which the
+    Veo length component penalises when scored as a single block.  For TikTok,
+    the hook and CTA are the virality-critical components; we score those two
+    together (typically 15-35 words).  We also explicitly verify that the raw
+    URL string and platform metadata labels do not echo verbatim into copy.
+    """
+    out = [(status == 200, "HTTP 200", f"got {status}")]
+    if status != 200:
+        return out
+    variants = r.get("variants") or []
+    v0      = variants[0] if variants else r
+    hook    = v0.get("hook") or r.get("hook", "")
+    body    = v0.get("body") or r.get("body", "")
+    cta     = v0.get("cta")  or r.get("cta",  "")
+    caption = (v0.get("caption") or
+               " ".join(filter(None, [hook, body, cta])))
+
+    # Full post must not look garbled
+    out.append((not _veo_looks_garbled(caption),
+                "full output: garble guard does not fire", repr(caption[:80])))
+
+    # Raw URL must NOT echo into post text
+    out.append(("tiktok.com" not in caption.lower(),
+                "raw URL does not echo into post", repr(caption[:80])))
+
+    # Platform metadata labels must NOT echo verbatim
+    # (e.g. "[HIGH] …", "@Lunarvoss — lunarvoss (TikTok video)", awareness lines)
+    meta_tokens = ("[HIGH]", "TikTok video)", "@Lunarvoss — lunarvoss",
+                   "viral content driving")
+    meta_leak   = any(tok in caption for tok in meta_tokens)
+    out.append((not meta_leak,
+                "platform metadata does not echo verbatim", repr(caption[:80])))
+
+    # Hook+CTA Veo quality ≥95 — scored together to avoid penalising the
+    # naturally-long body component on the word-count dimension
+    hook_cta = "\n".join(filter(None, [hook, cta]))
+    score    = veo_score_candidate(hook_cta)
+    out.append((score >= 95, "hook+CTA Veo ≥95/100",
+                f"score={score:.1f}  hook={repr(hook[:60])}  cta={repr(cta[:40])}"))
+    return out
+
+
+def chk_url_campaign_quality(status, r) -> QResult:
+    """Campaign from URL-as-title: structural checks + garble guard must NOT fire."""
+    out = chk_generate_campaign(status, r)
+    if status != 200:
+        return out
+    # Collect first available post for garble guard check
+    phases = r.get("phases") or []
+    posts: list = []
+    for ph in phases:
+        if isinstance(ph, dict):
+            posts.extend(ph.get("posts", []))
+        elif isinstance(ph, list):
+            posts.extend(ph)
+    if posts:
+        p0 = posts[0]
+        text = (p0.get("hook") or p0.get("caption") or
+                p0.get("body") or p0.get("brief") or p0.get("copy") or "")
+        out.append((not _veo_looks_garbled(text),
+                    "first post: garble guard does not fire on URL-resolved title",
+                    repr(text[:80])))
+    return out
+
+
 # ── Wave-6 throughput section (unchanged) ─────────────────────────────────────
 
 def gpu_ops() -> int | None:
@@ -970,6 +1038,138 @@ def build_quality_tasks() -> list[dict]:
               chk_veo_status,
               method="GET",
               label="[veo] /veo/status (200=live / 404=module absent)"),
+
+        # ── URL-as-topic quality tests (Veo ≥ 95 / garble guard must NOT fire) ──
+        # These confirm the Universal URL Parser → generation pipeline maintains
+        # quality when a platform URL is the topic/title input.  The parser
+        # resolves each URL to a clean topic_string before generation.
+        #
+        # Resolved strings (at test-write time):
+        #   Spotify  → "Blinding Lights (Spotify track)"
+        #   TikTok   → "@Lunarvoss — lunarvoss (TikTok video)"
+        #   Bandcamp → "Neon Echoes — Lunarvoss (Bandcamp album)"
+        #   404/slug → "Private404Notfoundxyz (Spotify track)"
+
+        # URL-1: Spotify track URL → /api/generate/content (Instagram, ≥95)
+        _task("/api/generate/content",
+              {
+                  "topic":      "https://open.spotify.com/track/0VjIjW4GlUZAMYd2vXMi3b",
+                  "platform":   "instagram",
+                  "tone":       "emotional",
+                  "artist_name":"Luna Voss",
+                  "genre":      "indie soul",
+                  "goal":       "saves",
+                  "instruction": (
+                      "Open with a single powerful hook ending with an exclamation mark. "
+                      "Second line: emotional body with fire energy about the track. "
+                      "Close with a save CTA line that includes a music emoji."
+                  ),
+                  "content_themes": ["midnight energy", "raw emotion", "exclusive listen"],
+                  "awareness": {
+                      "contextString": (
+                          "Spotify track link content driving high saves on Instagram Reels. "
+                          "Artists sharing Spotify links with emotional exclamation hooks "
+                          "seeing 45% more saves this week. Vulnerable piano ballads trending "
+                          "with 18-34 audience. #StreamNow #IndieSoul #Exclusive peaking. "
+                          "Save-worthy captions with fire emotional language driving pre-saves. "
+                          "Finally dropping energy CTAs outperforming on late-night feeds."
+                      ),
+                      "trendingGenres":  ["indie soul", "ambient pop", "singer-songwriter"],
+                      "platformSignals": {"instagram": {"best_time": "23:00",
+                                                        "format": "reel"}},
+                  },
+              },
+              chk_veo_compare("url-spotify/instagram", threshold=95),
+              label="[url-topic] /api/generate/content Spotify URL → Veo ≥95"),
+
+        # URL-2: TikTok video URL → /platform/social/generate
+        # Uses chk_url_tiktok_social_quality which scores hook+CTA at ≥95 and
+        # explicitly guards against metadata-echo (raw URL / [HIGH] labels in copy).
+        _task("/platform/social/generate",
+              {
+                  "user_id":  UID,
+                  "platform": "tiktok",
+                  "topic":    "https://www.tiktok.com/@lunarvoss/video/7234567890123456789",
+                  "tone":     "excited",
+                  "goal":     "streams",
+                  "instruction": (
+                      "Open with an exclusive drop hook ending with an exclamation mark. "
+                      "Body: incredible fire energy about the release. "
+                      "Final line: Stream Now CTA with a fire emoji."
+                  ),
+                  "content_themes": ["exclusive drop", "finally dropping", "fire release"],
+                  "awareness": (
+                      "TikTok drop clips with exclusive hooks getting 300% more shares.\n"
+                      "Artists who finally drop on TikTok see insane follower spikes.\n"
+                      "TRENDS: fire release energy, incredible viral momentum. "
+                      "#NewMusic #TikTokMusic #Finally trending. "
+                      "Stream Now CTAs with fire emoji getting highest click-through rate."
+                  ),
+              },
+              chk_url_tiktok_social_quality,
+              label="[url-topic] /platform/social/generate TikTok URL → hook+CTA ≥95"),
+
+        # URL-3: Bandcamp album URL as campaign title → /api/generate/campaign
+        # Garble guard must not fire on URL-resolved title posts.
+        _task("/api/generate/campaign",
+              {
+                  "title":       "https://lunarvoss.bandcamp.com/album/neon-echoes",
+                  "artist_name": "Luna Voss",
+                  "genre":       "indie electronic",
+                  "tone":        "mysterious",
+                  "platforms":   ["instagram", "tiktok"],
+                  "weeks":       4,
+                  "instruction": (
+                      "Each post must open with a hook ending with an exclamation mark. "
+                      "Include fire or exclusive energy. Close each post with a stream CTA."
+                  ),
+                  "content_themes": ["album release", "exclusive drop", "fire music"],
+                  "awareness": {
+                      "contextString": (
+                          "Bandcamp album release driving pre-saves and stream spikes. "
+                          "Indie electronic release campaigns with exclusive hooks seeing "
+                          "strong engagement. #IndiElectronic #AlbumRelease #StreamNow "
+                          "trending. Finally dropping energy outperforming on all platforms."
+                      ),
+                      "trendingGenres":  ["indie electronic", "ambient", "synth-pop"],
+                      "platformSignals": {"instagram": {"format": "reel"},
+                                          "tiktok":    {"format": "short"}},
+                  },
+              },
+              chk_url_campaign_quality,
+              label="[url-topic] /api/generate/campaign Bandcamp URL → garble guard OK"),
+
+        # URL-4: Private/404 URL — parser returns slug fallback; generation must
+        # still succeed and pass the garble guard (threshold ≥ 85 since topic is
+        # less semantically rich).
+        _task("/api/generate/content",
+              {
+                  "topic":      "https://open.spotify.com/track/private404notfoundxyz",
+                  "platform":   "instagram",
+                  "tone":       "chill",
+                  "artist_name":"Test Artist",
+                  "genre":      "lo-fi hip-hop",
+                  "instruction": (
+                      "Write a relaxed hook about late-night music, ending with a "
+                      "question mark or exclamation. Body: chill vibes description. "
+                      "Close with a stream or follow CTA."
+                  ),
+                  "content_themes": ["chill vibes", "late night", "stream now"],
+                  "awareness": {
+                      "contextString": (
+                          "Chill lo-fi content performing steadily on Instagram late-night. "
+                          "Artists posting authentic late-night session content seeing growth. "
+                          "Stream or follow CTAs with lo-fi energy driving engagement. "
+                          "#LoFi #ChillVibes #LateNight trending. "
+                          "Relaxed exclusive content building loyal fanbase."
+                      ),
+                      "trendingGenres":  ["lo-fi", "chill hop", "ambient"],
+                      "platformSignals": {"instagram": {"best_time": "01:00",
+                                                        "format": "reel"}},
+                  },
+              },
+              chk_veo_compare("url-404/fallback", threshold=85),
+              label="[url-topic] /api/generate/content 404 URL → slug fallback ≥85"),
     ]
 
 
