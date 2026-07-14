@@ -1,4 +1,4 @@
-modules = ["python-3.11", "web", "bash", "nodejs-22", "postgresql-16"]
+modules = ["python-3.11", "nodejs-20", "web"]
 
 [[artifacts]]
 id = "artifacts/ai-dashboard"
