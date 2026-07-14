@@ -141,7 +141,7 @@ def _body_similarity(a: str, b: str) -> float:
 def _compose_body_cta(
     *, title: str, artist: str, platform: str, goal: str, theme: str,
     tone: Optional[str], genre: Optional[str], brand_voice: Optional[str],
-    target_audience: Optional[str],
+    target_audience: Optional[str], awareness: str = "",
 ) -> Dict[str, Any]:
     """Ranked body+CTA variants from the shared intelligence composer.
 
@@ -151,6 +151,9 @@ def _compose_body_cta(
     ``theme`` (a natural phrase, never an instruction) is fed as the post's theme
     to diversify bodies across the campaign. The caller picks the variant that is
     most distinct from other posts already placed in the same phase. Never raises.
+    ``awareness`` carries live chart + platform signals into the brief so every
+    campaign post is conditioned on the same real-world context as stand-alone
+    social posts.
     """
     try:
         from ai_model import request_intelligence as ri
@@ -159,6 +162,7 @@ def _compose_body_cta(
             tone=tone, genre=genre, artist=artist,
             extra=" ".join(filter(None, [brand_voice, target_audience])),
             themes=[theme] if theme else None, track=title,
+            awareness=awareness,
         )
         composed = ri.compose_caption(
             title, artist, brief, genre=genre, brand_voice=brand_voice, variants=4,
@@ -249,6 +253,7 @@ def build_campaign(
     image_fn: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
     teaser_fn: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
     seed: int = 0,
+    awareness: str = "",
 ) -> Dict[str, Any]:
     """Build a full release rollout campaign for one song. Never raises.
 
@@ -336,7 +341,7 @@ def build_campaign(
             bc = _compose_body_cta(
                 title=title, artist=artist, platform=platform, goal=slot["goal"],
                 theme=slot["theme"], tone=tone, genre=genre, brand_voice=brand_voice,
-                target_audience=target_audience,
+                target_audience=target_audience, awareness=awareness,
             )
             chosen = _pick_distinct_body(bc["variants"], phase_bodies)
             body, cta = chosen["body"], chosen["cta"]

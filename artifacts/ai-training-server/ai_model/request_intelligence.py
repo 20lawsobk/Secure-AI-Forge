@@ -573,6 +573,7 @@ def build_brief(
     bpm: Optional[float] = None,
     key: Optional[str] = None,
     artist_profile_id: Optional[str] = None,
+    awareness: str = "",
 ) -> GenerationBrief:
     """Analyse a request and produce a structured GenerationBrief.
 
@@ -665,6 +666,32 @@ def build_brief(
             notes.append(_enr["note"])
     except Exception:
         pass
+
+    # ── Live per-request awareness (merged chart + platform signals) ─────────
+    # Folds [HIGH] / TRENDS: lines from the caller's merged awareness string
+    # into the brief's directives so audio, video, and campaign briefs carry
+    # the same live chart signal that social/text routes receive via
+    # _effective_awareness().  Signals are capped at 2 to stay concise.
+    # Never-raise — a brief without awareness signals is still valid.
+    if awareness:
+        try:
+            _aw_signals: List[str] = []
+            for _aw_line in awareness.splitlines():
+                _s = _aw_line.strip()
+                if _s.startswith("[HIGH]"):
+                    _clean = _s[6:].strip().strip(":").strip()
+                    if _clean:
+                        _aw_signals.append(_clean)
+                elif _s.startswith("TRENDS:"):
+                    _clean = _s[7:].strip()
+                    if _clean:
+                        _aw_signals.append(_clean)
+            if _aw_signals:
+                directives.append(
+                    "Align with live chart signals: " + " · ".join(_aw_signals[:2])
+                )
+        except Exception:
+            pass
 
     # Augmented idea fed to the underlying agents to steer better output.
     aug_parts = [topic or "music content"]

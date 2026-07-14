@@ -6190,6 +6190,9 @@ async def api_generate_campaign(req: ApiGenerateCampaignRequest, _key=Depends(re
                 goal=purpose or "awareness", artist_name=artist,
                 hook=hook, body=body, cta=cta, topic=topic,
                 mood=ad.get("mood") or req.mood, bpm=req.bpm, key=req.key,
+                # Propagate campaign awareness so teaser video briefs and scene
+                # selection carry the same live chart signal as the post copy.
+                awareness=_campaign_awareness,
             )
             jid, _brief = _start_video_job(vreq, normalize_platform(platform))
             return {
@@ -6202,6 +6205,9 @@ async def api_generate_campaign(req: ApiGenerateCampaignRequest, _key=Depends(re
 
     image_fn = _campaign_image_fn if req.generate_images else None
     teaser_fn = _campaign_teaser_fn if req.generate_teasers else None
+
+    # Compute campaign awareness once — shared across all posts for consistency.
+    _campaign_awareness = _merged_awareness_for(req)
 
     def _build():
         return build_campaign(
@@ -6222,6 +6228,7 @@ async def api_generate_campaign(req: ApiGenerateCampaignRequest, _key=Depends(re
             image_fn=image_fn,
             teaser_fn=teaser_fn,
             seed=abs(hash(f"{artist}|{req.title}")) % 100000,
+            awareness=_campaign_awareness,
         )
 
     # Asset generation renders images inline (blocking PIL work), so run the
@@ -7528,6 +7535,7 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         modality="audio", platform="general",
         topic=f"{genre_hint} {req.intent or req.instrument or 'music clip'}",
         goal=req.intent, tone=None, genre=req.genre,
+        awareness=_merged_awareness_for(req),
     )
 
     # Unified conditioning bus: sonic technique (tempo/key/spectral tilt). When
@@ -7697,6 +7705,7 @@ def _start_video_job(req: ApiGenerateVideoRequest, platform: str) -> tuple[str, 
         extra=" ".join(filter(None, [req.hook, req.body, req.cta])),
         mood=req.mood, bpm=req.bpm, key=req.key,
         artist_profile_id=req.artistProfileId,
+        awareness=_merged_awareness_for(req),
     )
 
     job_id = str(uuid.uuid4())
