@@ -629,6 +629,17 @@ router.post("/content/generate", async (req, res) => {
   await proxyRequest(req, res, "/content/generate");
 });
 
+// ─── URL Parser Inspector ───────────────────────────────────────────────────
+
+router.get("/url-parser/inspect", async (req, res) => {
+  const url = req.query.url as string | undefined;
+  if (!url) {
+    res.status(422).json({ error: "url query parameter is required" });
+    return;
+  }
+  await proxyRequest(req, res, `/api/url-parser/inspect?url=${encodeURIComponent(url)}`);
+});
+
 router.get("/boostsheets", async (req, res) => {
   await proxyRequest(req, res, "/boostsheets");
 });

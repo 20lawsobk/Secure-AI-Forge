@@ -2999,6 +2999,64 @@ def _effective_awareness(platform: str, raw_awareness: str) -> str:
     return f"{raw_awareness}\n{platform_awareness}" if platform_awareness else raw_awareness
 
 
+@app.get("/api/url-parser/inspect")
+async def url_parser_inspect(url: str = "", _key = Depends(require_scope("generate"))):
+    """Parse any URL and return the full structured metadata the AI pipeline sees.
+
+    Query param:
+      url — the URL (or Spotify URI) to inspect
+
+    Returns the ParsedUrl fields as a JSON object, plus a ready-to-use
+    topic_string and awareness_text block.  Never raises.
+    """
+    if not url or not url.strip():
+        raise HTTPException(status_code=422, detail="url query parameter is required")
+
+    try:
+        from ai_model.url_parser.core import parse_url as _parse_url_core
+    except Exception as import_err:
+        raise HTTPException(status_code=500, detail=f"URL parser unavailable: {import_err}")
+
+    try:
+        parsed = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: _parse_url_core(url.strip())
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Parse error: {exc}")
+
+    return {
+        # Input echo
+        "raw_url":        parsed.raw_url,
+        "canonical_url":  parsed.canonical_url,
+        # Platform
+        "platform":       parsed.platform,
+        "platform_label": parsed.platform_label,
+        "content_type":   parsed.content_type,
+        # Content metadata
+        "title":          parsed.title,
+        "artist":         parsed.artist,
+        "album":          parsed.album,
+        "label":          parsed.label,
+        "description":    parsed.description,
+        # Music signals
+        "genre":          parsed.genre,
+        "mood":           parsed.mood,
+        "bpm":            parsed.bpm,
+        "key":            parsed.key,
+        "release_year":   parsed.release_year,
+        # Derived
+        "intent":         parsed.intent,
+        "goal":           parsed.goal,
+        "content_themes": parsed.content_themes,
+        # Pipeline outputs
+        "topic_string":   parsed.topic_string,
+        "awareness_text": parsed.awareness_text,
+        # Diagnostics
+        "fetch_ok":       parsed.fetch_ok,
+        "error":          parsed.error,
+    }
+
+
 @app.post("/content/generate")
 async def generate_content(req: ContentRequest, _key = Depends(require_scope("generate"))):
     start = time.time()

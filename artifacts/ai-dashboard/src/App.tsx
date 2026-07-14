@@ -16,6 +16,7 @@ const CampaignCalendar = lazy(() => import("@/pages/campaign-calendar"));
 const ModelStatus = lazy(() => import("@/pages/model"));
 const VideoStudio = lazy(() => import("@/pages/video-studio"));
 const ArtistSettings = lazy(() => import("@/pages/artist-settings"));
+const UrlInspector = lazy(() => import("@/pages/url-inspector"));
 const NotFound = lazy(() => import("@/pages/not-found"));
 
 const queryClient = new QueryClient({
@@ -94,6 +95,11 @@ function Router() {
           <Route path="/artist-settings">
             <ErrorBoundary fallbackLabel="Brand Voice settings error">
               <ArtistSettings />
+            </ErrorBoundary>
+          </Route>
+          <Route path="/url-inspector">
+            <ErrorBoundary fallbackLabel="URL Inspector error">
+              <UrlInspector />
             </ErrorBoundary>
           </Route>
           <Route component={NotFound} />
