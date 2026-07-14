@@ -2956,25 +2956,64 @@ def _fetch_page_title(url_str: str) -> str:
     return ""
 
 
+def _clean_idea_from_parsed(parsed) -> str:
+    """Build a ScriptAgent-friendly idea string from a ParsedUrl.
+
+    Unlike ``ParsedUrl.topic_string`` (which is designed for the URL Inspector
+    panel and includes the platform-label suffix such as "(TikTok video)"),
+    this function produces a natural short phrase that won't echo metadata
+    labels verbatim into generated copy.
+
+    Rules:
+    • Strip leading ``@`` from artist/title (TikTok creator handles).
+    • De-duplicate: if title and artist normalise to the same string use only
+      the more readable one (avoids "Lunarvoss — lunarvoss" repetition).
+    • Never include the platform or content-type suffix.
+    • Always falls back to the raw ``topic_string`` so resolution is never lost.
+    """
+    title  = (parsed.title  or "").lstrip("@").strip()
+    artist = (parsed.artist or "").lstrip("@").strip()
+
+    # Normalise for de-duplication: strip spaces and lowercase
+    def _norm(s: str) -> str:
+        return s.lower().replace(" ", "").replace("-", "").replace("_", "")
+
+    if title and artist:
+        if _norm(title) == _norm(artist):
+            # Same entity twice — keep the title (typically has better casing)
+            return title
+        return f"{title} — {artist}"
+    return title or artist or parsed.topic_string
+
+
 def _resolve_topic_from_url(raw_topic: str) -> str:
     """Convert any URL/domain/Spotify-URI topic into a human-readable idea string.
 
     Delegates entirely to the Universal URL Parser which handles 30+ platforms
     with platform-specific extractors, JSON-LD, og:title, path slugs, and
     music metadata (genre, mood, BPM, key).  Never raises.
+
+    Returns a clean idea string (no platform-label suffixes) suitable for
+    direct use in ScriptAgent ``idea`` fields.
     """
     if not raw_topic or not raw_topic.strip():
         return raw_topic
     try:
-        from ai_model.url_parser import parse_topic_url
-        resolved = parse_topic_url(raw_topic)
-        if resolved != raw_topic.strip():
+        from ai_model.url_parser.core import parse_url as _parse_url_direct
+        parsed = _parse_url_direct(raw_topic.strip())
+        idea   = _clean_idea_from_parsed(parsed)
+        if idea and idea != raw_topic.strip():
             _srv_logger.info(
-                "[url-parser] topic resolved: %r → %r", raw_topic.strip(), resolved
+                "[url-parser] topic resolved: %r → %r", raw_topic.strip(), idea
             )
-        return resolved
+        return idea if idea else raw_topic
     except Exception:
-        return raw_topic
+        # Fallback: use the old topic_string path so we never break callers
+        try:
+            from ai_model.url_parser import parse_topic_url
+            return parse_topic_url(raw_topic)
+        except Exception:
+            return raw_topic
 
 
 def _effective_awareness(platform: str, raw_awareness: str) -> str:
