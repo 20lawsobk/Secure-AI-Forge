@@ -2989,6 +2989,11 @@ def _clean_idea_from_parsed(parsed) -> str:
 def _resolve_topic_from_url(raw_topic: str) -> str:
     """Convert any URL/domain/Spotify-URI topic into a human-readable idea string.
 
+    For plain-text topics (not URLs) the input is returned unchanged — no
+    network calls or parsing are attempted.  Only inputs that pass the URL
+    heuristic (http/https scheme, spotify: URI, or bare domain) are handed to
+    the Universal URL Parser.
+
     Delegates entirely to the Universal URL Parser which handles 30+ platforms
     with platform-specific extractors, JSON-LD, og:title, path slugs, and
     music metadata (genre, mood, BPM, key).  Never raises.
@@ -2998,22 +3003,25 @@ def _resolve_topic_from_url(raw_topic: str) -> str:
     """
     if not raw_topic or not raw_topic.strip():
         return raw_topic
+    t = raw_topic.strip()
     try:
-        from ai_model.url_parser.core import parse_url as _parse_url_direct
-        parsed = _parse_url_direct(raw_topic.strip())
-        idea   = _clean_idea_from_parsed(parsed)
-        if idea and idea != raw_topic.strip():
-            _srv_logger.info(
-                "[url-parser] topic resolved: %r → %r", raw_topic.strip(), idea
-            )
-        return idea if idea else raw_topic
+        from ai_model.url_parser.core import is_url as _is_url, parse_url as _parse_url_direct
     except Exception:
-        # Fallback: use the old topic_string path so we never break callers
-        try:
-            from ai_model.url_parser import parse_topic_url
-            return parse_topic_url(raw_topic)
-        except Exception:
-            return raw_topic
+        return t
+
+    # Gate: plain-text topics (e.g. "midnight piano ballad") pass through
+    # unchanged — no DNS resolution, no network calls, no parsing overhead.
+    if not _is_url(t):
+        return t
+
+    try:
+        parsed = _parse_url_direct(t)
+        idea   = _clean_idea_from_parsed(parsed)
+        if idea and idea != t:
+            _srv_logger.info("[url-parser] topic resolved: %r → %r", t, idea)
+        return idea if idea else t
+    except Exception:
+        return t
 
 
 def _effective_awareness(platform: str, raw_awareness: str) -> str:

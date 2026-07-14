@@ -1050,6 +1050,35 @@ def build_quality_tasks() -> list[dict]:
         #   Bandcamp → "Neon Echoes — Lunarvoss (Bandcamp album)"
         #   404/slug → "Private404Notfoundxyz (Spotify track)"
 
+        # URL-0: Plain-text topic (NOT a URL) must pass through _resolve_topic_from_url
+        # unchanged — confirms the URL-detection gate is active.  If this test
+        # fails, the gate was removed and plain-text topics are being sent to the
+        # URL parser (causing latency, unnecessary DNS resolution, and potential
+        # output regressions on single-token or short topics).
+        _task("/api/generate/content",
+              {
+                  "topic":      "midnight piano ballad",
+                  "platform":   "instagram",
+                  "tone":       "emotional",
+                  "artist_name":"Luna Voss",
+                  "genre":      "indie soul",
+                  "instruction": (
+                      "Open with an emotional hook ending with an exclamation mark. "
+                      "Body: raw midnight energy. Close with a save CTA and music emoji."
+                  ),
+                  "content_themes": ["midnight energy", "raw emotion", "exclusive listen"],
+                  "awareness": {
+                      "contextString": (
+                          "Late-night piano content seeing 45% more saves. "
+                          "Vulnerable ballads trending with 18-34 audience. "
+                          "Finally dropping emotional energy CTAs outperform. "
+                          "#Midnight #IndieSoul #Exclusive peaking."
+                      ),
+                  },
+              },
+              chk_veo_compare("url-plaintext/passthrough", threshold=95),
+              label="[url-topic] plain-text topic → URL gate active, Veo ≥95"),
+
         # URL-1: Spotify track URL → /api/generate/content (Instagram, ≥95)
         _task("/api/generate/content",
               {
