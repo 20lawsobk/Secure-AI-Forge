@@ -557,6 +557,72 @@ def apply_disclosure(text: str, brief: "GenerationBrief") -> str:
     return f"{text}\n\n{label}"
 
 
+def _sync_intent_with_trends(
+    intent_kv: Dict[str, str], trend_signals: List[str]
+) -> List[str]:
+    """Synchronize the user's detected intent with live chart/trend signals.
+
+    Instead of intent flatly overriding chart awareness, the two tiers are
+    reconciled into fused directives:
+      * agreement  → reinforcement ("intent confirmed by charts — commit fully")
+      * divergence → fusion (intent = creative foundation, trend = flavor)
+      * numeric energy targets are BLENDED (intent-weighted 65/35), not picked
+
+    Never raises; on any error returns [] and the caller falls back to the
+    old separate-tier directives.
+    """
+    try:
+        from ai_model.intent import detect_intent
+
+        tsig = detect_intent(" ".join(trend_signals))
+        out: List[str] = []
+
+        i_genre = (intent_kv.get("genre") or "").replace("_", " ").strip()
+        t_genre = ((getattr(tsig, "genre", None) or "")).replace("_", " ").strip()
+        if i_genre and t_genre:
+            if i_genre == t_genre or i_genre in t_genre or t_genre in i_genre:
+                out.append(
+                    f"User intent ({i_genre}) is confirmed by live charts — "
+                    f"commit fully to {i_genre}"
+                )
+            else:
+                out.append(
+                    f"Anchor on the user's {i_genre}; fold in trending "
+                    f"{t_genre} textures where they serve the track"
+                )
+        elif i_genre:
+            out.append(f"User intent — {i_genre} leads the creative direction")
+
+        i_mood = (intent_kv.get("mood") or "").strip()
+        t_mood = (getattr(tsig, "mood", None) or "").strip()
+        if i_mood and t_mood and i_mood != t_mood:
+            out.append(
+                f"Lead with the user's {i_mood} mood; let trending "
+                f"{t_mood} undertones color the transitions"
+            )
+        elif i_mood and t_mood:
+            out.append(f"Both intent and charts point {i_mood} — lean into it")
+
+        # Blended energy target: 65% user intent, 35% live trend.
+        i_energy: Optional[float] = None
+        try:
+            if "energy" in intent_kv:
+                i_energy = float(intent_kv["energy"])
+        except (TypeError, ValueError):
+            i_energy = None
+        t_energy = getattr(tsig, "energy", None)
+        if i_energy is not None and t_energy is not None:
+            blended = round(0.65 * i_energy + 0.35 * float(t_energy), 2)
+            out.append(
+                f"Target energy ≈ {blended:.2f} (blend of user intent "
+                f"{i_energy:.2f} and live trend {float(t_energy):.2f})"
+            )
+
+        return out[:3]
+    except Exception:
+        return []
+
+
 def build_brief(
     modality: str,
     platform: str,
@@ -737,6 +803,7 @@ def build_brief(
             try:
                 _aw_signals: List[str] = []
                 _intent_directives: List[str] = []
+                _intent_kv_all: Dict[str, str] = {}
                 for _aw_line in awareness.splitlines():
                     _s = _aw_line.strip()
                     if _s.startswith("[INTENT]"):
@@ -748,6 +815,7 @@ def build_brief(
                             if "=" in _tok:
                                 _k, _v = _tok.split("=", 1)
                                 _kv[_k] = _v
+                                _intent_kv_all.setdefault(_k, _v)
                         # Build a concise intent directive for the agents
                         _iparts: List[str] = []
                         if "genre" in _kv:
@@ -783,13 +851,31 @@ def build_brief(
                         _clean = _s[7:].strip()
                         if _clean:
                             _aw_signals.append(_clean)
-                # Intent directives lead all others (highest priority)
-                for _id in _intent_directives[:2]:
-                    directives.append(_id)
-                if _aw_signals:
+                # ── Intent ↔ trend synchronization ────────────────────────
+                # When BOTH tiers are present they are reconciled into fused
+                # directives (agreement → reinforce, divergence → fuse,
+                # energy → blended target) instead of intent overriding the
+                # chart tier. When only one tier is present, the original
+                # single-tier directives are used unchanged.
+                _fused: List[str] = []
+                if _intent_kv_all and _aw_signals:
+                    _fused = _sync_intent_with_trends(_intent_kv_all, _aw_signals)
+                if _fused:
+                    directives.extend(_fused)
+                    # Keep both raw tiers visible (concise) for downstream agents.
+                    for _id in _intent_directives[:1]:
+                        directives.append(_id)
                     directives.append(
-                        "Align with live chart signals: " + " · ".join(_aw_signals[:2])
+                        "Live chart signals: " + " · ".join(_aw_signals[:2])
                     )
+                else:
+                    # Single-tier (or sync degraded) → previous behaviour.
+                    for _id in _intent_directives[:2]:
+                        directives.append(_id)
+                    if _aw_signals:
+                        directives.append(
+                            "Align with live chart signals: " + " · ".join(_aw_signals[:2])
+                        )
             except Exception:
                 pass
 

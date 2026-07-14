@@ -1068,6 +1068,11 @@ router.post("/video/generate-ai", async (req, res) => {
   await proxyRequest(req, res, "/api/video/generate-ai");
 });
 
+// Veo-parity scene extension: continue a previously generated video
+router.post("/video/extend", async (req, res) => {
+  await proxyRequest(req, res, "/api/video/extend");
+});
+
 // ─── Job Polling & Management ──────────────────────────────────────────────
 
 router.get("/video-jobs", async (req, res) => {

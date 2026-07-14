@@ -305,6 +305,12 @@ def build_scenes(
     lighting: str = "",               # cinematic/dramatic/natural/studio/golden_hour/night/neon
     color_temperature: str = "",      # warm/cool/neutral
     fps: int = 24,                    # output frame rate (8/16/24/30)
+    composition: str = "",            # close_up/medium_shot/wide_shot/over_the_shoulder/
+                                      # pov/aerial/low_angle/high_angle — shot framing
+    reference_images: Optional[List[str]] = None,  # up to 3 base64 images — style/
+                                                   # character consistency conditioning
+    first_frame_b64: str = "",        # base64 image the video should START on
+    last_frame_b64: str = "",         # base64 image the video should END on
 ) -> List[SceneConfig]:
     """
     Build a list of SceneConfig objects from content DNA.
@@ -538,11 +544,43 @@ def build_scenes(
         if dna.energy > 0.75:
             effects.append("breathing")
 
+        # ── Cinematography line: fold camera / composition / lighting into
+        # the awareness text the diffusion conditioner actually encodes, so
+        # these controls shape the generated background rather than riding
+        # along as inert metadata.
+        _cine_bits = [b for b in (
+            f"camera {camera_motion.replace('_', ' ')}" if camera_motion else "",
+            f"{composition.replace('_', ' ')} framing" if composition else "",
+            f"{lighting.replace('_', ' ')} lighting" if lighting else "",
+            f"{color_temperature} tones" if color_temperature else "",
+        ) if b]
+        _cond_awareness = awareness
+        if _cine_bits:
+            _cond_awareness = (awareness + "\n" if awareness else "") + \
+                "cinematography: " + ", ".join(_cine_bits)
+
+        # ── Per-scene image conditioning (Veo parity) ────────────────────
+        # First scene anchors on first_frame_b64, final scene on
+        # last_frame_b64; middle scenes cycle through reference_images so
+        # style/character consistency holds across the whole video.
+        _refs = [r for r in (reference_images or []) if r][:3]
+        _init_b64 = ""
+        if idx == 0 and first_frame_b64:
+            _init_b64 = first_frame_b64
+        elif idx == len(scenes_data) - 1 and last_frame_b64:
+            _init_b64 = last_frame_b64
+        elif _refs:
+            _init_b64 = _refs[idx % len(_refs)]
+
+        _has_veo_cond = bool(
+            awareness or camera_motion or negative_prompt or lighting
+            or composition or _init_b64 or _refs
+        )
         _diffusion_meta: Dict = {
             "idea": idea,
             "platform": platform,
             "tone": tone,
-            "awareness": awareness,
+            "awareness": _cond_awareness,
             "brand": artist_name or "",
             "dna": technique_dna or {
                 "energy": dna.energy,
@@ -556,7 +594,10 @@ def build_scenes(
             "negative_prompt":  negative_prompt or "",
             "lighting":         lighting or "",
             "color_temperature": color_temperature or "",
-        } if (awareness or camera_motion or negative_prompt or lighting) else {}
+            "composition":      composition or "",
+            # SDEdit prior reads init_frame_b64 and denoises FROM the image
+            "init_frame_b64":   _init_b64,
+        } if _has_veo_cond else {}
 
         cfg = SceneConfig(
             duration=dur,

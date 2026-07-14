@@ -109,6 +109,14 @@ def _parse_signals_for_platform(awareness: str, platform: str) -> List[str]:
             rec = stripped.lstrip("•").strip()
             if rec:
                 signals.append(rec)
+        # Plain caller-supplied awareness lines (no tier prefix) synchronize
+        # WITH prefixed platform-buffer signals instead of being dropped once
+        # any [HIGH] line exists. [INTENT] key=value lines are excluded — they
+        # are machine-readable and must never leak into user-facing text.
+        if not m and not stripped.startswith(("[", "•", "===", "Action:")) and "↳" not in stripped:
+            plain = stripped[7:].strip() if stripped.startswith("TRENDS:") else stripped
+            if len(plain) >= 20:
+                signals.append(plain)
 
     if not signals:
         for line in awareness.splitlines():

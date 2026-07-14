@@ -58,6 +58,47 @@ def _rcgs_frame(
         return None
 
 
+def _init_frame_from_context(
+    width: int,
+    height: int,
+    context: dict,
+) -> Optional[np.ndarray]:
+    """
+    Decode a caller-supplied conditioning image (Veo parity: first/last frame
+    or reference image) from ``context["init_frame_b64"]``.
+
+    Accepts raw base64 or a ``data:image/...;base64,`` URL. Returns an
+    RGB uint8 array resized to (height, width), or None on any failure so
+    the caller falls through to RCGS / neutral priors. Never raises.
+    """
+    b64 = context.get("init_frame_b64") if isinstance(context, dict) else None
+    if not b64 or not isinstance(b64, str):
+        return None
+    # Bounds mirror Veo's 20 MB input-image cap; enforced BEFORE decode so a
+    # hostile payload can't exhaust memory (encoded ≈ 4/3 × decoded bytes).
+    _MAX_ENCODED = 28_000_000
+    _MAX_PIXELS = 40_000_000  # ~40 MP — far above any legitimate video frame
+    if len(b64) > _MAX_ENCODED:
+        return None
+    try:
+        import base64 as _b64
+        import io as _io
+        from PIL import Image as _Image
+
+        payload = b64.split(",", 1)[1] if b64.startswith("data:") else b64
+        raw = _b64.b64decode(payload.strip(), validate=True)
+        img = _Image.open(_io.BytesIO(raw))
+        # .open() is lazy (header only) — check dimensions before the full
+        # pixel decode so decompression bombs are rejected cheaply.
+        w, h = img.size
+        if w <= 0 or h <= 0 or (w * h) > _MAX_PIXELS:
+            return None
+        img = img.convert("RGB").resize((width, height), _Image.BILINEAR)
+        return np.array(img, dtype=np.uint8)
+    except Exception:
+        return None
+
+
 def _frame_to_float(frame: np.ndarray) -> np.ndarray:
     """HWC uint8 [0,255] → CHW float32 [-1, 1]."""
     f = frame.astype(np.float32) / 127.5 - 1.0
@@ -99,7 +140,15 @@ class SDEditPrior:
         [latent_c, latent_h, latent_w] and t_start is the DDIM timestep
         index to start denoising from.
         """
-        frame = _rcgs_frame(width, height, brand, context) or _neutral_frame(width, height)
+        # Caller-supplied conditioning image (first/last frame or reference
+        # image — Veo parity) takes precedence over RCGS retrieval; SDEdit
+        # then noises + denoises FROM that image, which is exactly the
+        # image-conditioning mechanism Veo exposes.
+        frame = _init_frame_from_context(width, height, context)
+        if frame is None:
+            frame = _rcgs_frame(width, height, brand, context)
+        if frame is None:
+            frame = _neutral_frame(width, height)
 
         try:
             import numpy as _np

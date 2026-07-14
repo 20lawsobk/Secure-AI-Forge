@@ -1011,6 +1011,93 @@ async def on_startup():
     storage_thread.start()
     warm_thread = threading.Thread(target=_warm_content_cache, daemon=True)
     warm_thread.start()
+    subsys_thread = threading.Thread(target=_warm_start_subsystems, daemon=True)
+    subsys_thread.start()
+
+
+# ── Warm-start: eagerly initialise every lazy subsystem at boot ──────────────
+# On a Reserved VM the process only restarts on deploys, so the one remaining
+# cold-start cost is lazy first-request initialisation (diffusion checkpoints,
+# retrieval index, intent detector, librosa/audio stack, awareness buffer).
+# This pass touches each singleton at boot using the app's own persistence
+# (pdim + disk checkpoints), so the first real request after a deploy runs at
+# steady-state speed. Every step is never-raise and individually timed.
+# Opt out with MB_WARM_START=0.
+
+_warm_status: dict[str, Any] = {"state": "pending", "steps": {}}
+
+
+def _warm_start_subsystems() -> None:
+    import time as _wt
+
+    if os.environ.get("MB_WARM_START", "1") == "0":
+        _warm_status["state"] = "disabled"
+        return
+
+    # Wait for the model first — several subsystems hang off it.
+    for _ in range(180):
+        if _model_ready:
+            break
+        _wt.sleep(1)
+
+    def _step(name: str, fn) -> None:
+        t0 = _wt.time()
+        try:
+            fn()
+            _warm_status["steps"][name] = {"ok": True, "ms": int((_wt.time() - t0) * 1000)}
+        except Exception as exc:
+            _warm_status["steps"][name] = {
+                "ok": False, "ms": int((_wt.time() - t0) * 1000),
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        print(f"[WarmStart] {name}: {_warm_status['steps'][name]}", flush=True)
+
+    _warm_status["state"] = "running"
+
+    def _warm_diffusion():
+        # Loads DiT/VAE checkpoints and builds the pipeline singleton.
+        from ai_model.video.diffusion.maxcore_diffusion import _get_pipeline
+        _get_pipeline()
+
+    def _warm_retrieval():
+        # Builds/loads the RCGS asset index used for background conditioning.
+        from ai_model.retrieval.asset_pipeline import get_asset_index
+        get_asset_index()
+
+    def _warm_intent():
+        # First call builds the detector's vocabulary/pattern tables.
+        from ai_model.intent.detector import detect_intent
+        detect_intent("warm start probe: dark trap night drive visual")
+
+    def _warm_audio_stack():
+        # librosa/producer_tools imports are seconds-heavy; also prime the
+        # real-audio dataset meta from pdim so the first soundtrack render
+        # doesn't pay the fetch.
+        from ai_model.audio import producer_tools  # noqa: F401
+        from storage_client import get_storage
+        get_storage().get("mb:dataset:audio:meta")
+
+    def _warm_awareness():
+        # Primes the platform quality-awareness buffer read path.
+        from ai_model import quality_awareness
+        quality_awareness.platform_awareness_string("tiktok")
+
+    def _warm_request_intelligence():
+        from ai_model import request_intelligence as ri
+        ri.build_brief(modality="content", platform="tiktok",
+                       topic="warm start probe", goal="growth", tone="energetic")
+
+    _step("diffusion_pipeline",    _warm_diffusion)
+    _step("retrieval_index",       _warm_retrieval)
+    _step("intent_detector",       _warm_intent)
+    _step("audio_stack",           _warm_audio_stack)
+    _step("awareness_buffer",      _warm_awareness)
+    _step("request_intelligence",  _warm_request_intelligence)
+
+    _warm_status["state"] = "warm" if all(
+        s.get("ok") for s in _warm_status["steps"].values()
+    ) else "partial"
+    print(f"[WarmStart] complete: {_warm_status['state']}", flush=True)
 
 
 def _warm_content_cache() -> None:
@@ -1514,6 +1601,7 @@ async def health():
         "model_loaded": _model_ready,
         "uptime_seconds": time.time() - _start_time,
         "version": "1.0.0",
+        "warm_start": _warm_status,
     }
 
 _start_time = time.time()
@@ -2918,13 +3006,14 @@ def _resolve_topic_from_url(raw_topic: str) -> str:
 
 
 def _effective_awareness(platform: str, raw_awareness: str) -> str:
-    """Always combine platform strategy signals with caller-provided awareness.
+    """Always combine caller-provided awareness with platform strategy signals.
 
-    Platform signals (fire/viral/drop/finally/exclusive etc.) are prepended so
-    the hook-selector and body-builder always have arousal-rich [HIGH] signals
-    available regardless of whether the caller sends extra context.  When the
-    caller sends no awareness, only platform signals are used.
-    Never-raise.
+    Caller awareness comes FIRST so request-specific signals lead and
+    synchronize with (rather than get drowned out by) the generic platform
+    buffer. Platform signals (fire/viral/drop/finally/exclusive etc.) are
+    appended after, so the hook-selector and body-builder still always have
+    arousal-rich [HIGH] signals available. When the caller sends no awareness,
+    only platform signals are used. Never-raise.
     """
     try:
         from ai_model.quality_awareness import platform_awareness_string
@@ -2933,8 +3022,9 @@ def _effective_awareness(platform: str, raw_awareness: str) -> str:
         platform_awareness = ""
     if not raw_awareness:
         return platform_awareness
-    # Prepend platform awareness so its [HIGH] signals are extracted first.
-    return f"{platform_awareness}\n{raw_awareness}" if platform_awareness else raw_awareness
+    # Caller-provided awareness leads: request-specific signals synchronize
+    # with (rather than get drowned out by) the generic platform buffer.
+    return f"{raw_awareness}\n{platform_awareness}" if platform_awareness else raw_awareness
 
 
 @app.post("/content/generate")
@@ -5908,6 +5998,42 @@ class ApiGenerateVideoRequest(_AwarenessMixin):
     color_temperature: Optional[str] = None # warm/cool/neutral
     style_reference: Optional[str] = None   # URL or asset ID for style conditioning
     output_resolution: Optional[str] = None # 720p/1080p/4k — overrides platform resolution
+    composition: Optional[str] = None       # close_up/medium_shot/wide_shot/
+                                            # over_the_shoulder/pov/aerial/
+                                            # low_angle/high_angle — shot framing
+    reference_images: Optional[List[str]] = None  # up to 3 base64 images — style/
+                                                  # character consistency ("ingredients")
+    first_frame_b64: Optional[str] = None   # base64 image the video should START on
+    last_frame_b64: Optional[str] = None    # base64 image the video should END on
+    sample_count: Optional[int] = None      # 1–4 independent video variants per request
+    generate_audio: bool = True             # auto-render a matched soundtrack when no
+                                            # user audio is supplied (native-audio parity)
+
+
+class ApiVideoExtendRequest(BaseModel):
+    """Veo-parity video extension: continue a previously generated video.
+
+    The last frame of the source video is extracted and used as the
+    first-frame conditioning image for a continuation clip, which is then
+    concatenated onto the source. One continuous soundtrack is re-rendered
+    across the full extended duration so audio stays coherent.
+    """
+    source: str                              # job_id, filename, or /uploads/videos/... URL
+    idea: str = ""                           # what the continuation should be about
+    extend_duration: float = 8.0             # seconds to ADD (clamped 2–60)
+    platform: str = "tiktok"
+    goal: str = "growth"
+    tone: str = "energetic"
+    genre: Optional[str] = None
+    artist_name: Optional[str] = None
+    # Veo-parity controls for the continuation clip
+    camera_motion: Optional[str] = None
+    negative_prompt: Optional[str] = None
+    seed: Optional[int] = None
+    lighting: Optional[str] = None
+    color_temperature: Optional[str] = None
+    composition: Optional[str] = None
+    generate_audio: bool = True
 
 
 class ApiAudioAnalyzeRequest(BaseModel):
@@ -7608,6 +7734,44 @@ def _arc_spectral_clean_file(audio_path) -> None:
                 pass
 
 
+_GENRE_DEFAULT_BPM: dict[str, float] = {
+    "trap": 140.0, "drill": 144.0, "hip_hop": 92.0, "hip-hop": 92.0, "rap": 95.0,
+    "rnb": 90.0, "r&b": 90.0, "lofi": 75.0, "lo-fi": 75.0, "pop": 112.0,
+    "afrobeats": 105.0, "afrobeat": 105.0, "house": 124.0, "edm": 128.0,
+    "techno": 130.0, "indie": 108.0, "rock": 120.0, "jazz": 100.0,
+}
+
+
+def _auto_soundtrack_path(job_id: str, duration_sec: float,
+                          bpm: Optional[float] = None,
+                          key: Optional[str] = None,
+                          genre: str = "") -> Optional[str]:
+    """Render a genre/BPM-matched soundtrack for a video (native-audio parity).
+
+    Uses the real-audio dataset renderer so every video ships with sound by
+    default, the way Veo generates audio natively. Returns a local file path,
+    or None when no real-audio dataset is seeded / rendering fails — callers
+    fall back to a silent render (never-raise).
+    """
+    try:
+        _bpm = float(bpm or 0.0)
+        if _bpm <= 0:
+            _bpm = _GENRE_DEFAULT_BPM.get((genre or "").strip().lower(), 120.0)
+        result = _render_audio_from_dataset(
+            f"vsnd_{job_id[:12]}", bpm=_bpm, key=str(key or ""),
+            duration_sec=max(2.0, float(duration_sec or 10.0)),
+            opts={},
+        )
+        url = str(result.get("url") or "")
+        name = url.rsplit("/", 1)[-1]
+        path = (_UPLOADS_PATH / name).resolve()
+        if name and path.is_relative_to(_UPLOADS_PATH.resolve()) and path.exists():
+            return str(path)
+    except Exception as exc:
+        print(f"[VideoJob] auto-soundtrack unavailable ({exc}); rendering silent", flush=True)
+    return None
+
+
 @app.post("/api/generate/audio")
 async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_scope("generate"))):
     """Async audio generation — style-conditioned via AI model for concept, BPM/key, creative direction."""
@@ -7888,6 +8052,10 @@ def _start_video_job(req: ApiGenerateVideoRequest, platform: str) -> tuple[str, 
                 color_temperature=req.color_temperature or "",
                 style_reference=req.style_reference or "",
                 output_resolution=req.output_resolution or "",
+                composition=req.composition or "",
+                reference_images=(req.reference_images or [])[:3],
+                first_frame_b64=req.first_frame_b64 or "",
+                last_frame_b64=req.last_frame_b64 or "",
             )
 
             production = agent.plan(agent_req)
@@ -7957,12 +8125,23 @@ def _start_video_job(req: ApiGenerateVideoRequest, platform: str) -> tuple[str, 
             dna        = ai_scene_builder.build_dna(agent_req.idea, production.genre_detected, production.tone_used)
             transition = "fadeblack" if dna.darkness > 0.70 else "dissolve" if dna.energy < 0.50 else "fade"
 
+            # Native-audio parity: when the caller supplied no track, render a
+            # genre/BPM-matched soundtrack from the real-audio dataset so the
+            # video ships with sound by default. Never-raise → silent render.
+            _audio_path = req.user_audio_path
+            if not _audio_path and getattr(req, "generate_audio", True):
+                _audio_path = _auto_soundtrack_path(
+                    job_id, production.total_duration,
+                    bpm=req.bpm, key=req.key,
+                    genre=production.genre_detected or (req.genre or ""),
+                )
+
             result = render_cinematic_open(
                 scenes=scene_configs,
                 width=width,
                 height=height,
                 total_duration=production.total_duration,
-                audio_path=req.user_audio_path,
+                audio_path=_audio_path,
                 transition=transition,
                 transition_dur=0.5 if dna.energy > 0.70 else 0.8,
                 label=f"ai:{production.genre_detected}:{production.tone_used}",
@@ -8027,8 +8206,225 @@ async def api_generate_video(req: ApiGenerateVideoRequest, _key=Depends(require_
         # `platforms` present but contained no usable entries (e.g. [""]) —
         # fall through to the normal single-platform path below.
 
+    # ── Multi-sample generation (Veo parity: up to 4 variants/prompt) ────
+    # Each variant is an independent render job with a derived seed so the
+    # variants genuinely differ (seed=None would resolve to the same
+    # deterministic idea-hash seed for every copy).
+    _n_samples = max(1, min(4, int(req.sample_count or 1)))
+    if _n_samples > 1:
+        _base_seed = req.seed if req.seed is not None else abs(hash(req.idea)) % (2**31)
+        _sample_jobs: list[dict[str, Any]] = []
+        _first_brief = None
+        for _i in range(_n_samples):
+            _vreq = req.model_copy(update={
+                "seed": (_base_seed + _i * 1013) % (2**31),
+                "sample_count": 1,
+            })
+            _jid, _sbrief = _start_video_job(_vreq, req.platform)
+            if _first_brief is None:
+                _first_brief = _sbrief
+            _sample_jobs.append({
+                "job_id": _jid,
+                "sample_index": _i,
+                "seed": (_base_seed + _i * 1013) % (2**31),
+                "poll_url": f"/api/video-job/{_jid}",
+            })
+        return {
+            "job_id": _sample_jobs[0]["job_id"],
+            "status": "processing",
+            "intelligence": _first_brief.to_dict() if _first_brief else {},
+            "sample_jobs": _sample_jobs,
+        }
+
     job_id, brief = _start_video_job(req, req.platform)
     return {"job_id": job_id, "status": "processing", "intelligence": brief.to_dict()}
+
+
+# ── Veo-parity video extension ─────────────────────────────────────────────────
+
+def _ffmpeg_media_duration(path: str) -> float:
+    """Read a media file's duration by parsing ffmpeg's stderr banner.
+
+    Uses run_ffmpeg (posix_spawn-safe) instead of ffprobe+PIPE so it works
+    under model memory pressure. Returns 0.0 when unparseable (never-raise).
+    """
+    try:
+        import re as _re
+        from ai_model.video.ffmpeg_util import run_ffmpeg
+        r = run_ffmpeg(["ffmpeg", "-hide_banner", "-i", str(path)], timeout=30.0)
+        m = _re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", r.stderr or "")
+        if m:
+            return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    except Exception:
+        pass
+    return 0.0
+
+
+@app.post("/api/video/extend")
+async def api_video_extend(req: ApiVideoExtendRequest, _key=Depends(require_scope("generate"))):
+    """Extend a previously generated video (Veo-parity scene extension).
+
+    The source video's last frame is extracted and used as the first-frame
+    conditioning image for a continuation clip, which is rendered at the
+    source's exact dimensions and concatenated on. A single continuous
+    soundtrack is then re-rendered across the full extended duration so the
+    audio stays coherent instead of stitching two different tracks.
+    """
+    if not _model_ready or _script_agent is None or _visual_spec_agent is None or _creative_model is None:
+        raise HTTPException(status_code=503, detail="AI model is still initialising — try again shortly")
+
+    if not (req.idea or "").strip():
+        raise HTTPException(status_code=422, detail="'idea' is required — describe what the continuation should show")
+
+    # ── Resolve the source video to a real file under uploads/videos ──────
+    videos_dir = (_UPLOADS_PATH / "videos").resolve()
+    src_name = req.source.strip()
+    src_job = _job_read(src_name) if len(src_name) >= 8 and "/" not in src_name and "." not in src_name else None
+    if src_job:
+        if src_job.get("status") != "done" or not src_job.get("filename"):
+            raise HTTPException(status_code=409, detail=f"source job {src_name} has no finished video to extend")
+        src_name = str(src_job["filename"])
+    src_name = src_name.rsplit("/", 1)[-1]
+    src_path = (videos_dir / src_name).resolve()
+    if not src_path.is_relative_to(videos_dir) or not src_path.exists():
+        raise HTTPException(status_code=404, detail=f"source video not found: {req.source}")
+
+    add_dur = max(2.0, min(60.0, float(req.extend_duration or 8.0)))
+    job_id = str(uuid.uuid4())
+    _job_write(job_id, {
+        "status":        "pending",
+        "created_at":    datetime.utcnow().isoformat() + "Z",
+        "kind":          "video_extend",
+        "extended_from": src_name,
+        "added_duration": add_dur,
+        "platform":      req.platform,
+        "url":           None,
+        "filename":      None,
+    })
+
+    def _extend_and_render():
+        import base64 as _b64
+        import traceback as _tb
+        try:
+            from PIL import Image as _Image
+            from ai_model.video.ffmpeg_util import run_ffmpeg
+            from ai_model.video.video_agent import VideoAgent, VideoAgentRequest
+            from ai_model.video.cinematic_engine import render_cinematic_open
+            from ai_model.video import ai_scene_builder
+
+            _job_update(job_id, {"status": "running"})
+
+            # 1) Extract the source's last frame → conditioning image
+            frame_png = _UPLOADS_PATH / f"extend_lastframe_{job_id[:8]}.png"
+            r = run_ffmpeg([
+                "ffmpeg", "-y", "-sseof", "-0.5", "-i", str(src_path),
+                "-frames:v", "1", "-update", "1", str(frame_png),
+            ], timeout=60.0)
+            if r.returncode != 0 or not frame_png.exists():
+                # -sseof can fail on very short clips — fall back to last-frame select
+                r = run_ffmpeg([
+                    "ffmpeg", "-y", "-i", str(src_path),
+                    "-vf", "select=eof", "-frames:v", "1", "-update", "1", str(frame_png),
+                ], timeout=120.0)
+            if r.returncode != 0 or not frame_png.exists():
+                raise RuntimeError(f"could not extract last frame (rc={r.returncode})")
+
+            with _Image.open(frame_png) as _img:
+                width, height = _img.size
+            first_frame_b64 = _b64.b64encode(frame_png.read_bytes()).decode("ascii")
+
+            # 2) Render the continuation clip at the source's exact dimensions
+            agent = VideoAgent(_creative_model, _script_agent, _visual_spec_agent)
+            agent_req = VideoAgentRequest(
+                idea=req.idea.strip(),
+                platform=req.platform,
+                goal=req.goal,
+                tone=req.tone,
+                genre=req.genre or (src_job or {}).get("genre_detected", "") or "",
+                artist_name=req.artist_name or "",
+                duration=add_dur,
+                camera_motion=req.camera_motion or "",
+                negative_prompt=req.negative_prompt or "",
+                seed=req.seed,
+                lighting=req.lighting or "",
+                color_temperature=req.color_temperature or "",
+                composition=req.composition or "",
+                first_frame_b64=first_frame_b64,
+            )
+            production = agent.plan(agent_req)
+            production.total_duration = add_dur
+            scene_configs = agent.build_open_scenes(agent_req, production, width, height)
+            dna = ai_scene_builder.build_dna(agent_req.idea, production.genre_detected, production.tone_used)
+            cont = render_cinematic_open(
+                scenes=scene_configs, width=width, height=height,
+                total_duration=add_dur, audio_path=None,
+                transition="fade", transition_dur=0.5,
+                label=f"extend:{production.genre_detected}",
+            )
+            if not cont.success:
+                raise RuntimeError(cont.error or "continuation render failed")
+            cont_path = videos_dir / cont.filename
+
+            # 3) Concatenate source + continuation (video streams, normalised)
+            out_name = f"extended_{job_id[:8]}.mp4"
+            out_path = videos_dir / out_name
+            norm = f"fps=24,scale={width}:{height},format=yuv420p,setpts=PTS-STARTPTS"
+            r = run_ffmpeg([
+                "ffmpeg", "-y", "-i", str(src_path), "-i", str(cont_path),
+                "-filter_complex",
+                f"[0:v]{norm}[v0];[1:v]{norm}[v1];[v0][v1]concat=n=2:v=1:a=0[v]",
+                "-map", "[v]", "-c:v", "libx264", "-preset", "veryfast",
+                "-crf", "20", "-movflags", "+faststart", str(out_path),
+            ], timeout=600.0)
+            if r.returncode != 0 or not out_path.exists():
+                raise RuntimeError(f"concat failed (rc={r.returncode}): {(r.stderr or '')[-300:]}")
+
+            # 4) One continuous soundtrack across the full extended duration
+            final_name = out_name
+            if req.generate_audio:
+                total_dur = _ffmpeg_media_duration(str(out_path)) or (add_dur + 30.0)
+                snd = _auto_soundtrack_path(
+                    job_id, total_dur,
+                    genre=production.genre_detected or (req.genre or ""),
+                )
+                if snd:
+                    muxed = videos_dir / f"extended_{job_id[:8]}_audio.mp4"
+                    r = run_ffmpeg([
+                        "ffmpeg", "-y", "-i", str(out_path), "-i", snd,
+                        "-map", "0:v", "-map", "1:a", "-c:v", "copy",
+                        "-c:a", "aac", "-b:a", "192k", "-shortest",
+                        "-movflags", "+faststart", str(muxed),
+                    ], timeout=300.0)
+                    if r.returncode == 0 and muxed.exists():
+                        final_name = muxed.name
+
+            try:
+                frame_png.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+            _job_update(job_id, {
+                "status":         "done",
+                "url":            f"/uploads/videos/{final_name}",
+                "filename":       final_name,
+                "width":          width,
+                "height":         height,
+                "genre_detected": production.genre_detected,
+                "tone_used":      production.tone_used,
+                "scenes":         [{"type": s.scene_type, "text": s.text} for s in production.scenes],
+            })
+        except Exception as exc:
+            print(f"[VideoExtend] Error for job {job_id}: {_tb.format_exc()}")
+            _job_update(job_id, {"status": "error", "error": f"{type(exc).__name__}: {exc}"})
+
+    threading.Thread(target=_extend_and_render, daemon=True, name=f"VideoExtend-{job_id}").start()
+    return {
+        "job_id":         job_id,
+        "status":         "processing",
+        "extended_from":  src_name,
+        "added_duration": add_dur,
+        "poll_url":       f"/api/video-job/{job_id}",
+    }
 
 
 # ── AI-driven video generation ─────────────────────────────────────────────────
@@ -8110,6 +8506,11 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
 
     # `idea` is templated raw into scene phrases — keep it clean and route
     # the richer intent/audience/theme context through `awareness` instead.
+    # ── Veo-parity controls (all optional, silently defaulted) ────────────
+    _refs_raw = body.get("reference_images") or []
+    _refs = [str(x) for x in _refs_raw if x][:3] if isinstance(_refs_raw, list) else []
+    _seed_raw = body.get("seed")
+
     req = VideoAgentRequest(
         idea=idea,
         platform=platform,
@@ -8120,7 +8521,23 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
         duration=duration,
         artist_context=artist_ctx,
         awareness="\n".join(f"• {d}" for d in brief.directives),
+        camera_motion=str(body.get("camera_motion") or ""),
+        negative_prompt=str(body.get("negative_prompt") or ""),
+        seed=int(_seed_raw) if _seed_raw is not None else None,
+        fps=int(body.get("fps") or 24),
+        motion_intensity=(float(body["motion_intensity"])
+                          if body.get("motion_intensity") is not None else None),
+        enhance_prompt=bool(body.get("enhance_prompt", True)),
+        lighting=str(body.get("lighting") or ""),
+        color_temperature=str(body.get("color_temperature") or ""),
+        style_reference=str(body.get("style_reference") or ""),
+        composition=str(body.get("composition") or ""),
+        reference_images=_refs,
+        first_frame_b64=str(body.get("first_frame_b64") or ""),
+        last_frame_b64=str(body.get("last_frame_b64") or ""),
+        output_resolution=str(body.get("output_resolution") or ""),
     )
+    _gen_audio = bool(body.get("generate_audio", True))
 
     # ── Run plan() synchronously so scenes are available in this response ──
     # Only the heavy render step is deferred to a background thread.
@@ -8175,12 +8592,20 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
             scene_configs = _agent.build_open_scenes(_req, _production, _width, _height)
             dna        = ai_scene_builder.build_dna(_req.idea, _production.genre_detected, _production.tone_used)
             transition = "fadeblack" if dna.darkness > 0.70 else "dissolve" if dna.energy < 0.50 else "fade"
+            # Native-audio parity: auto-soundtrack when no caller audio.
+            _audio_path = _req.artist_context.get("audio_path")
+            if not _audio_path and _gen_audio:
+                _audio_path = _auto_soundtrack_path(
+                    job_id, _production.total_duration,
+                    genre=_production.genre_detected or _req.genre,
+                )
+
             result     = render_cinematic_open(
                 scenes=scene_configs,
                 width=_width,
                 height=_height,
                 total_duration=_production.total_duration,
-                audio_path=_req.artist_context.get("audio_path"),
+                audio_path=_audio_path,
                 transition=transition,
                 transition_dur=0.5 if dna.energy > 0.70 else 0.8,
                 label=f"ai:{_production.genre_detected}:{_production.tone_used}",

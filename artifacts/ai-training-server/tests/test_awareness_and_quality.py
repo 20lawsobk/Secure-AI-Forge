@@ -526,6 +526,38 @@ def test_awareness_conditioning_quality_delta():
         print(f"\n       ⚠  aware output triggered garble guard "
               f"(awareness-bleed): {r_aw.get('caption','')[:100]}")
 
+def test_plain_awareness_used_and_intent_lines_never_leak():
+    """
+    Regression guards for the intent↔awareness synchronization work:
+    1. Plain (unprefixed) caller awareness must still influence output even
+       though the platform quality buffer always supplies [HIGH] signals
+       (previously the buffer drowned caller lines → awareness was a no-op).
+    2. Machine-readable [INTENT] key=value lines must NEVER leak verbatim
+       into user-facing hook/body/cta/caption text.
+    """
+    base = {"platform": "tiktok", "topic": "basement synth jam session recap",
+            "tone": "energetic", "goal": "growth"}
+    r_bare = POST("/content/generate", {**base, "awareness": ""})
+    r_aw   = POST("/content/generate", {
+        **base,
+        "awareness": (
+            "[INTENT] genre=synthwave mood=dark energy=0.85 bpm=118 confidence=0.80\n"
+            "Analog synth revival videos pulling huge watch time this month. "
+            "Gear close-up shots outperforming talking-head clips."
+        ),
+    })
+    assert r_bare.get("success") and r_aw.get("success")
+
+    # 1. Caller awareness changed the output
+    assert (r_bare.get("caption") or "") != (r_aw.get("caption") or ""), \
+        "Plain caller awareness had no effect on output"
+
+    # 2. No [INTENT] machine text in any user-facing field
+    for field in ("hook", "body", "cta", "caption"):
+        text = (r_aw.get(field) or "")
+        assert "[INTENT]" not in text and "genre=" not in text and "energy=0.85" not in text, \
+            f"[INTENT] machine text leaked into {field}: {text[:120]}"
+
 # ── 5. Multi-layer awareness ──────────────────────────────────────────────────
 
 def test_awareness_multi_layer_live_signals():

@@ -656,8 +656,20 @@ class DatasetStreamClient:
         datasets = []
         for key in all_keys:
             meta = self.storage.get(key)
-            if meta:
-                datasets.append(meta if isinstance(meta, dict) else json.loads(meta))
+            if not meta:
+                continue
+            # Storage may return a dict, a JSON string, or (from some pdim
+            # responses) a list wrapping the value. Normalise; skip garbage
+            # entries instead of 500-ing the whole listing.
+            try:
+                if isinstance(meta, list):
+                    meta = meta[0] if meta else None
+                if isinstance(meta, (str, bytes, bytearray)):
+                    meta = json.loads(meta)
+                if isinstance(meta, dict):
+                    datasets.append(meta)
+            except Exception:
+                continue
         return datasets
 
     def get_dataset_meta(self, name: str) -> Optional[dict]:

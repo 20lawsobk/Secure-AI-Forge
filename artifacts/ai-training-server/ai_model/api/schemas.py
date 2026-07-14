@@ -224,7 +224,8 @@ class VideoGenerateRequest(BaseModel):
     # Matches Google Veo's parameter surface for all aspects except topic/purpose.
     camera_motion: Optional[str] = None      # pan_left/pan_right/zoom_in/zoom_out/
                                              # tilt_up/tilt_down/dolly_in/dolly_out/
-                                             # crane_up/crane_down/static/auto
+                                             # crane_up/crane_down/dolly_zoom/rack_focus/
+                                             # whip_pan/orbit/handheld/time_lapse/static/auto
     negative_prompt: Optional[str] = None   # content/style/elements to exclude
     seed: Optional[int] = None              # explicit seed for reproducible output
     fps: Optional[int] = None               # output frame rate (8/16/24/30); default 24
@@ -235,6 +236,16 @@ class VideoGenerateRequest(BaseModel):
     color_temperature: Optional[str] = None # warm/cool/neutral
     style_reference: Optional[str] = None   # URL or asset ID for style conditioning
     output_resolution: Optional[str] = None # 720p/1080p/4k — overrides derived resolution
+    composition: Optional[str] = None       # close_up/medium_shot/wide_shot/
+                                            # over_the_shoulder/pov/aerial/
+                                            # low_angle/high_angle — shot framing
+    reference_images: Optional[List[str]] = None  # up to 3 base64 images — style/
+                                                  # character consistency ("ingredients")
+    first_frame_b64: Optional[str] = None   # base64 image the video should START on
+    last_frame_b64: Optional[str] = None    # base64 image the video should END on
+    sample_count: Optional[int] = None      # 1–4 video variants per request
+    generate_audio: bool = True             # auto-render a matched soundtrack when
+                                            # no user audio is supplied (native audio)
     # ── Intent sub-awareness layer ────────────────────────────────────────
     description: str = ""     # free-text description of what to generate
     prompt_url:  str = ""     # URL to analyse for intent (Spotify, TikTok, etc.)
