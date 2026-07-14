@@ -1135,6 +1135,10 @@ def _init_storage():
     _watchdog.data_puller       = _data_puller
     _watchdog.weights_dir       = Path(__file__).parent / "ai_model" / "weights"
 
+    # Extended stay-alive references
+    _watchdog.storage_client_ref   = storage          # StorageClient (health-thread probe)
+    _watchdog.flywheel_ingestor_fn = _get_flywheel     # lazy — returns FlywheelIngestor|None
+
     # ── Rendering system health callbacks ──────────────────────────────
     def _rendering_health_fn():
         """Return live status of every rendering object."""
@@ -1210,6 +1214,9 @@ def _init_storage():
         # Ensure the real domain library is present before the daemon starts.
         ensure_library(_asset_index)
         _coverage_watchdog.start()
+        # Wire the now-live CoverageWatchdog into the primary watchdog so it
+        # can detect a dead thread and call .start() to bring it back.
+        _watchdog.coverage_watchdog = _coverage_watchdog
         print(f"[Coverage] AssetIndex ready ({_asset_index.size} assets, "
               f"{_asset_index.anchor_count} anchors) — CoverageWatchdog running")
     except Exception as exc:
@@ -1222,6 +1229,7 @@ def _init_storage():
         _gen_ingestor = get_generated_ingestor()
         _gen_ingestor.index = _asset_index  # share the live index (None-safe lazily too)
         _gen_ingestor.start()
+        _watchdog.generated_ingestor = _gen_ingestor
         print("[Coverage] GeneratedIngestor running — produced images fold back into the index")
     except Exception as exc:
         print(f"[Coverage] generated-ingestor init error (non-fatal): {exc}")

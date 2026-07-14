@@ -84,6 +84,12 @@ class Watchdog:
         self.data_puller                        = None
         self.weights_dir: Optional[Path]        = None
 
+        # Extended stay-alive references — injected from server.py
+        self.coverage_watchdog                  = None   # CoverageWatchdog instance
+        self.generated_ingestor                 = None   # GeneratedIngestor instance
+        self.flywheel_ingestor_fn: Optional[Callable] = None  # () → FlywheelIngestor|None
+        self.storage_client_ref                 = None   # StorageClient (not the storage abstraction)
+
         # Rendering system health — injected from server.py
         # rendering_health_fn() → {"ready": bool, "objects": {name: bool, ...}}
         self.rendering_health_fn: Optional[Callable[[], dict]] = None
@@ -114,6 +120,8 @@ class Watchdog:
         self._storage_offline_since: Optional[float] = None
         self._last_continuous_cycle: Optional[int] = None
         self._continuous_stuck_since: Optional[float] = None
+        # Extended stay-alive per-check state
+        self._audio_empty_since: Optional[float] = None
 
     # ------------------------------------------------------------------ #
     # Lifecycle                                                            #
@@ -189,6 +197,11 @@ class Watchdog:
         self._check_training_start_timeout(now)
         self._check_continuous_trainer(now)
         self._check_data_puller(now)
+        self._check_coverage_watchdog(now)
+        self._check_generated_ingestor(now)
+        self._check_flywheel_ingestor(now)
+        self._check_audio_dataset(now)
+        self._check_storage_health_thread(now)
         self._check_checkpoint_integrity()
         self._check_memory(now)
         self._check_storage(now)
@@ -451,6 +464,147 @@ class Watchdog:
                     f"DataPuller stuck in 'pulling' state for {pulling_for:.0f}s.",
                     "No fix needed — HTTP timeouts will resolve it"
                 )
+
+    def _check_coverage_watchdog(self, now: float):
+        """Restart the CoverageWatchdog daemon if its thread died silently."""
+        cw = self.coverage_watchdog
+        if cw is None:
+            return
+        thread_alive = cw._thread.is_alive() if getattr(cw, "_thread", None) else False
+        if thread_alive:
+            return
+        self._alert(
+            "critical", "coverage_watchdog_crash",
+            "CoverageWatchdog thread died — restarting asset-coverage daemon.",
+            "Called coverage_watchdog.start()"
+        )
+        try:
+            cw.start()
+        except Exception as exc:
+            logger.error("[Watchdog] Could not restart CoverageWatchdog: %s", exc)
+
+    def _check_generated_ingestor(self, now: float):
+        """Restart the GeneratedIngestor daemon if its thread died silently.
+
+        GeneratedIngestor folds rendered images back into the retrieval index.
+        If it dies quietly, produced assets stop feeding the flywheel.
+        """
+        gi = self.generated_ingestor
+        if gi is None:
+            return
+        thread_alive = gi._thread.is_alive() if getattr(gi, "_thread", None) else False
+        if thread_alive:
+            return
+        self._alert(
+            "critical", "generated_ingestor_crash",
+            "GeneratedIngestor thread died — produced assets no longer folding back into index. Restarting.",
+            "Called generated_ingestor.start()"
+        )
+        try:
+            gi.start()
+        except Exception as exc:
+            logger.error("[Watchdog] Could not restart GeneratedIngestor: %s", exc)
+
+    def _check_flywheel_ingestor(self, now: float):
+        """Recreate the FlywheelIngestor executor if it was shut down."""
+        if self.flywheel_ingestor_fn is None:
+            return
+        try:
+            fw = self.flywheel_ingestor_fn()
+        except Exception:
+            return
+        if fw is None:
+            return
+        # ThreadPoolExecutor exposes _shutdown=True once shutdown() has been called.
+        if getattr(fw._executor, "_shutdown", False):
+            self._alert(
+                "critical", "flywheel_executor_dead",
+                "FlywheelIngestor executor shut down — admin content ingestion stalled. Restarting.",
+                "Replaced executor with a new ThreadPoolExecutor via FlywheelIngestor.restart()"
+            )
+            try:
+                fw.restart()
+            except Exception as exc:
+                logger.error("[Watchdog] Could not restart FlywheelIngestor: %s", exc)
+
+    def _check_audio_dataset(self, now: float):
+        """Re-seed the audio dataset if all chunks have been lost from storage.
+
+        Waits 60 s before acting to avoid re-seeding spuriously on the first
+        poll after a clean restart (chunks may just be slow to appear).
+        """
+        if self.storage is None or not self.storage.is_available:
+            return
+        try:
+            meta = self.storage.get("mb:dataset:audio:meta")
+            chunks = int((meta or {}).get("num_chunks", 0))
+        except Exception:
+            return
+
+        if chunks > 0:
+            self._audio_empty_since = None
+            return
+
+        # Dataset is empty — start the grace-period timer
+        if self._audio_empty_since is None:
+            self._audio_empty_since = now
+            return
+        if now - self._audio_empty_since < 60:
+            return
+
+        # Reset so we don't re-trigger until the next empty-cycle
+        self._audio_empty_since = now
+        self._alert(
+            "warning", "audio_dataset_empty",
+            "Audio dataset has 0 chunks — triggering background re-seed to restore playback.",
+            "Spawned seed_audio_dataset.seed(count=12, replace=False) in background thread"
+        )
+        storage = self.storage
+
+        def _reseed():
+            try:
+                from workers.seed_audio_dataset import (  # noqa: PLC0415
+                    seed as _seed_fn,
+                    AlreadySeedingError,
+                )
+                _seed_fn(storage, count=12, replace=False)
+                logger.info("[Watchdog] Audio dataset re-seed complete.")
+            except AlreadySeedingError:
+                logger.info("[Watchdog] Audio re-seed skipped — already seeding.")
+            except Exception as exc:
+                logger.warning("[Watchdog] Audio re-seed failed: %s", exc)
+
+        threading.Thread(
+            target=_reseed, daemon=True, name="WatchdogAudioReseed"
+        ).start()
+
+    def _check_storage_health_thread(self, now: float):
+        """Restart the StorageClient's periodic health-check thread if it died.
+
+        When this thread is dead the client's ``is_available`` property can
+        permanently return stale False even after pdim comes back online.
+        """
+        sc = self.storage_client_ref
+        if sc is None:
+            return
+        check_thread = getattr(sc, "_check_thread", None)
+        if check_thread is None or check_thread.is_alive():
+            return
+        self._alert(
+            "critical", "storage_health_thread_dead",
+            "StorageClient._check_thread died — availability flag may be stale forever. Restarting.",
+            "Spawned a fresh _periodic_health_check daemon thread on the StorageClient"
+        )
+        try:
+            new_thread = threading.Thread(
+                target=sc._periodic_health_check,
+                daemon=True,
+                name="StorageHealthCheck",
+            )
+            sc._check_thread = new_thread
+            new_thread.start()
+        except Exception as exc:
+            logger.error("[Watchdog] Could not restart storage health thread: %s", exc)
 
     def _check_checkpoint_integrity(self):
         """Try loading checkpoint; delete it if corrupted."""

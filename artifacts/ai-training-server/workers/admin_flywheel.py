@@ -65,6 +65,33 @@ class FlywheelIngestor:
                 self._meta_locks[content_type] = threading.Lock()
             return self._meta_locks[content_type]
 
+    # ── Lifecycle ──────────────────────────────────────────────────────────────
+
+    def is_alive(self) -> bool:
+        """Return True when the background executor is ready to accept work."""
+        return not getattr(self._executor, "_shutdown", True)
+
+    def restart(self) -> None:
+        """Replace the executor with a fresh one so ingestion resumes.
+
+        Never raises — called by the Watchdog when it detects a dead executor.
+        The old executor is shut down in the background (non-blocking).
+        """
+        try:
+            old = self._executor
+            self._executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="flywheel"
+            )
+            try:
+                old.shutdown(wait=False)
+            except Exception:
+                pass
+            _fw_logger.info("[flywheel] executor restarted by watchdog")
+        except Exception as exc:
+            _fw_logger.error("[flywheel] restart failed: %s", exc)
+
+    # ── Ingestion ──────────────────────────────────────────────────────────────
+
     def ingest(
         self,
         content_type: str,
