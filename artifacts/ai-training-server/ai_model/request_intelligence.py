@@ -574,6 +574,12 @@ def build_brief(
     key: Optional[str] = None,
     artist_profile_id: Optional[str] = None,
     awareness: str = "",
+    # ── Veo-parity controls (non-topic/non-purpose) ───────────────────────
+    negative_prompt: str = "",     # content/style to explicitly exclude
+    enhance_prompt: bool = True,   # when False, skip AI awareness augmentation
+    lighting: str = "",            # cinematic/dramatic/natural/studio/golden_hour/night/neon
+    camera_motion: str = "",       # pan_left/zoom_in/tilt_up/dolly_in/static/auto/…
+    color_temperature: str = "",   # warm/cool/neutral
 ) -> GenerationBrief:
     """Analyse a request and produce a structured GenerationBrief.
 
@@ -654,42 +660,110 @@ def build_brief(
     if avoid_words:
         directives.append("Avoid these words/phrases: " + ", ".join(avoid_words[:6]))
 
-    # ── Quality awareness buffer (temporary, self-retiring) ────────────────
-    # World-studied chart/content patterns blended in while the own pdim
-    # corpus is small. Never-raise + TTL-cached: cannot break or slow a brief.
+    # ── Awareness augmentation (gated by enhance_prompt) ─────────────────────
+    # When enhance_prompt=False the caller wants the prompt used as-is;
+    # skip both the quality buffer and the live chart signal injection.
     notes: List[str] = []
-    try:
-        from ai_model.quality_awareness import brief_enrichment
-        _enr = brief_enrichment()
-        if _enr:
-            directives.append(_enr["directive"])
-            notes.append(_enr["note"])
-    except Exception:
-        pass
-
-    # ── Live per-request awareness (merged chart + platform signals) ─────────
-    # Folds [HIGH] / TRENDS: lines from the caller's merged awareness string
-    # into the brief's directives so audio, video, and campaign briefs carry
-    # the same live chart signal that social/text routes receive via
-    # _effective_awareness().  Signals are capped at 2 to stay concise.
-    # Never-raise — a brief without awareness signals is still valid.
-    if awareness:
+    if enhance_prompt:
+        # Quality awareness buffer (temporary, self-retiring): world-studied
+        # chart/content patterns blended in while the own pdim corpus is small.
+        # Never-raise + TTL-cached: cannot break or slow a brief.
         try:
-            _aw_signals: List[str] = []
-            for _aw_line in awareness.splitlines():
-                _s = _aw_line.strip()
-                if _s.startswith("[HIGH]"):
-                    _clean = _s[6:].strip().strip(":").strip()
-                    if _clean:
-                        _aw_signals.append(_clean)
-                elif _s.startswith("TRENDS:"):
-                    _clean = _s[7:].strip()
-                    if _clean:
-                        _aw_signals.append(_clean)
-            if _aw_signals:
-                directives.append(
-                    "Align with live chart signals: " + " · ".join(_aw_signals[:2])
-                )
+            from ai_model.quality_awareness import brief_enrichment
+            _enr = brief_enrichment()
+            if _enr:
+                directives.append(_enr["directive"])
+                notes.append(_enr["note"])
+        except Exception:
+            pass
+
+        # Live per-request awareness: folds [HIGH] / TRENDS: lines from the
+        # caller's merged awareness string into the brief's directives so
+        # audio, video, and campaign briefs carry the same live chart signal
+        # that social/text routes receive via _effective_awareness().
+        # Signals are capped at 2 to stay concise.  Never-raise.
+        if awareness:
+            try:
+                _aw_signals: List[str] = []
+                for _aw_line in awareness.splitlines():
+                    _s = _aw_line.strip()
+                    if _s.startswith("[HIGH]"):
+                        _clean = _s[6:].strip().strip(":").strip()
+                        if _clean:
+                            _aw_signals.append(_clean)
+                    elif _s.startswith("TRENDS:"):
+                        _clean = _s[7:].strip()
+                        if _clean:
+                            _aw_signals.append(_clean)
+                if _aw_signals:
+                    directives.append(
+                        "Align with live chart signals: " + " · ".join(_aw_signals[:2])
+                    )
+            except Exception:
+                pass
+
+    # ── Veo-parity conditioning directives ────────────────────────────────────
+    # These are explicit caller instructions, not auto-augmentation, so they
+    # apply regardless of enhance_prompt.  All never-raise.
+
+    # Negative prompt: tell every downstream agent what to exclude.
+    if negative_prompt:
+        try:
+            directives.append(f"Avoid in output: {negative_prompt[:200]}")
+        except Exception:
+            pass
+
+    # Lighting style: informs tone, colour grade, and visual mood.
+    if lighting:
+        try:
+            _LIT_MAP = {
+                "cinematic":   "Cinematic lighting — strong contrast, deep shadows, directional key light.",
+                "dramatic":    "Dramatic lighting — high contrast, shadowed faces, intense key light.",
+                "natural":     "Natural lighting — soft, diffused, outdoor ambience.",
+                "studio":      "Studio lighting — clean, even, product-quality light.",
+                "golden_hour": "Golden hour lighting — warm, low-angle, amber tones.",
+                "night":       "Night scene — dark ambience, neon accents, low-key exposure.",
+                "neon":        "Neon-lit scene — vibrant synthetic colour, dark background.",
+                "vintage":     "Vintage lighting — faded, filmic, warm grain.",
+            }
+            directives.append(
+                _LIT_MAP.get(lighting.lower(), f"Lighting style: {lighting}.")
+            )
+        except Exception:
+            pass
+
+    # Camera motion: informs scene pacing, composition, and energy.
+    if camera_motion and camera_motion.lower() not in ("", "auto"):
+        try:
+            _CAM_MAP = {
+                "pan_left":   "camera panning left",
+                "pan_right":  "camera panning right",
+                "zoom_in":    "camera zooming in (push)",
+                "zoom_out":   "camera zooming out (pull)",
+                "tilt_up":    "camera tilting up",
+                "tilt_down":  "camera tilting down",
+                "dolly_in":   "camera dollying in",
+                "dolly_out":  "camera dollying out",
+                "crane_up":   "camera craning up",
+                "crane_down": "camera craning down",
+                "static":     "static camera, no movement",
+            }
+            _cam_label = _CAM_MAP.get(camera_motion.lower(), camera_motion)
+            directives.append(f"Camera motion: {_cam_label}.")
+        except Exception:
+            pass
+
+    # Colour temperature: biases palette warmth in brief context.
+    if color_temperature:
+        try:
+            _CT_MAP = {
+                "warm":    "Warm colour temperature — amber/golden hues, cosy feel.",
+                "cool":    "Cool colour temperature — blue/teal tones, crisp feel.",
+                "neutral": "Neutral colour temperature — balanced whites, no colour cast.",
+            }
+            directives.append(
+                _CT_MAP.get(color_temperature.lower(), f"Colour temperature: {color_temperature}.")
+            )
         except Exception:
             pass
 

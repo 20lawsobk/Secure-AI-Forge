@@ -112,6 +112,12 @@ class SceneConfig:
     retrieval_conditioned: bool = True
     brand: str = ""
     diffusion_meta: Optional[dict] = None
+    # ── Veo-parity render controls ──────────────────────────────────────────
+    # camera_motion and negative_prompt are passed into diffusion_meta for
+    # downstream conditioning; fps drives the ffmpeg encode frame rate.
+    camera_motion: str = ""      # pan_left/zoom_in/static/auto/… (metadata + conditioning)
+    negative_prompt: str = ""    # forwarded to diffusion pipeline
+    fps: int = 24                # output frame rate (8/16/24/30)
 
 
 def _build_text_filter(te: TextElement, scene_dur: float) -> List[str]:
@@ -377,7 +383,7 @@ def _render_pil_based(
 
     cmd = [
         "ffmpeg", "-y",
-        "-loop", "1", "-framerate", "24", "-i", bg_png,
+        "-loop", "1", "-framerate", str(scene.fps), "-i", bg_png,
         "-vf", vf,
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
         "-pix_fmt", "yuv420p", "-movflags", "+faststart",
@@ -420,7 +426,7 @@ def _render_fallback(
 
     cmd = [
         "ffmpeg", "-y",
-        "-f", "lavfi", "-i", f"color=c={bg_color}:s={width}x{height}:d={dur}:r=24",
+        "-f", "lavfi", "-i", f"color=c={bg_color}:s={width}x{height}:d={dur}:r={scene.fps}",
         "-vf", vf,
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
         "-pix_fmt", "yuv420p", "-movflags", "+faststart",

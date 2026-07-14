@@ -3319,6 +3319,20 @@ class PlatformVideoRequest(_AwarenessMixin):
     instruction:    Optional[str]       = None
     extra_context:  Optional[str]       = None
     content_themes: Optional[List[str]] = None
+    # ── Veo-parity generation controls ───────────────────────────────────
+    camera_motion: Optional[str] = None      # pan_left/pan_right/zoom_in/zoom_out/
+                                             # tilt_up/tilt_down/dolly_in/dolly_out/
+                                             # crane_up/crane_down/static/auto
+    negative_prompt: Optional[str] = None   # content/style/elements to avoid
+    seed: Optional[int] = None              # explicit seed for reproducible output
+    fps: Optional[int] = None               # output frame rate (8/16/24/30); default 24
+    motion_intensity: Optional[float] = None # 0.0–1.0; overrides tone-derived energy
+    enhance_prompt: bool = True             # False = skip AI awareness augmentation
+    lighting: Optional[str] = None          # cinematic/dramatic/natural/studio/
+                                            # golden_hour/night/neon
+    color_temperature: Optional[str] = None # warm/cool/neutral
+    style_reference: Optional[str] = None   # URL or asset ID for style conditioning
+    output_resolution: Optional[str] = None # 720p/1080p/4k — overrides derived resolution
 
 
 def _build_personalized_tone(user_id: str, platform: str, base_tone: str) -> str:
@@ -5790,6 +5804,23 @@ class ApiGenerateVideoRequest(_AwarenessMixin):
     # aspect-ratio + duration logic in VideoAgent — identical to calling the
     # endpoint once per platform, just batched.
     platforms: Optional[List[str]] = None
+    # ── Veo-parity generation controls ───────────────────────────────────
+    # Matches Google Veo's parameter surface for every dimension that isn't
+    # topic or purpose, so callers can express full creative intent without
+    # wrapping a second API.
+    camera_motion: Optional[str] = None      # pan_left/pan_right/zoom_in/zoom_out/
+                                             # tilt_up/tilt_down/dolly_in/dolly_out/
+                                             # crane_up/crane_down/static/auto
+    negative_prompt: Optional[str] = None   # content/style/elements to avoid
+    seed: Optional[int] = None              # explicit seed — reproducible output
+    fps: Optional[int] = None               # output frame rate (8/16/24/30); default 24
+    motion_intensity: Optional[float] = None # 0.0–1.0; overrides genre-derived energy
+    enhance_prompt: bool = True             # False = skip AI awareness augmentation
+    lighting: Optional[str] = None          # cinematic/dramatic/natural/studio/
+                                            # golden_hour/night/neon
+    color_temperature: Optional[str] = None # warm/cool/neutral
+    style_reference: Optional[str] = None   # URL or asset ID for style conditioning
+    output_resolution: Optional[str] = None # 720p/1080p/4k — overrides platform resolution
 
 
 class ApiAudioAnalyzeRequest(BaseModel):
@@ -7706,6 +7737,12 @@ def _start_video_job(req: ApiGenerateVideoRequest, platform: str) -> tuple[str, 
         mood=req.mood, bpm=req.bpm, key=req.key,
         artist_profile_id=req.artistProfileId,
         awareness=_merged_awareness_for(req),
+        # ── Veo-parity controls into the intelligence brief ──────────────
+        negative_prompt=req.negative_prompt or "",
+        enhance_prompt=req.enhance_prompt if req.enhance_prompt is not None else True,
+        lighting=req.lighting or "",
+        camera_motion=req.camera_motion or "",
+        color_temperature=req.color_temperature or "",
     )
 
     job_id = str(uuid.uuid4())
@@ -7753,6 +7790,17 @@ def _start_video_job(req: ApiGenerateVideoRequest, platform: str) -> tuple[str, 
                 duration=float(req.duration or 0),
                 artist_context={"audio_path": req.user_audio_path} if req.user_audio_path else {},
                 awareness=_merged_awareness_for(req),
+                # ── Veo-parity controls forwarded into the render pipeline ─
+                camera_motion=req.camera_motion or "",
+                negative_prompt=req.negative_prompt or "",
+                seed=req.seed,
+                fps=req.fps or 24,
+                motion_intensity=req.motion_intensity,
+                enhance_prompt=req.enhance_prompt if req.enhance_prompt is not None else True,
+                lighting=req.lighting or "",
+                color_temperature=req.color_temperature or "",
+                style_reference=req.style_reference or "",
+                output_resolution=req.output_resolution or "",
             )
 
             production = agent.plan(agent_req)
@@ -7781,16 +7829,34 @@ def _start_video_job(req: ApiGenerateVideoRequest, platform: str) -> tuple[str, 
             ratio  = production.aspect_ratio or PLATFORM_RATIOS.get(production.platform, "9:16")
             width, height = ASPECT_RATIOS.get(ratio, (1080, 1920))
 
+            # output_resolution: explicit caller override (720p/1080p/4k).
+            # Applied after the platform-derived aspect-ratio dimensions so
+            # the caller always gets the resolution they asked for regardless
+            # of platform defaults.  Never-raise.
+            if req.output_resolution:
+                _RES_MAP = {
+                    "720p":  (1280, 720),  "720":   (1280, 720),
+                    "1080p": (1920, 1080), "1080":  (1920, 1080), "fhd": (1920, 1080),
+                    "4k":    (3840, 2160), "2160p": (3840, 2160), "uhd": (3840, 2160),
+                }
+                _res = _RES_MAP.get(req.output_resolution.lower())
+                if _res:
+                    width, height = _res
+
             # Unified conditioning bus: extract real-asset-grounded Visual DNA
             # so the diffusion background pipeline conditions on the technique of
             # peak reference media, not just a genre lookup. Never-raise.
             try:
                 from ai_model.generation import extract_technique
+                # style_reference (Veo parity): pass as the brand hint so
+                # extract_technique can condition the DNA on an explicit reference
+                # asset when the caller supplies one.
+                _eff_brand = req.style_reference or req.artist_name or None
                 _tech = extract_technique(
                     idea=agent_req.idea, genre=production.genre_detected,
                     tone=production.tone_used, energy=getattr(brief, "energy", None),
                     mood=getattr(brief, "mood", None), bpm=getattr(brief, "bpm", None),
-                    key=getattr(brief, "key", None), brand=req.artist_name or None,
+                    key=getattr(brief, "key", None), brand=_eff_brand,
                     seed=abs(hash(job_id)) % (2**31),
                 )
                 _tech_dna = _tech.dna_dict()

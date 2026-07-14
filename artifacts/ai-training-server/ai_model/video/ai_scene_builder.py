@@ -297,6 +297,14 @@ def build_scenes(
     height: int,
     awareness: str = "",
     technique_dna: Optional[Dict] = None,
+    # ── Veo-parity controls ───────────────────────────────────────────────
+    camera_motion: str = "",          # pan_left/zoom_in/tilt_up/dolly_in/static/auto
+    negative_prompt: str = "",        # content/style to exclude (forwarded to diffusion)
+    seed_override: Optional[int] = None,  # explicit caller seed; overrides idea-hash seed
+    motion_intensity: Optional[float] = None,  # 0–1; overrides genre-derived energy
+    lighting: str = "",               # cinematic/dramatic/natural/studio/golden_hour/night/neon
+    color_temperature: str = "",      # warm/cool/neutral
+    fps: int = 24,                    # output frame rate (8/16/24/30)
 ) -> List[SceneConfig]:
     """
     Build a list of SceneConfig objects from content DNA.
@@ -304,11 +312,74 @@ def build_scenes(
 
     When `awareness` is provided, each SceneConfig gets a `diffusion_meta` dict
     that enables the MaxCore neural diffusion background pipeline in _pil_bg_frame.
+
+    Veo-parity controls (camera_motion, negative_prompt, seed_override,
+    motion_intensity, lighting, color_temperature, fps) flow through to
+    SceneConfig so the render layer can use them directly.  All are
+    never-raise — a bad value leaves the DNA at its genre-derived default.
     """
     if not scenes_data:
         return []
 
     dna = build_dna(idea, genre, tone)
+
+    # ── Apply Veo-parity caller overrides to the derived DNA ────────────────
+    # Never-raise: a bad value leaves the DNA at its genre-derived default.
+    if seed_override is not None:
+        try:
+            dna = VisualDNA(
+                energy=dna.energy, darkness=dna.darkness, warmth=dna.warmth,
+                saturation=dna.saturation, grain=dna.grain,
+                complexity=dna.complexity, seed=int(seed_override),
+            )
+        except Exception:
+            pass
+
+    if motion_intensity is not None:
+        try:
+            _mi = max(0.0, min(1.0, float(motion_intensity)))
+            dna = VisualDNA(
+                energy=_mi, darkness=dna.darkness, warmth=dna.warmth,
+                saturation=dna.saturation, grain=dna.grain,
+                complexity=dna.complexity, seed=dna.seed,
+            )
+        except Exception:
+            pass
+
+    if color_temperature:
+        _ct_warmth = {"warm": 0.78, "cool": 0.22, "neutral": 0.50}.get(
+            color_temperature.lower()
+        )
+        if _ct_warmth is not None:
+            try:
+                dna = VisualDNA(
+                    energy=dna.energy, darkness=dna.darkness, warmth=_ct_warmth,
+                    saturation=dna.saturation, grain=dna.grain,
+                    complexity=dna.complexity, seed=dna.seed,
+                )
+            except Exception:
+                pass
+
+    # Lighting → base colour-grade preset used on non-emphasis scenes.
+    # High-energy emphasis scenes (chorus/drop) still override to neon/vintage
+    # so dynamic scenes keep their visual punch.
+    _LIGHTING_GRADE: Dict[str, str] = {
+        "cinematic":    "cinematic",
+        "dramatic":     "cinematic",
+        "natural":      "",
+        "studio":       "",
+        "golden_hour":  "warm",
+        "night":        "cinematic",
+        "neon":         "neon",
+        "vintage":      "vintage",
+    }
+    _lighting_grade_override: Optional[str] = (
+        _LIGHTING_GRADE.get(lighting.lower()) if lighting else None
+    )
+
+    # fps must be a supported value; fall back to 24 for anything out of range.
+    _fps = fps if fps in (8, 16, 24, 30) else 24
+
     palette = derive_palette(dna)
     base_bg_type = _choose_bg_type(dna.energy, dna.darkness, dna.seed)
 
@@ -379,6 +450,9 @@ def build_scenes(
         sc_vignette = _clamp(base_vignette + vignette_shift, 0.15, 0.75)
 
         # ── Per-scene colour grade ───────────────────────────────────────
+        # Emphasis scenes override to neon/vintage for visual impact;
+        # all other scenes use the lighting preset (if set) or the
+        # palette's DNA-derived grade.
         if scene_type in ("chorus", "drop") and dna.energy > 0.70:
             sc_color_grade = "neon"
         elif scene_type == "bridge" and dna.grain > 0.25:
@@ -386,7 +460,11 @@ def build_scenes(
         elif scene_type in ("outro",) and dna.warmth > 0.60:
             sc_color_grade = "warm"
         else:
-            sc_color_grade = palette.color_grade
+            sc_color_grade = (
+                _lighting_grade_override
+                if _lighting_grade_override is not None
+                else palette.color_grade
+            )
 
         # ── Per-scene text colour: accent for high-energy emphasis ───────
         if scene_type in ("chorus", "drop") and many_scenes:
@@ -473,7 +551,12 @@ def build_scenes(
                 "saturation": dna.saturation,
             },
             "technique_source": "real_asset" if technique_dna else "genre_prior",
-        } if awareness else {}
+            # ── Veo-parity conditioning fields ──────────────────────────
+            "camera_motion":    camera_motion or "",
+            "negative_prompt":  negative_prompt or "",
+            "lighting":         lighting or "",
+            "color_temperature": color_temperature or "",
+        } if (awareness or camera_motion or negative_prompt or lighting) else {}
 
         cfg = SceneConfig(
             duration=dur,
@@ -492,7 +575,11 @@ def build_scenes(
             show_progress=show_progress and idx == len(scenes_data) - 2,
             progress_color=palette.accent,
             brand=artist_name or "",
-            diffusion_meta=_diffusion_meta if awareness else None,
+            diffusion_meta=_diffusion_meta if _diffusion_meta else None,
+            # Veo-parity render controls propagated per-scene
+            camera_motion=camera_motion or "",
+            negative_prompt=negative_prompt or "",
+            fps=_fps,
         )
         configs.append(cfg)
 

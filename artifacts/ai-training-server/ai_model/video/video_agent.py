@@ -169,6 +169,18 @@ class VideoAgentRequest:
     duration: float = 0.0
     artist_context: Dict[str, Any] = field(default_factory=dict)
     awareness: str = ""
+    # ── Veo-parity generation controls ────────────────────────────────────
+    camera_motion: str = ""          # pan_left/pan_right/zoom_in/zoom_out/tilt_up/
+                                     # tilt_down/dolly_in/dolly_out/crane_up/crane_down/static/auto
+    negative_prompt: str = ""        # content/style/elements to exclude
+    seed: Optional[int] = None       # explicit seed for reproducible output
+    fps: int = 24                    # output frame rate (8/16/24/30)
+    motion_intensity: Optional[float] = None  # 0–1; overrides genre-derived energy
+    enhance_prompt: bool = True      # when False, skip awareness augmentation
+    lighting: str = ""               # cinematic/dramatic/natural/studio/golden_hour/night/neon
+    color_temperature: str = ""      # warm/cool/neutral
+    style_reference: str = ""        # URL or asset ID for style conditioning
+    output_resolution: str = ""      # 720p/1080p/4k — resolution override
 
 
 @dataclass
@@ -364,6 +376,14 @@ class VideoAgent:
             height=height,
             awareness=req.awareness,
             technique_dna=technique_dna,
+            # ── Veo-parity controls forwarded from VideoAgentRequest ─────
+            camera_motion=req.camera_motion,
+            negative_prompt=req.negative_prompt,
+            seed_override=req.seed,
+            motion_intensity=req.motion_intensity,
+            lighting=req.lighting,
+            color_temperature=req.color_temperature,
+            fps=req.fps,
         )
 
     def render(self, req: VideoAgentRequest) -> CinematicResult:

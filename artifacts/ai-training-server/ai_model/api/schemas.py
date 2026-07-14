@@ -220,6 +220,21 @@ class VideoGenerateRequest(BaseModel):
     goal: str = "growth"
     tone: str = "energetic"
     quality: str = "cinematic"
+    # ── Veo-parity generation controls ───────────────────────────────────
+    # Matches Google Veo's parameter surface for all aspects except topic/purpose.
+    camera_motion: Optional[str] = None      # pan_left/pan_right/zoom_in/zoom_out/
+                                             # tilt_up/tilt_down/dolly_in/dolly_out/
+                                             # crane_up/crane_down/static/auto
+    negative_prompt: Optional[str] = None   # content/style/elements to exclude
+    seed: Optional[int] = None              # explicit seed for reproducible output
+    fps: Optional[int] = None               # output frame rate (8/16/24/30); default 24
+    motion_intensity: Optional[float] = None # 0.0–1.0; overrides genre energy
+    enhance_prompt: bool = True             # when False, skip AI awareness augmentation
+    lighting: Optional[str] = None          # cinematic/dramatic/natural/studio/
+                                            # golden_hour/night/neon
+    color_temperature: Optional[str] = None # warm/cool/neutral
+    style_reference: Optional[str] = None   # URL or asset ID for style conditioning
+    output_resolution: Optional[str] = None # 720p/1080p/4k — overrides derived resolution
 
 
 class VideoGenerateResponse(BaseModel):
