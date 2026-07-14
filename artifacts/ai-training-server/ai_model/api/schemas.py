@@ -235,6 +235,9 @@ class VideoGenerateRequest(BaseModel):
     color_temperature: Optional[str] = None # warm/cool/neutral
     style_reference: Optional[str] = None   # URL or asset ID for style conditioning
     output_resolution: Optional[str] = None # 720p/1080p/4k — overrides derived resolution
+    # ── Intent sub-awareness layer ────────────────────────────────────────
+    description: str = ""     # free-text description of what to generate
+    prompt_url:  str = ""     # URL to analyse for intent (Spotify, TikTok, etc.)
 
 
 class VideoGenerateResponse(BaseModel):

@@ -829,9 +829,16 @@ class _AwarenessMixin(BaseModel):
     """Normalises ``awareness`` whether Node.js sends it as a plain string or as
     the structured object ``{contextString, trendingGenres, ...}`` that
     ``enrichWithAwareness`` injects.  Extracts ``contextString`` from the dict so
-    the Python parsers always receive the pre-formatted multi-line text."""
+    the Python parsers always receive the pre-formatted multi-line text.
 
-    awareness: str = ""
+    Also accepts ``description`` (free-text intent description) and
+    ``prompt_url`` (URL to analyse for intent) that feed the intent
+    sub-awareness layer — see :func:`_merged_awareness_for`.
+    """
+
+    awareness:    str = ""
+    description:  str = ""   # free-text description of what to generate
+    prompt_url:   str = ""   # URL to analyse for intent (Spotify, TikTok, etc.)
 
     @model_validator(mode="before")
     @classmethod
@@ -848,23 +855,103 @@ def _as_text(v: Any) -> str:
 
 
 def _merged_awareness_for(req: Any) -> str:
-    """Build one endpoint's awareness-bridge input identically to
-    /api/generate/content, personalised by that endpoint's own direction fields.
+    """Build one endpoint's awareness-bridge input, now with intent detection.
 
-    The caller's creative direction (instruction / extra_context /
-    content_themes) is serialised FIRST via ``awareness_from_direction`` (so it
-    outranks generic trend context, is lead-in-stripped + colon-safe, and themes
-    go in as a bullet — never #hashtags), then genuine external live-signal
-    awareness is appended. ``brief.directives`` are deliberately NOT used as a
-    fallback: they are internal prompt-engineering instructions the awareness
-    parser would quote verbatim. Returns "" when there is no real context, which
-    every agent handles gracefully. Every modality now uses awareness the same
-    way — only the direction personalisation differs per endpoint.
+    Cascade (highest priority first):
+    1. [INTENT] lines  — from the intent sub-awareness layer (description +
+                         prompt_url → detect_intent → structured signals)
+    2. Direction lines — instruction / extra_context / content_themes serialised
+                         by awareness_from_direction, leading with [HIGH]
+    3. External awareness — caller-supplied awareness context string
+    4. Platform awareness — from quality_awareness.platform_awareness_string
 
-    Delegates to the unified generation orchestrator so awareness merging has a
-    single source of truth shared across all five modalities."""
+    [INTENT] lines sit above everything else so user-stated intent is the
+    strongest conditioning signal throughout the whole brief pipeline.
+    Never raises — falls back gracefully to the pre-intent behaviour.
+    """
     from ai_model.generation import merge_awareness
-    return merge_awareness(req)
+
+    # ── Intent sub-awareness layer ────────────────────────────────────────
+    # Detect intent from description and/or prompt_url (both may be empty).
+    # We read the URL content once here and pass the text into detect_intent
+    # so the awareness merge doesn't duplicate the HTTP call.
+    intent_lines: str = ""
+    intent_signals = None
+    try:
+        _desc       = _as_text(getattr(req, "description",  ""))
+        _prompt_url = _as_text(getattr(req, "prompt_url",   ""))
+
+        if _desc or _prompt_url:
+            from ai_model.intent import detect_intent
+            from ai_model.intent.url_reader import read_url as _read_url
+
+            _url_text  = ""
+            _url_plat  = ""
+            _url_goal  = ""
+
+            if _prompt_url:
+                try:
+                    _uc       = _read_url(_prompt_url)
+                    _url_text = _uc.combined()
+                    _url_plat = _uc.platform_hint
+                    _url_goal = _uc.goal_hint
+                except Exception:
+                    pass
+
+            intent_signals = detect_intent(
+                description       = _desc,
+                url               = "",           # already read above
+                url_content_text  = _url_text,
+                url_platform_hint = _url_plat,
+                url_goal_hint     = _url_goal,
+            )
+
+            if intent_signals.is_useful():
+                intent_lines = "\n".join(intent_signals.to_awareness_lines())
+    except Exception:
+        pass
+
+    # ── Base awareness merge (direction + external + platform) ───────────
+    base_awareness = merge_awareness(req)
+
+    # ── Assemble final cascade ────────────────────────────────────────────
+    parts = [p for p in (intent_lines, base_awareness) if p]
+    return "\n".join(parts)
+
+
+def _intent_signals_for(req: Any):
+    """Return the :class:`IntentSignals` for *req* (None if nothing to detect).
+
+    Detects from ``req.description`` and/or ``req.prompt_url``.  Intended for
+    callers that need to pass intent_signals= into build_brief() directly so
+    the signal application happens before brand-voice fallbacks, rather than
+    only through the awareness string.  Never raises.
+    """
+    try:
+        _desc       = _as_text(getattr(req, "description",  ""))
+        _prompt_url = _as_text(getattr(req, "prompt_url",   ""))
+        if not (_desc or _prompt_url):
+            return None
+        from ai_model.intent import detect_intent
+        from ai_model.intent.url_reader import read_url as _read_url
+        _url_text, _url_plat, _url_goal = "", "", ""
+        if _prompt_url:
+            try:
+                _uc       = _read_url(_prompt_url)
+                _url_text = _uc.combined()
+                _url_plat = _uc.platform_hint
+                _url_goal = _uc.goal_hint
+            except Exception:
+                pass
+        sig = detect_intent(
+            description       = _desc,
+            url_content_text  = _url_text,
+            url_platform_hint = _url_plat,
+            url_goal_hint     = _url_goal,
+        )
+        return sig if sig.is_useful() else None
+    except Exception:
+        return None
 
 
 class ContentRequest(_AwarenessMixin):

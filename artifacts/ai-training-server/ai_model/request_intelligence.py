@@ -580,6 +580,14 @@ def build_brief(
     lighting: str = "",            # cinematic/dramatic/natural/studio/golden_hour/night/neon
     camera_motion: str = "",       # pan_left/zoom_in/tilt_up/dolly_in/static/auto/…
     color_temperature: str = "",   # warm/cool/neutral
+    # ── Intent sub-awareness layer ────────────────────────────────────────
+    # Pre-detected IntentSignals (from detect_intent) may be passed directly
+    # by callers that have already run detection (e.g. _merged_awareness_for).
+    # When present their confidence-gated values override caller-supplied
+    # fallbacks for genre/mood/tone/bpm/key/lighting/camera/color_temperature
+    # ONLY where the caller left the field as its default empty value, so
+    # explicit caller intent always wins.
+    intent_signals: "Optional[Any]" = None,
 ) -> GenerationBrief:
     """Analyse a request and produce a structured GenerationBrief.
 
@@ -597,6 +605,47 @@ def build_brief(
     # keywords, or instruction verbs ("write", "caption") pollute the themes.
     narrative_clean = _narrative_clause(narrative_text)
     explicit_themes = [_norm(t) for t in (themes or []) if _norm(t)]
+
+    # ── Intent sub-awareness layer ─────────────────────────────────────────
+    # Apply confidence-gated signals from a pre-detected IntentSignals object.
+    # Only fills in EMPTY caller fields — never overrides explicit values.
+    # All operations are never-raise; a malformed object is silently ignored.
+    if intent_signals is not None:
+        try:
+            _isig = intent_signals
+            # Creative fields: fill caller blanks with confidence-gated detections
+            if not genre and getattr(_isig, "genre", None) and getattr(_isig, "genre_confidence", 0) >= 0.45:
+                genre = _isig.genre.replace("_", " ")
+            if not mood and getattr(_isig, "mood", None) and getattr(_isig, "mood_confidence", 0) >= 0.40:
+                mood = _isig.mood
+            if not tone and getattr(_isig, "tone", None):
+                tone = _isig.tone
+            if bpm is None and getattr(_isig, "tempo_bpm", None):
+                bpm = float(_isig.tempo_bpm)
+            if not key and getattr(_isig, "key", None):
+                key = _isig.key
+            # Veo-parity visual fields
+            if not lighting and getattr(_isig, "lighting", None):
+                lighting = _isig.lighting
+            if not camera_motion and getattr(_isig, "camera_motion", None):
+                camera_motion = _isig.camera_motion
+            if not color_temperature and getattr(_isig, "color_temperature", None):
+                color_temperature = _isig.color_temperature
+            # Negative signals accumulate (don't replace explicit negative_prompt)
+            _isig_neg = getattr(_isig, "negative_signals", None) or []
+            if _isig_neg and not negative_prompt:
+                negative_prompt = ", ".join(_isig_neg[:5])
+            # Goal: only override if caller supplied no goal and confidence is strong
+            _isig_goal = getattr(_isig, "goal", None)
+            _isig_goal_conf = getattr(_isig, "goal_confidence", 0)
+            if not goal and _isig_goal and _isig_goal_conf >= 0.5:
+                goal = _isig_goal
+            # Topics: merge detected keywords into the themes list
+            _isig_topics = (getattr(_isig, "topics", None) or [])[:4]
+            if _isig_topics:
+                explicit_themes = list(dict.fromkeys([*explicit_themes, *[_norm(t) for t in _isig_topics if _norm(t)]]))
+        except Exception:
+            pass
 
     # ── Brand Voice fallback (persistent per-artist profile) ───────────────
     brand = load_brand_voice(artist_profile_id) or {}
@@ -677,17 +726,56 @@ def build_brief(
         except Exception:
             pass
 
-        # Live per-request awareness: folds [HIGH] / TRENDS: lines from the
-        # caller's merged awareness string into the brief's directives so
-        # audio, video, and campaign briefs carry the same live chart signal
-        # that social/text routes receive via _effective_awareness().
-        # Signals are capped at 2 to stay concise.  Never-raise.
+        # Live per-request awareness: folds [INTENT] / [HIGH] / TRENDS: lines
+        # from the caller's merged awareness string into the brief's directives
+        # so audio, video, and campaign briefs carry the same signals that
+        # social/text routes receive via _effective_awareness().
+        # [INTENT] lines (from the intent sub-awareness layer) are processed
+        # first and treated as the highest-priority creative directives.
+        # Signals are capped at 2 per tier to stay concise.  Never-raise.
         if awareness:
             try:
                 _aw_signals: List[str] = []
+                _intent_directives: List[str] = []
                 for _aw_line in awareness.splitlines():
                     _s = _aw_line.strip()
-                    if _s.startswith("[HIGH]"):
+                    if _s.startswith("[INTENT]"):
+                        # Parse key=value pairs from the intent layer and
+                        # translate them into human-readable directives.
+                        _payload = _s[len("[INTENT]"):].strip()
+                        _kv: Dict[str, str] = {}
+                        for _tok in _payload.split():
+                            if "=" in _tok:
+                                _k, _v = _tok.split("=", 1)
+                                _kv[_k] = _v
+                        # Build a concise intent directive for the agents
+                        _iparts: List[str] = []
+                        if "genre" in _kv:
+                            _iparts.append(_kv["genre"].replace("_", " "))
+                        if "mood" in _kv:
+                            _iparts.append(_kv["mood"] + " mood")
+                        if "energy" in _kv:
+                            try:
+                                _e = float(_kv["energy"])
+                                _iparts.append(
+                                    "high energy" if _e >= 0.7
+                                    else ("low energy" if _e <= 0.35 else "mid energy")
+                                )
+                            except ValueError:
+                                pass
+                        if "tone" in _kv:
+                            _iparts.append(_kv["tone"] + " tone")
+                        if "bpm" in _kv:
+                            _iparts.append(_kv["bpm"] + " BPM")
+                        if "topics" in _kv:
+                            _iparts.append("themes: " + _kv["topics"].replace(",", ", "))
+                        if "avoid" in _kv:
+                            _iparts.append("avoid: " + _kv["avoid"].replace(",", ", "))
+                        if "reference_artist" in _kv:
+                            _iparts.append("reference: " + _kv["reference_artist"])
+                        if _iparts:
+                            _intent_directives.append("User intent — " + " · ".join(_iparts))
+                    elif _s.startswith("[HIGH]"):
                         _clean = _s[6:].strip().strip(":").strip()
                         if _clean:
                             _aw_signals.append(_clean)
@@ -695,6 +783,9 @@ def build_brief(
                         _clean = _s[7:].strip()
                         if _clean:
                             _aw_signals.append(_clean)
+                # Intent directives lead all others (highest priority)
+                for _id in _intent_directives[:2]:
+                    directives.append(_id)
                 if _aw_signals:
                     directives.append(
                         "Align with live chart signals: " + " · ".join(_aw_signals[:2])
