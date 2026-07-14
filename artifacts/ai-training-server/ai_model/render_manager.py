@@ -63,6 +63,47 @@ class RenderManager:
         )
         self._gc_thread.start()
 
+    # ── Stay-alive helpers (called by the Watchdog) ─────────────────────────
+
+    def restart_gc_thread(self) -> None:
+        """Replace the GC thread with a fresh daemon if the previous one died.
+
+        Never raises — safe to call from the watchdog poll loop.
+        """
+        try:
+            new_thread = threading.Thread(
+                target=self._gc_loop, daemon=True, name="render-mgr-gc"
+            )
+            self._gc_thread = new_thread
+            new_thread.start()
+        except Exception as exc:
+            import logging
+            logging.getLogger("render_manager").error(
+                "[RenderManager] restart_gc_thread failed: %s", exc
+            )
+
+    def restart_executor(self) -> None:
+        """Swap in a fresh ThreadPoolExecutor if the previous one was shut down.
+
+        Shuts down the old executor non-blocking so in-flight render jobs can
+        drain without blocking the watchdog thread.  Never raises.
+        """
+        try:
+            old = self._executor
+            self._executor = ThreadPoolExecutor(
+                max_workers=self._MAX_WORKERS,
+                thread_name_prefix="render-mgr",
+            )
+            try:
+                old.shutdown(wait=False)
+            except Exception:
+                pass
+        except Exception as exc:
+            import logging
+            logging.getLogger("render_manager").error(
+                "[RenderManager] restart_executor failed: %s", exc
+            )
+
     # ── Public API ──────────────────────────────────────────────────────────
 
     def render_thumbnail(

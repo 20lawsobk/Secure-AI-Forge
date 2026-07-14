@@ -34,8 +34,9 @@ THREAD_RESTART_DELAY   = 5           # seconds before restarting a dead thread
 MEMORY_WARN_PCT        = 75          # % memory usage to start warning
 MEMORY_CRIT_PCT        = 85          # % to trigger GC aggressively
 MEMORY_DANGER_PCT      = 92          # % to take extreme measures (clear all caches)
-KEEPALIVE_INTERVAL     = 300         # 5 min between rendering keep-alive probes
-MAX_LOG_ENTRIES        = 200         # rolling alert log size
+KEEPALIVE_INTERVAL         = 300         # 5 min between rendering keep-alive probes
+MAX_LOG_ENTRIES            = 200         # rolling alert log size
+QUALITY_HARVEST_STALE_SEC  = 86400      # 24 h before triggering auto-harvest
 
 
 class WatchdogAlert:
@@ -90,6 +91,11 @@ class Watchdog:
         self.flywheel_ingestor_fn: Optional[Callable] = None  # () → FlywheelIngestor|None
         self.storage_client_ref                 = None   # StorageClient (not the storage abstraction)
 
+        # Content generation service references
+        self.gen_coalescer                      = None   # GenerateCoalescer instance
+        self.render_manager                     = None   # RenderManager instance
+        self.reinstall_coalescer_fn: Optional[Callable] = None  # () reinstalls coalescer in-place
+
         # Rendering system health — injected from server.py
         # rendering_health_fn() → {"ready": bool, "objects": {name: bool, ...}}
         self.rendering_health_fn: Optional[Callable[[], dict]] = None
@@ -122,6 +128,7 @@ class Watchdog:
         self._continuous_stuck_since: Optional[float] = None
         # Extended stay-alive per-check state
         self._audio_empty_since: Optional[float] = None
+        self._quality_harvest_alerted_at: Optional[float] = None
 
     # ------------------------------------------------------------------ #
     # Lifecycle                                                            #
@@ -201,6 +208,9 @@ class Watchdog:
         self._check_generated_ingestor(now)
         self._check_flywheel_ingestor(now)
         self._check_audio_dataset(now)
+        self._check_gen_coalescer(now)
+        self._check_render_manager(now)
+        self._check_quality_harvester_freshness(now)
         self._check_storage_health_thread(now)
         self._check_checkpoint_integrity()
         self._check_memory(now)
@@ -576,6 +586,128 @@ class Watchdog:
 
         threading.Thread(
             target=_reseed, daemon=True, name="WatchdogAudioReseed"
+        ).start()
+
+    def _check_gen_coalescer(self, now: float):
+        """Reinstall the dynamic-batching coalescer if its worker threads died.
+
+        GenerateCoalescer uses two one-shot daemon threads (_collector, _executor).
+        Once dead they cannot be individually restarted — the whole coalescer must
+        be reinstalled via the injected reinstall_coalescer_fn callable.
+        While reinstalling, the model's .generate fallback path stays active so
+        requests are never dropped, just un-batched.
+        """
+        gc = self.gen_coalescer
+        if gc is None:
+            return
+        collector_alive = gc._collector.is_alive() if getattr(gc, "_collector", None) else True
+        executor_alive  = gc._executor.is_alive()  if getattr(gc, "_executor",  None) else True
+        if collector_alive and executor_alive:
+            return
+
+        dead = []
+        if not collector_alive:
+            dead.append("gen-collector")
+        if not executor_alive:
+            dead.append("gen-executor")
+
+        self._alert(
+            "critical", "gen_coalescer_threads_dead",
+            f"GenerateCoalescer threads dead ({dead}) — batching degraded, reinstalling.",
+            "Spawned reinstall_coalescer_fn() in background thread"
+        )
+        if self.reinstall_coalescer_fn is not None:
+            def _do():
+                try:
+                    new_gc = self.reinstall_coalescer_fn()
+                    if new_gc is not None:
+                        self.gen_coalescer = new_gc
+                        logger.info("[Watchdog] GenerateCoalescer reinstalled successfully.")
+                except Exception as exc:
+                    logger.error("[Watchdog] Coalescer reinstall failed: %s", exc)
+            threading.Thread(target=_do, daemon=True, name="WatchdogCoalescerReinit").start()
+
+    def _check_render_manager(self, now: float):
+        """Keep RenderManager's GC thread and executor alive.
+
+        If the GC thread dies, completed render jobs accumulate in memory indefinitely.
+        If the executor shuts down, new render jobs fail silently on submit.
+        """
+        rm = self.render_manager
+        if rm is None:
+            return
+
+        gc_thread = getattr(rm, "_gc_thread", None)
+        if gc_thread is not None and not gc_thread.is_alive():
+            self._alert(
+                "critical", "render_manager_gc_dead",
+                "RenderManager GC thread died — completed render jobs will accumulate. Restarting.",
+                "Called RenderManager.restart_gc_thread()"
+            )
+            try:
+                rm.restart_gc_thread()
+            except Exception as exc:
+                logger.error("[Watchdog] RenderManager GC restart failed: %s", exc)
+
+        executor = getattr(rm, "_executor", None)
+        if executor is not None and getattr(executor, "_shutdown", False):
+            self._alert(
+                "critical", "render_manager_executor_dead",
+                "RenderManager ThreadPoolExecutor shut down — render jobs will fail. Restarting.",
+                "Called RenderManager.restart_executor()"
+            )
+            try:
+                rm.restart_executor()
+            except Exception as exc:
+                logger.error("[Watchdog] RenderManager executor restart failed: %s", exc)
+
+    def _check_quality_harvester_freshness(self, now: float):
+        """Trigger a background quality harvest when awareness data goes stale.
+
+        quality_harvester.harvest() writes mb:awareness:quality:doc.  If that
+        data is absent or older than QUALITY_HARVEST_STALE_SEC, generation
+        quality degrades because the awareness blending layer has no live
+        chart or engagement signal to draw from.
+        """
+        if self.storage is None or not self.storage.is_available:
+            return
+
+        try:
+            doc = self.storage.get("mb:awareness:quality:doc")
+            if isinstance(doc, dict):
+                harvested_at_str = doc.get("harvested_at", "")
+                if harvested_at_str:
+                    ts = time.strptime(harvested_at_str, "%Y-%m-%dT%H:%M:%SZ")
+                    age_sec = now - time.mktime(ts)
+                    if age_sec < QUALITY_HARVEST_STALE_SEC:
+                        self._quality_harvest_alerted_at = None
+                        return
+        except Exception:
+            pass  # missing or unparseable — treat as stale
+
+        # Rate-limit alerts: at most one per QUALITY_HARVEST_STALE_SEC window
+        if (self._quality_harvest_alerted_at is not None and
+                now - self._quality_harvest_alerted_at < QUALITY_HARVEST_STALE_SEC):
+            return
+        self._quality_harvest_alerted_at = now
+
+        self._alert(
+            "warning", "quality_harvest_stale",
+            f"Quality awareness data is stale or absent (>{QUALITY_HARVEST_STALE_SEC // 3600}h) — "
+            "triggering background harvest so generation has live chart signal.",
+            "Spawned quality_harvester.harvest() in background thread"
+        )
+
+        def _do_harvest():
+            try:
+                from workers.quality_harvester import harvest as _harvest  # noqa: PLC0415
+                _harvest(replace=False)   # never overwrite a concurrent successful harvest
+                logger.info("[Watchdog] Quality harvest complete.")
+            except Exception as exc:
+                logger.warning("[Watchdog] Quality harvest failed (non-fatal): %s", exc)
+
+        threading.Thread(
+            target=_do_harvest, daemon=True, name="WatchdogQualityHarvest"
         ).start()
 
     def _check_storage_health_thread(self, now: float):

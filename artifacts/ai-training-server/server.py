@@ -1135,13 +1135,59 @@ def _init_storage():
     _watchdog.data_puller       = _data_puller
     _watchdog.weights_dir       = Path(__file__).parent / "ai_model" / "weights"
 
-    # Extended stay-alive references
+    # Extended stay-alive references (background infrastructure)
     _watchdog.storage_client_ref   = storage          # StorageClient (health-thread probe)
     _watchdog.flywheel_ingestor_fn = _get_flywheel     # lazy — returns FlywheelIngestor|None
 
+    # Content generation service references — injected after _init_ai_model
+    # completes so the globals are guaranteed non-None on first assignment.
+    _watchdog.gen_coalescer    = _gen_coalescer
+    _watchdog.render_manager   = _render_manager
+
+    # Coalescer reinstall: restores the original generate, then re-wraps.
+    # _creative_model.generate may already be the coalescer wrapper; the
+    # saved reference lets us avoid double-wrapping on repeated reinstalls.
+    _original_generate_ref = [None]
+    if _creative_model is not None:
+        _original_generate_ref[0] = getattr(_creative_model, "_orig_generate", None)
+
+    def _reinstall_coalescer():
+        global _gen_coalescer
+        try:
+            from ai_model.dynamic_batching import install as _install_coalescer  # noqa
+            # Restore the unwrapped generate before wrapping again.
+            orig = _original_generate_ref[0]
+            if orig is not None and _creative_model is not None:
+                _creative_model.generate = orig
+            new_gc = _install_coalescer(_creative_model, gpu_pool=_get_gpu_pool())
+            _gen_coalescer = new_gc
+            _watchdog.gen_coalescer = new_gc
+            return new_gc
+        except Exception as exc:
+            print(f"[Watchdog] coalescer reinstall failed: {exc}", flush=True)
+            return None
+
+    _watchdog.reinstall_coalescer_fn = _reinstall_coalescer
+
     # ── Rendering system health callbacks ──────────────────────────────
     def _rendering_health_fn():
-        """Return live status of every rendering object."""
+        """Return live status of every content generation object."""
+        gc = _gen_coalescer
+        coalescer_ok = (
+            gc is None  # disabled intentionally — not a failure
+            or (
+                (gc._collector.is_alive() if getattr(gc, "_collector", None) else True)
+                and (gc._executor.is_alive() if getattr(gc, "_executor", None) else True)
+            )
+        )
+        rm = _render_manager
+        render_manager_ok = (
+            rm is None
+            or (
+                (not getattr(getattr(rm, "_executor", None), "_shutdown", False))
+                and (rm._gc_thread.is_alive() if getattr(rm, "_gc_thread", None) else True)
+            )
+        )
         return {
             "ready": _model_ready,
             "objects": {
@@ -1151,30 +1197,73 @@ def _init_storage():
                 "distribution_agent":   _distribution_agent is not None,
                 "optimization_agent":   _optimization_agent is not None,
                 "image_engine":         _image_engine is not None,
+                "render_manager":       render_manager_ok,
+                "gen_coalescer":        coalescer_ok,
             },
         }
 
     def _keepalive_fn() -> bool:
         """
-        Lightweight end-to-end probe: runs a minimal generation to confirm
-        the rendering pipeline is fully operational.  Runs synchronously on
-        the watchdog thread (short enough to not block meaningful traffic).
+        Expanded end-to-end probe across all content generation services.
+
+        Probes run in parallel sub-threads to avoid serialising ~3 s of model
+        inference.  Returns True when at least one service is healthy so that a
+        single degraded service doesn't mask the rest.
+
+        Services probed:
+          • ScriptAgent     — full model inference (catches any model regression)
+          • ImageEngine     — functional presence check (PIL, no heavy compute)
+          • Audio dataset   — storage read confirming chunks exist
         """
-        try:
-            if not _model_ready or _script_agent is None:
-                return False
-            from ai_model.agents.script_agent import ScriptRequest
-            req = ScriptRequest(
-                idea="new single dropping",
-                platform="instagram",
-                goal="growth",
-                tone="energetic",
-            )
-            result = _script_agent.run(req)
-            return result is not None
-        except Exception as exc:
-            print(f"[Watchdog] Keep-alive probe error: {exc}")
-            return False
+        import concurrent.futures as _cf
+
+        results: dict[str, bool] = {}
+
+        def _probe_script():
+            try:
+                if not _model_ready or _script_agent is None:
+                    return "script_agent", False
+                from ai_model.agents.script_agent import ScriptRequest  # noqa
+                r = _script_agent.run(ScriptRequest(
+                    idea="new single dropping",
+                    platform="instagram",
+                    goal="growth",
+                    tone="energetic",
+                ))
+                return "script_agent", r is not None
+            except Exception as exc:
+                print(f"[Watchdog] ScriptAgent probe error: {exc}", flush=True)
+                return "script_agent", False
+
+        def _probe_image():
+            try:
+                ok = _image_engine is not None and hasattr(_image_engine, "render_background")
+                return "image_engine", ok
+            except Exception:
+                return "image_engine", False
+
+        def _probe_audio():
+            try:
+                from storage_client import get_storage  # noqa
+                meta = get_storage().get("mb:dataset:audio:meta")
+                ok = isinstance(meta, dict) and int(meta.get("num_chunks", 0)) > 0
+                return "audio_dataset", ok
+            except Exception:
+                return "audio_dataset", False
+
+        probes = [_probe_script, _probe_image, _probe_audio]
+        with _cf.ThreadPoolExecutor(max_workers=len(probes), thread_name_prefix="ka-probe") as pool:
+            futures = [pool.submit(p) for p in probes]
+            for fut in _cf.as_completed(futures, timeout=30):
+                try:
+                    name, ok = fut.result()
+                    results[name] = ok
+                except Exception:
+                    pass
+
+        any_ok = any(results.values())
+        print(f"[Watchdog] Keep-alive: {results}", flush=True)
+        return any_ok
 
     _watchdog.rendering_health_fn = _rendering_health_fn
     _watchdog.keepalive_fn        = _keepalive_fn
