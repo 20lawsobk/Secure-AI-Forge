@@ -891,10 +891,20 @@ def _merged_awareness_for(req: Any) -> str:
 
             if _prompt_url:
                 try:
-                    _uc       = _read_url(_prompt_url)
-                    _url_text = _uc.combined()
-                    _url_plat = _uc.platform_hint
-                    _url_goal = _uc.goal_hint
+                    # Universal URL Parser — richer than url_reader.read_url:
+                    # platform-specific extractors, JSON-LD, music metadata,
+                    # pre-formatted awareness block.
+                    from ai_model.url_parser import parse_url as _parse_url_fn
+                    _parsed   = _parse_url_fn(_prompt_url)
+                    _url_text = _parsed.combined_text()
+                    _url_plat = _parsed.platform
+                    _url_goal = _parsed.goal
+                    # Inject the parser's rich awareness block directly at the
+                    # top of intent_lines so platform/artist/genre signals lead.
+                    if _parsed.awareness_text and not _parsed.is_empty():
+                        intent_lines = (
+                            _parsed.awareness_text + ("\n" + intent_lines if intent_lines else "")
+                        )
                 except Exception:
                     pass
 
@@ -907,7 +917,13 @@ def _merged_awareness_for(req: Any) -> str:
             )
 
             if intent_signals.is_useful():
-                intent_lines = "\n".join(intent_signals.to_awareness_lines())
+                _new_intent = "\n".join(intent_signals.to_awareness_lines())
+                # Combine with URL parser awareness (if any) rather than overwriting:
+                # intent signals lead (highest priority), URL parser signals follow.
+                intent_lines = (
+                    _new_intent + "\n" + intent_lines
+                    if intent_lines else _new_intent
+                )
     except Exception:
         pass
 
@@ -2941,68 +2957,24 @@ def _fetch_page_title(url_str: str) -> str:
 
 
 def _resolve_topic_from_url(raw_topic: str) -> str:
-    """Convert any URL/domain topic into a human-readable idea string.
+    """Convert any URL/domain/Spotify-URI topic into a human-readable idea string.
 
-    Resolution order (first non-empty wins):
-      1. HTTP fetch → og:title / <title> tag (works for any public URL)
-      2. URL path slug → readable name from the last meaningful path segment
-      3. Known platform label → e.g. "music release on Spotify"
-      4. Bare hostname → used as-is (never empty for a valid URL)
+    Delegates entirely to the Universal URL Parser which handles 30+ platforms
+    with platform-specific extractors, JSON-LD, og:title, path slugs, and
+    music metadata (genre, mood, BPM, key).  Never raises.
     """
-    topic = raw_topic.strip()
-    if not topic:
-        return topic
-
-    url_str = topic if re.match(r"https?://", topic, re.IGNORECASE) else f"https://{topic}"
-
-    if not (_URL_RE.match(topic) or _DOMAIN_ONLY_RE.match(topic)):
-        return topic
-
+    if not raw_topic or not raw_topic.strip():
+        return raw_topic
     try:
-        parsed = urlparse(url_str)
-        hostname = (parsed.hostname or "").lower().lstrip("www.")
+        from ai_model.url_parser import parse_topic_url
+        resolved = parse_topic_url(raw_topic)
+        if resolved != raw_topic.strip():
+            _srv_logger.info(
+                "[url-parser] topic resolved: %r → %r", raw_topic.strip(), resolved
+            )
+        return resolved
     except Exception:
-        return topic
-
-    # Known music platform label (used as context suffix even when we get a title)
-    platform_label: str = ""
-    for domain, label in _MUSIC_PLATFORM_LABELS.items():
-        if hostname == domain or hostname.endswith("." + domain):
-            platform_label = label
-            break
-
-    # Path slug fallback — e.g. /track/my-new-song → "My New Song"
-    path_parts = [
-        p for p in parsed.path.split("/")
-        if p and not p.isdigit() and len(p) > 2
-        and p not in {"track", "artist", "album", "playlist", "watch",
-                      "embed", "user", "intl-en", "index.html", "index",
-                      "home", "en", "us", "post", "video", "reel", "shorts",
-                      "status", "p", "s"}
-    ]
-    slug_name: str = ""
-    if path_parts:
-        raw = path_parts[-1].split("?")[0].split("#")[0]
-        slug_name = re.sub(r"[_-]", " ", raw).title().strip()
-
-    # Attempt a real HTTP fetch — works for any public web page
-    fetched_name = _fetch_page_title(url_str)
-
-    name = fetched_name or slug_name
-    if name and platform_label:
-        resolved = f"{name} — {platform_label}"
-    elif name:
-        resolved = f"{name} — from {hostname}"
-    elif platform_label:
-        resolved = platform_label
-    else:
-        resolved = hostname or topic
-
-    if resolved != topic:
-        _srv_logger.warning(
-            "[generate-from-url] URL resolved: %r → %r", topic, resolved
-        )
-    return resolved
+        return raw_topic
 
 
 def _effective_awareness(platform: str, raw_awareness: str) -> str:
@@ -3538,6 +3510,8 @@ async def platform_social_generate(req: PlatformSocialRequest, _key = Depends(re
     """
     start = time.time()
     platform = normalize_platform(req.platform)
+    # Universal URL Parser: resolve topic from any URL/platform link
+    _social_topic = _resolve_topic_from_url(req.topic)
 
     # Personalize tone based on user's past engagement data in storage
     personalized_tone = _build_personalized_tone(req.user_id, platform, req.tone)
@@ -3558,7 +3532,7 @@ async def platform_social_generate(req: PlatformSocialRequest, _key = Depends(re
             _vidx = i   # capture loop variable before async boundary
             async def _run_variant(vidx=_vidx):
                 s = await _in_thread(lambda: _script_agent.run(ScriptRequest(
-                    idea=req.topic, platform=platform,
+                    idea=_social_topic, platform=platform,
                     goal=req.goal, tone=personalized_tone,
                     awareness=effective_awareness,
                     variant_idx=vidx,
@@ -3600,14 +3574,14 @@ async def platform_social_generate(req: PlatformSocialRequest, _key = Depends(re
         "success": True,
         "user_id": req.user_id,
         "platform": platform,
-        "topic": req.topic,
+        "topic": _social_topic,
         "personalized_tone": personalized_tone,
         "variants": variants,
         "model_ready": _model_ready,
         "processing_time_ms": round((time.time() - start) * 1000, 1),
     }
     _fw_ingest(_key, "social", _result, {
-        "topic": req.topic, "platform": platform,
+        "topic": _social_topic, "platform": platform,
         "tone": personalized_tone, "awareness": effective_awareness,
     })
     return _result
@@ -3899,6 +3873,8 @@ async def platform_video_generate(req: PlatformVideoRequest, _key = Depends(requ
     platform = normalize_platform(req.platform)
     personalized_tone = _build_personalized_tone(req.user_id, platform, req.tone)
     scene_count = max(3, req.duration_seconds // 10)
+    # Universal URL Parser: resolve topic from any URL/platform link
+    _vid_topic = _resolve_topic_from_url(req.topic)
 
     if not _model_ready or _script_agent is None:
         raise HTTPException(
@@ -3913,13 +3889,13 @@ async def platform_video_generate(req: PlatformVideoRequest, _key = Depends(requ
 
         _vid_aw = _merged_awareness_for(req)
         script_result = await _in_thread(lambda: _script_agent.run(ScriptRequest(
-            idea=req.topic, platform=platform, goal=req.goal, tone=personalized_tone,
+            idea=_vid_topic, platform=platform, goal=req.goal, tone=personalized_tone,
             awareness=_vid_aw,
         )))
         full_script = f"{script_result.hook}\n{script_result.body}\n{script_result.cta}"
 
         visual_result = await _in_thread(lambda: _visual_spec_agent.run(VisualSpecRequest(
-            idea=req.topic, platform=platform, tone=personalized_tone, awareness=_vid_aw,
+            idea=_vid_topic, platform=platform, tone=personalized_tone, awareness=_vid_aw,
         ))) if _visual_spec_agent else None
 
         dist_result = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
@@ -3931,7 +3907,7 @@ async def platform_video_generate(req: PlatformVideoRequest, _key = Depends(requ
     # Async coalescer: identical video requests share one Future — followers are
     # suspended coroutines, not threads.  Only unique digests hit the model.
     _vkey = {
-        "topic":    req.topic,
+        "topic":    _vid_topic,
         "platform": platform,
         "style":    req.style or "",
         "goal":     req.goal  or "",
@@ -3957,7 +3933,7 @@ async def platform_video_generate(req: PlatformVideoRequest, _key = Depends(requ
                 {
                     "scene": i + 1,
                     "duration_seconds": req.duration_seconds // scene_count,
-                    "description": f"{req.topic} — {req.style} scene {i + 1}",
+                    "description": f"{_vid_topic} — {req.style} scene {i + 1}",
                     "visual_direction": f"{req.style.capitalize()} framing, {personalized_tone} energy",
                     "narration": lines[min(i, len(lines) - 1)],
                 }
@@ -3976,13 +3952,13 @@ async def platform_video_generate(req: PlatformVideoRequest, _key = Depends(requ
 
         thumbnail_concept = (
             getattr(visual_result, "thumbnail_concept", None)
-            or f"Bold '{req.topic.upper()}' text over {req.style} background with {personalized_tone} color grading"
+            or f"Bold '{_vid_topic.upper()}' text over {req.style} background with {personalized_tone} color grading"
         )
 
         _result = {
             "success": True,
             "user_id": req.user_id,
-            "title": f"{req.topic} — {req.style.capitalize()} Video",
+            "title": f"{_vid_topic} — {req.style.capitalize()} Video",
             "hook": script_result.hook,
             "body": script_result.body,
             "cta":  script_result.cta,
@@ -4003,7 +3979,7 @@ async def platform_video_generate(req: PlatformVideoRequest, _key = Depends(requ
             "processing_time_ms": round((time.time() - start) * 1000, 1),
         }
         _fw_ingest(_key, "video", _result, {
-            "topic": req.topic, "platform": platform, "style": req.style,
+            "topic": _vid_topic, "platform": platform, "style": req.style,
             "tone": personalized_tone, "awareness": req.awareness,
             "duration_seconds": req.duration_seconds,
         })
@@ -6126,7 +6102,7 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
 
     platform = normalize_platform(req.platform)
     artist   = req.artist_name or req.artist or "the artist"
-    topic    = req.topic or req.title or ""
+    topic    = _resolve_topic_from_url(req.topic or req.title or "")
     goal     = req.goal or "engagement"
 
     def _build(_request=None, _platform=None):
@@ -6646,8 +6622,8 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
     # mode == "content"
     intent   = req.intent or "create content"
     inputs   = req.inputs or {}
-    # MaxBooster sends topic/prompt directly; fall back to inputs for legacy callers
-    idea     = req.topic or req.prompt or (str(inputs) if inputs else intent)
+    # MaxBooster sends topic/prompt directly; resolve URLs via the Universal URL Parser
+    idea     = _resolve_topic_from_url(req.topic or req.prompt or (str(inputs) if inputs else intent))
     platform = normalize_platform(req.platform) if req.platform else "general"
     tone     = req.tone or "authentic"
 
@@ -7183,9 +7159,10 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
         raw_slots = [raw_slots]
 
     # Extract topic from inputs (same pattern as /generate/content)
+    # Universal URL Parser: resolve any URL/platform link to a readable topic
     inputs   = req.inputs or {}
     normalized = inputs.get("normalized", {}) if isinstance(inputs, dict) else {}
-    topic = (
+    topic = _resolve_topic_from_url(
         req.prompt
         or (normalized.get("semantic") or {}).get("topic")
         or normalized.get("payload_summary")
@@ -7982,7 +7959,7 @@ def _start_video_job(req: ApiGenerateVideoRequest, platform: str) -> tuple[str, 
     from ai_model import request_intelligence as ri
     brief = ri.build_brief(
         modality="video", platform=normalize_platform(platform),
-        topic=req.topic or req.idea, goal=req.goal, tone=req.tone, genre=req.genre,
+        topic=_resolve_topic_from_url(req.topic or req.idea), goal=req.goal, tone=req.tone, genre=req.genre,
         artist=req.artist_name,
         extra=" ".join(filter(None, [req.hook, req.body, req.cta])),
         mood=req.mood, bpm=req.bpm, key=req.key,
