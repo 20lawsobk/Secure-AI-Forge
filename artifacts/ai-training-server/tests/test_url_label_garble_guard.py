@@ -177,3 +177,108 @@ class TestLegitimateCaptionNotFlagged:
         # After the split this is mid-line → should NOT match.
         assert not looks_garbled(text), \
             "'artist:' mid-sentence (after other words) should not be flagged"
+
+
+# ---------------------------------------------------------------------------
+# 3. Cross-check — guard must cover EVERY label the URL parser actually emits
+# ---------------------------------------------------------------------------
+
+import re  # noqa: E402
+
+from ai_model.url_parser.core import _build_awareness_text  # noqa: E402
+from ai_model.url_parser.models import ParsedUrl  # noqa: E402
+
+# Matches an awareness label prefix at the start of a line segment:
+# optional [HIGH]/[MED]/[LOW] tier marker, then "Some Label:".
+_LABEL_PREFIX_RE = re.compile(
+    r"^(?:\[(?:HIGH|MED|LOW|MEDIUM)\]\s+)?([A-Za-z][A-Za-z /-]*?)\s*:"
+)
+
+
+def _emitted_label_prefixes() -> set:
+    """Return every label prefix `_build_awareness_text()` currently emits.
+
+    Builds a ParsedUrl with EVERY metadata field populated so every branch of
+    the awareness builder fires, then splits pipe-joined segments and pulls
+    the `Label:` prefixes. If a new field is added to the builder, its label
+    shows up here automatically — no manual list to keep in sync.
+    """
+    parsed = ParsedUrl(
+        raw_url="https://open.spotify.com/track/xyz",
+        canonical_url="https://open.spotify.com/track/xyz",
+        platform="spotify",
+        platform_label="Spotify",
+        content_type="track",
+        title="Gods Plan",
+        artist="Drake",
+        album="Scorpion",
+        label="OVO Sound",
+        description="Official single with 2B+ streams.",
+        body_text="extra page text",
+        genre="hip-hop",
+        mood="dark",
+        bpm=140,
+        key="F# minor",
+        release_year=2024,
+        intent="drive_streams",
+        goal="streams",
+    )
+    text = _build_awareness_text(parsed)
+    assert text.strip(), "fully-populated ParsedUrl must produce awareness text"
+
+    prefixes = set()
+    for line in text.splitlines():
+        for segment in line.split("|"):
+            m = _LABEL_PREFIX_RE.match(segment.strip())
+            if m:
+                prefixes.add(m.group(1).strip())
+    return prefixes
+
+
+class TestGuardCoversAllEmittedLabels:
+    """Auto-derived cross-check: iterate the label prefixes actually emitted
+    by `_build_awareness_text()` and assert every one triggers
+    `looks_garbled`. This test fails automatically if a new awareness field
+    (e.g. `Label:`, `Featuring:`, `Producer:`) is added to the URL parser
+    without extending `_URL_LABEL_RE` in request_intelligence.py."""
+
+    def test_awareness_builder_emits_expected_baseline(self):
+        """Sanity: the builder still emits the known core labels — if this
+        fails, the extraction regex or the builder changed shape."""
+        prefixes = _emitted_label_prefixes()
+        expected_core = {
+            "Source", "Artist", "Title", "Album", "Genre", "Mood",
+            "BPM", "Key", "Year", "Intent", "Context",
+        }
+        missing = expected_core - prefixes
+        assert not missing, (
+            f"awareness builder no longer emits {sorted(missing)} — "
+            "update this test's ParsedUrl fixture or the extraction regex"
+        )
+
+    def test_every_emitted_label_triggers_guard(self):
+        """THE cross-check: each emitted label prefix, alone at line start,
+        must be flagged by looks_garbled."""
+        prefixes = _emitted_label_prefixes()
+        assert prefixes, "no label prefixes extracted — extraction broken"
+        uncovered = []
+        for prefix in sorted(prefixes):
+            caption = f"{prefix}: Some Value\nStream it now on all platforms."
+            if not looks_garbled(caption):
+                uncovered.append(prefix)
+        assert not uncovered, (
+            f"_URL_LABEL_RE does not cover awareness label(s) {uncovered} — "
+            "a field was added to _build_awareness_text() in "
+            "ai_model/url_parser/core.py without updating _URL_LABEL_RE in "
+            "ai_model/request_intelligence.py"
+        )
+
+    def test_full_emitted_block_triggers_guard(self):
+        """The verbatim awareness block itself must always be flagged."""
+        parsed = ParsedUrl(
+            platform="spotify", platform_label="Spotify",
+            content_type="track", title="Gods Plan", artist="Drake",
+            genre="hip-hop", intent="drive_streams",
+        )
+        block = _build_awareness_text(parsed)
+        assert looks_garbled(block), "verbatim awareness block must be flagged"
