@@ -1341,22 +1341,55 @@ def rank_scene_phrases(
 # "everything", "startling" or "forever" are NOT flagged.
 _GLUE_PREFIXES = ("being", "because", "would", "their", "going", "about")
 
+# URL-parser awareness label patterns — if these structured field labels appear
+# verbatim in generated captions the model has echoed the awareness block instead
+# of composing content.  Matches lines like:
+#   "Artist: Drake"  /  "Title: Gods Plan"  /  "[HIGH] Source: Spotify Track"
+# The regex requires the label at a line boundary (^) with an optional leading
+# tier marker ([HIGH] / [MED] / [LOW]) so incidental occurrences like
+# "the key to success" or "source of inspiration" in running prose are NOT flagged.
+_URL_LABEL_RE = re.compile(
+    r"(?m)^[ \t]*(?:\[(?:HIGH|MED|LOW|MEDIUM)\][ \t]+)?"
+    r"(?:Artist|Title|Album|Genre|Mood|Intent|Source|Context|BPM|Key|Year)\s*:",
+    re.IGNORECASE,
+)
+
+# A single isolated tier-marker line (no label) is also an awareness echo.
+_TIER_MARKER_RE = re.compile(
+    r"(?m)^[ \t]*\[(?:HIGH|MED|LOW|MEDIUM)\][ \t]+\S",
+    re.IGNORECASE,
+)
+
 
 def looks_garbled(text: str, whitelist: str = "") -> bool:
-    """True when text shows glued-token / letter-digit-fusion artefacts.
+    """True when text shows glued-token / letter-digit-fusion artefacts OR
+    contains verbatim URL-parser awareness label lines.
 
     ``whitelist`` should carry the raw request context (topic, artist,
-    awareness) — any word appearing there is trusted verbatim.
+    awareness) — any *word* appearing there is trusted verbatim for the
+    glue-token check.  The label-echo check is never bypassed by the whitelist:
+    a label like ``Artist:`` is always wrong in user-facing output regardless of
+    whether the resolved artist name appears in the whitelist.
     """
     if not text:
         return False
+
+    # ── URL-parser label-echo check (highest priority) ────────────────────────
+    # Even one structured label line means the model echoed raw metadata.
+    label_hits = _URL_LABEL_RE.findall(text)
+    if label_hits:
+        return True
+    if _TIER_MARKER_RE.search(text):
+        return True
+
+    # ── Glued-token / letter-digit-fusion check ───────────────────────────────
     wl = set(re.findall(r"[a-z0-9]+", whitelist.lower()))
-    words = re.findall(r"[A-Za-z0-9'’\-]+", text)
+    words = re.findall(r"[A-Za-z0-9''\-]+", text)
     if not words:
         return False
     bad = 0
     for w in words:
-        base = w.strip("'’-").lower()
+        base = w.strip("''-").lower()
         core = re.sub(r"[^a-z0-9]", "", base)
         if not core or core in wl:
             continue
