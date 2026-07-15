@@ -608,6 +608,56 @@ def chk_url_tiktok_social_quality(status: int, r: dict) -> QResult:
     return out
 
 
+def chk_url_platform_social_quality(platform_slug: str, url_domain: str,
+                                    meta_tokens: tuple[str, ...]):
+    """Factory: URL-topic social post checker for a given source platform.
+
+    Modeled on chk_url_tiktok_social_quality — scores hook+CTA at Veo ≥95
+    (social captions are naturally 70-90 words; the hook and CTA are the
+    virality-critical components) and guards against metadata echo:
+    the raw URL domain and the platform-label strings that appear in
+    ``ParsedUrl.topic_string`` must not echo verbatim into generated copy.
+    """
+    def _chk(status: int, r: dict) -> QResult:
+        out = [(status == 200, "HTTP 200", f"got {status}")]
+        if status != 200:
+            return out
+        variants = r.get("variants") or []
+        v0      = variants[0] if variants else r
+        hook    = v0.get("hook") or r.get("hook", "")
+        body    = v0.get("body") or r.get("body", "")
+        cta     = v0.get("cta")  or r.get("cta",  "")
+        caption = (v0.get("caption") or
+                   " ".join(filter(None, [hook, body, cta])))
+
+        # Full post must not look garbled
+        out.append((not _veo_looks_garbled(caption),
+                    "full output: garble guard does not fire", repr(caption[:80])))
+
+        # Raw URL must NOT echo into post text
+        out.append((url_domain not in caption.lower(),
+                    "raw URL does not echo into post", repr(caption[:80])))
+
+        # Platform metadata labels must NOT echo verbatim
+        meta_leak = any(tok in caption for tok in meta_tokens)
+        out.append((not meta_leak,
+                    "platform metadata does not echo verbatim", repr(caption[:80])))
+
+        # Unformatted template placeholders must never ship in copy
+        full = " ".join(filter(None, [hook, body, cta, caption]))
+        out.append(("{idea}" not in full,
+                    "no literal {idea} placeholder in copy", repr(cta[:60])))
+
+        # Hook+CTA Veo quality ≥95
+        hook_cta = "\n".join(filter(None, [hook, cta]))
+        score    = veo_score_candidate(hook_cta)
+        out.append((score >= 95, "hook+CTA Veo ≥95/100",
+                    f"score={score:.1f}  hook={repr(hook[:60])}  cta={repr(cta[:40])}"))
+        return out
+    _chk.__name__ = f"chk_url_{platform_slug}_social_quality"
+    return _chk
+
+
 def chk_url_campaign_quality(status, r) -> QResult:
     """Campaign from URL-as-title: structural checks + garble guard must NOT fire."""
     out = chk_generate_campaign(status, r)
@@ -1199,6 +1249,94 @@ def build_quality_tasks() -> list[dict]:
               },
               chk_veo_compare("url-404/fallback", threshold=85),
               label="[url-topic] /api/generate/content 404 URL → slug fallback ≥85"),
+
+        # URL-5: YouTube channel URL → /platform/social/generate
+        # topic_string is "@Lunarvoss on YouTube"; the cleaned idea must be
+        # just "Lunarvoss" — no handle, no "on YouTube" suffix in copy.
+        _task("/platform/social/generate",
+              {
+                  "user_id":  UID,
+                  "platform": "youtube",
+                  "topic":    "https://www.youtube.com/@lunarvoss",
+                  "tone":     "excited",
+                  "goal":     "fanbase",
+                  "instruction": (
+                      "Open with an exclusive drop hook ending with an exclamation mark. "
+                      "Body: incredible fire energy about the channel. "
+                      "Final line: Subscribe Now CTA with a fire emoji."
+                  ),
+                  "content_themes": ["exclusive drop", "finally dropping", "fire release"],
+                  "awareness": (
+                      "YouTube channels with exclusive drop hooks getting 300% more subs.\n"
+                      "Artists who finally drop on YouTube see insane subscriber spikes.\n"
+                      "TRENDS: fire release energy, incredible viral momentum. "
+                      "#NewMusic #YouTubeMusic #Finally trending. "
+                      "Subscribe Now CTAs with fire emoji getting highest click-through rate."
+                  ),
+              },
+              chk_url_platform_social_quality(
+                  "youtube", "youtube.com",
+                  ("@Lunarvoss on YouTube", "on YouTube)", "(YouTube")),
+              label="[url-topic] /platform/social/generate YouTube URL → hook+CTA ≥95"),
+
+        # URL-6: Instagram profile URL → /platform/social/generate
+        # topic_string is "Lunarvoss — lunarvoss on Instagram"; the cleaned idea
+        # de-duplicates to "Lunarvoss" — the handle-echo pair must not leak.
+        _task("/platform/social/generate",
+              {
+                  "user_id":  UID,
+                  "platform": "instagram",
+                  "topic":    "https://www.instagram.com/lunarvoss/",
+                  "tone":     "excited",
+                  "goal":     "fanbase",
+                  "instruction": (
+                      "Open with an exclusive drop hook ending with an exclamation mark. "
+                      "Body: incredible fire energy about the artist. "
+                      "Final line: Follow Now CTA with a fire emoji."
+                  ),
+                  "content_themes": ["exclusive drop", "finally dropping", "fire release"],
+                  "awareness": (
+                      "Instagram artist pages with exclusive hooks getting 300% more follows.\n"
+                      "Artists who finally drop on Instagram see insane follower spikes.\n"
+                      "TRENDS: fire release energy, incredible viral momentum. "
+                      "#NewMusic #InstaMusic #Finally trending. "
+                      "Follow Now CTAs with fire emoji getting highest click-through rate."
+                  ),
+              },
+              chk_url_platform_social_quality(
+                  "instagram", "instagram.com",
+                  ("Lunarvoss — lunarvoss", "on Instagram)", "(Instagram")),
+              label="[url-topic] /platform/social/generate Instagram URL → hook+CTA ≥95"),
+
+        # URL-7: SoundCloud track URL → /platform/social/generate
+        # topic_string is "Neon Echoes — Lunarvoss (SoundCloud track)"; the
+        # cleaned idea keeps title+artist but the "(SoundCloud track)" platform
+        # suffix must never reach copy.
+        _task("/platform/social/generate",
+              {
+                  "user_id":  UID,
+                  "platform": "tiktok",
+                  "topic":    "https://soundcloud.com/lunarvoss/neon-echoes",
+                  "tone":     "excited",
+                  "goal":     "streams",
+                  "instruction": (
+                      "Open with an exclusive drop hook ending with an exclamation mark. "
+                      "Body: incredible fire energy about the track. "
+                      "Final line: Stream Now CTA with a fire emoji."
+                  ),
+                  "content_themes": ["exclusive drop", "finally dropping", "fire release"],
+                  "awareness": (
+                      "SoundCloud drops with exclusive hooks getting 300% more streams.\n"
+                      "Artists who finally drop on SoundCloud see insane stream spikes.\n"
+                      "TRENDS: fire release energy, incredible viral momentum. "
+                      "#NewMusic #SoundCloudMusic #Finally trending. "
+                      "Stream Now CTAs with fire emoji getting highest click-through rate."
+                  ),
+              },
+              chk_url_platform_social_quality(
+                  "soundcloud", "soundcloud.com",
+                  ("(SoundCloud track)", "SoundCloud track)", "(SoundCloud")),
+              label="[url-topic] /platform/social/generate SoundCloud URL → hook+CTA ≥95"),
     ]
 
 

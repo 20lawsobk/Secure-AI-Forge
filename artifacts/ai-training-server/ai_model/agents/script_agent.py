@@ -501,7 +501,31 @@ def _parse_hook_from_awareness(
     return _fallback[signal_offset % len(_fallback)] if idea else "The moment is now! 🔥"
 
 
-def _parse_cta_from_awareness(awareness: str, platform: str) -> str:
+_CTA_COACHING_OPENERS = (
+    "open with", "lead with", "close with", "start with", "end with",
+    "hook with", "begin with", "use ", "avoid ", "post ", "upload ",
+)
+
+
+def _is_coaching_line(stripped: str) -> bool:
+    """True for playbook/coaching lines that must never ship as user-facing CTA.
+
+    Two verbatim-leak classes:
+    • Signal-tagged research lines — "[HIGH] Native video uploads reaching 3×…"
+    • Imperative coaching instructions — "Open with an identity call or
+      pattern interrupt — drop the slow build…"
+    These are strategy notes ABOUT content, not copy FOR content.
+    """
+    if stripped.startswith("["):          # [HIGH]/[MED]/[LOW] signal tags
+        return True
+    # Strip list/action markers so "Action: Open with…" is caught too
+    low = re.sub(r"^(•|↳|Action:|↳ Action:)\s*", "", stripped,
+                 flags=re.IGNORECASE).strip().lower()
+    return any(low.startswith(op) for op in _CTA_COACHING_OPENERS)
+
+
+def _parse_cta_from_awareness(awareness: str, platform: str,
+                              idea: str = "") -> str:
     if not awareness:
         return ""
 
@@ -510,6 +534,8 @@ def _parse_cta_from_awareness(awareness: str, platform: str) -> str:
     # 1. Platform-specific CTA line from awareness
     for line in awareness.splitlines():
         stripped = line.strip()
+        if _is_coaching_line(stripped):
+            continue
         if (len(stripped) <= 100
                 and plat_lower in stripped.lower()
                 and any(
@@ -524,6 +550,8 @@ def _parse_cta_from_awareness(awareness: str, platform: str) -> str:
     # 2. Any action recommendation
     for line in awareness.splitlines():
         stripped = line.strip()
+        if _is_coaching_line(stripped):
+            continue
         if stripped.startswith("Action:") or "↳ Action:" in stripped:
             cta = re.sub(r"^(Action:|↳ Action:)\s*", "", stripped).strip()
             if cta and len(cta) > 10:
@@ -535,7 +563,17 @@ def _parse_cta_from_awareness(awareness: str, platform: str) -> str:
         import hashlib
         # Use a simple deterministic selection based on awareness content
         idx = int(hashlib.md5(awareness[:50].encode()).hexdigest(), 16) % len(pool)
-        return pool[idx]
+        cta = pool[idx]
+        if "{idea}" in cta:
+            if idea:
+                cta = cta.replace("{idea}", idea)
+            else:
+                # Never ship a literal "{idea}" placeholder — pick a
+                # placeholder-free CTA from the pool instead.
+                plain = [c for c in pool if "{idea}" not in c]
+                cta = plain[idx % len(plain)] if plain else PLATFORM_CTAS.get(
+                    plat_lower, "Follow for more exclusive drops 🔥 — stream now!")
+        return cta
 
     return PLATFORM_CTAS.get(plat_lower, "Follow for more exclusive drops 🔥 — stream now!")
 
@@ -689,7 +727,8 @@ class ScriptAgent:
                                 "platform=%s), using awareness CTA: %.80r",
                                 _cta_reason, req.platform, cta,
                             )
-                        cta = _parse_cta_from_awareness(req.awareness, req.platform)
+                        cta = _parse_cta_from_awareness(req.awareness, req.platform,
+                                                        idea=req.idea)
                         if not cta:
                             cta = PLATFORM_CTAS.get(req.platform.lower(), "Let me know what you think!")
                     return ScriptResponse(hook=hook, body=body, cta=cta, source="ai_model")
@@ -737,7 +776,7 @@ class ScriptAgent:
                 awareness, platform, req.idea, req.tone,
                 genre=genre, signal_offset=req.variant_idx
             )
-            cta = _parse_cta_from_awareness(awareness, platform)
+            cta = _parse_cta_from_awareness(awareness, platform, idea=req.idea)
             return ScriptResponse(hook=hook, body=body, cta=cta, source="awareness")
 
         # True last resort — awareness absent
