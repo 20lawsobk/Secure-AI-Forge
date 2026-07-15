@@ -9,11 +9,14 @@ const PYTHON_PORT = parseInt(process.env.MODEL_API_PORT || "9878", 10);
 // Python server.  Two conditions each independently set this flag:
 //
 //  1. DISABLE_PYTHON_SPAWN=1   — explicit override; can be set on any workflow.
-//  2. MODEL_API_PORT not set   — "Start application" is the only workflow that
-//     explicitly sets MODEL_API_PORT=9878.  Artifact-managed workflows
-//     (artifacts/api-server: API Server) run the same command without it, so
-//     they fall into proxy-only mode automatically.  This prevents the startup
-//     race where two api-server instances compete for the Python lock.
+//  2. MODEL_API_PORT not set   — only the intended owners set MODEL_API_PORT:
+//     the "Start application" workflow (dev) and the production "serve"
+//     script (deployment).  The artifact-managed dev workflow
+//     (artifacts/api-server: API Server) runs `dev` without it, so it falls
+//     into proxy-only mode automatically.  This prevents the startup race
+//     where two api-server instances compete for the Python lock.  Without
+//     MODEL_API_PORT in the serve script, PRODUCTION has no Python owner at
+//     all and the whole API 503s — do not remove it from `serve`.
 const PYTHON_SPAWN_DISABLED =
   process.env.DISABLE_PYTHON_SPAWN === "1" ||
   process.env.MODEL_API_PORT === undefined;

@@ -69,3 +69,8 @@ bash (Start application) → pnpm → tsx → cluster primary (742)
                                               └── uv (802) → python3 server.py (805)
 ```
 25/25 keepalive endpoints alive = healthy.
+
+## Production Python ownership
+Proxy-only mode triggers whenever MODEL_API_PORT is unset. The production `serve` script in artifacts/api-server/package.json MUST set MODEL_API_PORT (it defaults to 9878 there) or the deployed app has NO Python owner: both api-server processes wait forever in proxy-only mode, the circuit breaker keeps tripping, and the entire /api surface 503s in prod while dev looks healthy.
+**Why:** July 2026 prod outage — deployment ran `pnpm start` → serve without MODEL_API_PORT; nobody spawned server.py.
+**How to apply:** never strip MODEL_API_PORT from the serve script; only the cluster primary calls ensurePythonServer, so a single deployed api-server artifact is safe from double-spawn.
