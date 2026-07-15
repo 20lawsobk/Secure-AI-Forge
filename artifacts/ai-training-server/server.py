@@ -7602,7 +7602,12 @@ def _render_audio_clip(job_id: str, bpm: float, key: str,
         result = run_ffmpeg(
             ["ffmpeg", "-y", "-i", str(wav_path),
              "-codec:a", "libmp3lame", "-q:a", "4", str(mp3_path)],
-            timeout=45,
+            # 120s, not 45s: the encode itself takes <1s warm, but a concurrent
+            # video render can CPU-starve this subprocess (prod saw a 4s video
+            # encode stretch to 38s under the same contention). Video encodes now
+            # run at nice+10, but keep headroom so audio jobs fail only when
+            # something is genuinely wrong — still fail-explicit, never silent.
+            timeout=120,
         )
         if result.returncode != 0 or not mp3_path.exists():
             raise RuntimeError(

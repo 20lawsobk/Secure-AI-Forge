@@ -23,3 +23,8 @@ The `ai_model/gpu/` "digital GPU" is numpy on a CPU host. New execution-stack mo
 ## Don't clobber existing infra
 - Existing `digital_gpu.py` exports DigitalGPU/VRAM/SIMDCore/Scheduler/OpCode; `maxcore/backend/device_backend.py` exports the real torch `GPUBackend` used by `registry.select_backend`. Replacing either wholesale breaks package import + all tests. Multi-device already exists (`multi_backend.MultiStreamBackend`) — don't duplicate with a toy all_reduce.
 - Test runner: no pytest installed → inline runner that imports test modules and calls `test_*`. Full gpu+backend suite was 53/53 after this stack.
+
+## VRAM memory-system verification + /gpu/status contract
+The custom memory layers are: base `VRAM` (handle store, no capacity), `HyperVRAM` (capacity-enforced OOM + peak), `MemoryPool` (byte accounting/flush/status), `VRAMPartition` (per-stream quota OOM). All verified working via direct checks + gpu test suite.
+**Why:** /gpu/status was silently returning `available:false` because server startup stores a RAW `DigitalGPU` while the endpoint calls `.status()` (only the torch `DigitalGPUBackend` had one). Fixed by giving `DigitalGPU` a shape-compatible `status()`.
+**How to apply:** any object assigned to `_digital_gpu_backend` must expose `status()`; when reading `vram._store` for reporting, snapshot with `.copy()` first (GIL-atomic) — iterating the live dict races concurrent alloc/free.

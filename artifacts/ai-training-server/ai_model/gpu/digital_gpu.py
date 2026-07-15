@@ -260,6 +260,25 @@ class DigitalGPU:
         if self.silicon is not None:
             self.silicon.model_op(kind, flops, kv_size=kv_size, bytes_moved=bytes_moved)
 
+    def status(self) -> dict:
+        """Live snapshot of the device and its VRAM memory system.
+
+        Shape-compatible with DigitalGPUBackend.status() so /gpu/status works
+        whether the server holds a raw device or a torch backend wrapper.
+        """
+        # .copy() is atomic under the GIL; iterating the live dict could race
+        # a concurrent alloc/free and raise "dict changed size during iteration".
+        store = self.vram._store.copy()
+        vram_count = len(store)
+        vram_bytes = sum(a.nbytes for a in store.values())
+        return {
+            "lanes": self.core.lanes,
+            "tile_size": f"{self.core.tile_m}x{self.core.tile_n}x{self.core.tile_k}",
+            "vram_handles": vram_count,
+            "vram_bytes": vram_bytes,
+            "vram_mb": round(vram_bytes / (1024 * 1024), 2),
+        }
+
     def silicon_report(self):
         """Estimated (NOT measured) cycle/time budget from the attached silicon
         model, or None if no model is attached."""

@@ -398,7 +398,7 @@ def _render_pil_based(
 
     try:
         _t0 = time.time()
-        result = run_ffmpeg(cmd, timeout=45)
+        result = run_ffmpeg(cmd, timeout=90, niceness=10)
         print(
             f"[VideoRender][Timing] scene bg={_t_bg:.1f}s grade={_t_grade:.1f}s "
             f"encode={time.time() - _t0:.1f}s dur={dur:.1f}s {width}x{height}",
@@ -446,7 +446,7 @@ def _render_fallback(
     ]
 
     try:
-        result = run_ffmpeg(cmd, timeout=45)
+        result = run_ffmpeg(cmd, timeout=90, niceness=10)
         if result.returncode != 0:
             print(
                 f"[VideoRender][ERROR] ffmpeg fallback render failed (rc={result.returncode}):\n{result.stderr[-800:]}",
@@ -525,7 +525,7 @@ def composite_scenes(
                 output_path,
             ]
 
-        result = run_ffmpeg(cmd, timeout=120)
+        result = run_ffmpeg(cmd, timeout=180, niceness=10)
         _safe_remove(concat_list)
         return result.returncode == 0
     except Exception:

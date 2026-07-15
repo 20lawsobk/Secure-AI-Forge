@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import List
 
 FFMPEG_BIN = shutil.which("ffmpeg") or "ffmpeg"
+NICE_BIN = shutil.which("nice")  # absolute path keeps posix_spawn eligibility
 
 if not os.path.isabs(FFMPEG_BIN):
     print(
@@ -28,7 +29,12 @@ class FfmpegResult:
     stderr: str
 
 
-def run_ffmpeg(cmd: List[str], timeout: float = 60.0, retries: int = 2) -> FfmpegResult:
+def run_ffmpeg(
+    cmd: List[str],
+    timeout: float = 60.0,
+    retries: int = 2,
+    niceness: int = 0,
+) -> FfmpegResult:
     """Run an ffmpeg command resiliently under heavy memory pressure.
 
     The default ``subprocess.run(cmd, capture_output=True)`` with a bare
@@ -49,6 +55,14 @@ def run_ffmpeg(cmd: List[str], timeout: float = 60.0, retries: int = 2) -> Ffmpe
     """
     if cmd and cmd[0] == "ffmpeg":
         cmd = [FFMPEG_BIN] + list(cmd[1:])
+
+    # niceness>0 deprioritizes long-running encodes (video scenes/composites)
+    # so short interactive encodes (audio clips, voiceover) are never CPU-starved
+    # into their timeout when a video render is in flight. Implemented by
+    # prefixing the absolute `nice` binary — NOT preexec_fn, which would force
+    # CPython back onto fork() and reintroduce the EIO-under-memory-pressure bug.
+    if niceness > 0 and NICE_BIN and cmd and os.path.isabs(cmd[0]):
+        cmd = [NICE_BIN, "-n", str(niceness)] + list(cmd)
 
     last_exc: BaseException | None = None
     for attempt in range(retries + 1):

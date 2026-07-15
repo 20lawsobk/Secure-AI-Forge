@@ -3,6 +3,7 @@ import os
 import sys
 import uuid
 import time
+import threading
 from dataclasses import dataclass
 from typing import Optional, List, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -74,6 +75,14 @@ def render_cinematic_open(
         # Hold a global render slot so concurrent scenes (across all jobs) stay
         # bounded to what the container's CPU/memory can handle right now.
         with RENDER_GATE.slot(timeout=300):
+            # Deprioritize this render thread (Linux: setpriority on the native
+            # thread id affects only this thread) so heavy in-process work
+            # (diffusion, grading) can't CPU-starve short interactive requests
+            # like audio encodes. Never-raise: priority is an optimization.
+            try:
+                os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 10)
+            except (OSError, AttributeError):
+                pass
             path = render_scene(scene, width, height, sid)
         return idx, path
 

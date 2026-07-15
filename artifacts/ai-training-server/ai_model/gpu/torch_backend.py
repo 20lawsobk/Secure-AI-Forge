@@ -346,8 +346,11 @@ class DigitalGPUBackend:
         self.gpu.vram._meta.clear()
 
     def status(self):
-        vram_count = len(self.gpu.vram._store)
-        vram_bytes = sum(a.nbytes for a in self.gpu.vram._store.values())
+        # Snapshot: .copy() is atomic under the GIL; iterating the live dict
+        # could race a concurrent alloc/free.
+        store = self.gpu.vram._store.copy()
+        vram_count = len(store)
+        vram_bytes = sum(a.nbytes for a in store.values())
         return {
             "lanes": self.gpu.core.lanes,
             "tile_size": f"{self.gpu.core.tile_m}x{self.gpu.core.tile_n}x{self.gpu.core.tile_k}",

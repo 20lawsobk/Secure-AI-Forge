@@ -59,3 +59,6 @@ This surfaces as job `status=error` with "...timed out after 45s" — handled co
 false "done", WAV cleaned up via `try/finally`). It is transient: the same durations pass in
 ~5s once the server is warm. Don't mistake it for the posix_spawn/EIO issue above and don't
 "fix" it by gutting the timeout — just let cold requests fail explicitly and retry warm.
+
+## CPU-contention starvation of short encodes (July 2026)
+Short audio ffmpeg encodes (<1s warm) hit their timeout in prod when a concurrent video render saturated CPU (a 4s video encode stretched to 38s). Fix: `run_ffmpeg(niceness=10)` prefixes the ABSOLUTE `nice` binary (never preexec_fn — that forces fork() and reintroduces EIO); video scene/fallback/composite encodes run at nice+10 (timeouts 90/90/180s), scene render threads self-deprioritize via os.setpriority on native tid (never-raise), audio encode timeout 45→120s as headroom. Verified: audio render done in 7s while video render in flight. Prefix must be applied AFTER FFMPEG_BIN substitution so cmd[0] stays absolute for posix_spawn.
