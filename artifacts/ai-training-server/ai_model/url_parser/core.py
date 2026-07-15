@@ -476,3 +476,71 @@ def parse_topic_url(raw_topic: str, timeout: float = 4.0) -> str:
 def is_url(text: str) -> bool:
     """Return True when *text* looks like a URL the parser can handle."""
     return _is_url(text)
+
+
+def get_content_from_url(url: str, timeout: float = 4.0,
+                         platform: str = "") -> dict:
+    """Return the FULL extracted content for *url* as a plain dict, with
+    the Veo quality DNA from the awareness systems blended into the
+    awareness block.
+
+    This is the rich accessor: where :func:`parse_topic_url` returns only a
+    topic string, this returns every extracted field (title, artist, album,
+    description, body text, genre/mood/BPM/key, themes, intent/goal) plus:
+
+    - ``awareness_text``  — the parser's own awareness block
+    - ``veo_dna``         — Veo scoring DNA from the quality-awareness system
+                            (power-word hook rules, 15-60-word length rule,
+                            structure + CTA rules, live chart patterns)
+    - ``awareness_full``  — awareness_text + veo_dna, ready for direct
+                            injection into any generation ``awareness`` field
+
+    Never raises; on non-URL input or parse failure returns a dict with
+    ``fetch_ok=False`` and the raw input echoed in ``raw_url``/``topic_string``.
+    """
+    t = (url or "").strip()
+
+    def _veo_dna_block() -> str:
+        try:
+            from ai_model.quality_awareness import veo_dna as _veo_dna
+            return _veo_dna(platform)
+        except Exception:
+            return ""
+
+    empty = {
+        "raw_url": t, "canonical_url": "", "platform": "", "platform_label": "",
+        "content_type": "page", "title": "", "artist": "", "album": "",
+        "label": "", "description": "", "body_text": "", "genre": "",
+        "mood": "", "bpm": None, "key": "", "release_year": None,
+        "topics": [], "content_themes": [], "intent": "", "goal": "",
+        "topic_string": t, "awareness_text": "", "fetch_ok": False,
+        "error": "not a URL" if t and not _is_url(t) else "empty input",
+    }
+
+    if not t or not _is_url(t):
+        dna = _veo_dna_block()
+        return {**empty, "veo_dna": dna, "awareness_full": dna}
+
+    try:
+        r = parse_url(t, timeout=timeout)
+        dna = _veo_dna_block()
+        awareness_full = "\n".join(
+            b for b in (r.awareness_text, dna) if b
+        )
+        return {
+            "raw_url": r.raw_url, "canonical_url": r.canonical_url,
+            "platform": r.platform, "platform_label": r.platform_label,
+            "content_type": r.content_type, "title": r.title,
+            "artist": r.artist, "album": r.album, "label": r.label,
+            "description": r.description, "body_text": r.body_text,
+            "genre": r.genre, "mood": r.mood, "bpm": r.bpm, "key": r.key,
+            "release_year": r.release_year, "topics": list(r.topics),
+            "content_themes": list(r.content_themes), "intent": r.intent,
+            "goal": r.goal, "topic_string": r.topic_string,
+            "awareness_text": r.awareness_text, "fetch_ok": r.fetch_ok,
+            "error": r.error, "veo_dna": dna, "awareness_full": awareness_full,
+        }
+    except Exception as exc:  # noqa: BLE001 — never-raise contract
+        dna = _veo_dna_block()
+        return {**empty, "error": str(exc)[:200], "veo_dna": dna,
+                "awareness_full": dna}

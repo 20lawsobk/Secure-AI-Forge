@@ -499,6 +499,56 @@ def brief_enrichment() -> Optional[Dict[str, str]]:
     }
 
 
+# ── Veo DNA ───────────────────────────────────────────────────────────────────
+
+# Static baseline of the quality signals the Veo scorer rewards.  These are
+# format rules, not borrowed content, so they never retire — but live buffer
+# signals are blended on top while the buffer is active.
+_VEO_DNA_BASE: List[str] = [
+    "[HIGH] Hook rule: open with a power word (exclusive, fire, finally, "
+    "insane, secret, drop) and end the first line with ! or ? plus an emoji.",
+    "[HIGH] Length rule: keep total copy 15-60 words — short, punchy lines.",
+    "• Structure: first line under 125 chars, at least 3 lines, CTA on the "
+    "last line with an emoji.",
+    "• CTA rule: close with stream / follow / save / share / link-in-bio "
+    "phrasing — never end without a call to action.",
+    "TRENDS: arousal words (fire, exclusive, viral, insane, finally) drive "
+    "the strongest hook engagement across all platforms.",
+]
+
+
+def veo_dna(platform: str = "") -> str:
+    """Compact Veo quality-DNA awareness block.
+
+    Encodes the format signals the Veo scorer rewards (power-word hooks,
+    15-60 word length, 3-line structure, CTA close) in the same
+    ``[HIGH]/•/TRENDS:`` format that ``_parse_signals_for_platform()`` in
+    script_agent.py already parses.  When the live quality buffer is active,
+    its current chart-pattern hook lines are blended in (subject to the same
+    self-retirement contract as every other borrowed-knowledge injection
+    point); the static format rules above always remain.
+
+    Never-raise; always returns a non-empty string.
+    """
+    lines: List[str] = list(_VEO_DNA_BASE)
+    try:
+        suff = self_sufficiency()
+        if not suff["retired"]:
+            doc = get_doc(trigger_harvest=False)
+            if doc:
+                hook_tpls = doc.get("templates", {}).get("hook", [])
+                n = max(0, math.ceil(len(hook_tpls) * suff["buffer_weight"]))
+                for tpl in hook_tpls[: min(n, 3)]:
+                    lines.append(f"• Chart-proven hook pattern: {tpl}")
+        if platform:
+            plat_block = platform_awareness_string(platform)
+            if plat_block:
+                lines.append(plat_block)
+    except Exception:  # noqa: BLE001 — must never crash generation
+        pass
+    return "\n".join(lines)
+
+
 def status() -> Dict[str, Any]:
     """Full status for the API endpoint."""
     suff = self_sufficiency()

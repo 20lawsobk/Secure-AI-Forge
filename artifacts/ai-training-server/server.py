@@ -3046,6 +3046,37 @@ def _effective_awareness(platform: str, raw_awareness: str) -> str:
     return f"{raw_awareness}\n{platform_awareness}" if platform_awareness else raw_awareness
 
 
+@app.get("/api/url-parser/content")
+async def url_parser_content(url: str = "", platform: str = "",
+                             _key = Depends(require_scope("generate"))):
+    """Full content extraction for a URL + Veo DNA from the awareness systems.
+
+    Query params:
+      url      — the URL (or Spotify URI) to extract content from
+      platform — optional target platform (instagram / tiktok / …) to blend
+                 platform-specific awareness into the Veo DNA block
+
+    Returns every extracted field plus:
+      veo_dna        — Veo scoring DNA block (hook/length/structure/CTA rules
+                       + live chart patterns from the quality-awareness buffer)
+      awareness_full — awareness_text + veo_dna, ready for any generation
+                       ``awareness`` field
+
+    Never raises on parse failures (fetch_ok=False + error instead).
+    """
+    if not url or not url.strip():
+        raise HTTPException(status_code=422, detail="url query parameter is required")
+
+    try:
+        from ai_model.url_parser import get_content_from_url as _get_content
+    except Exception as import_err:
+        raise HTTPException(status_code=500, detail=f"URL parser unavailable: {import_err}")
+
+    return await asyncio.get_event_loop().run_in_executor(
+        None, lambda: _get_content(url.strip(), platform=platform.strip())
+    )
+
+
 @app.get("/api/url-parser/inspect")
 async def url_parser_inspect(url: str = "", _key = Depends(require_scope("generate"))):
     """Parse any URL and return the full structured metadata the AI pipeline sees.

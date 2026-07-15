@@ -640,6 +640,20 @@ router.get("/url-parser/inspect", async (req, res) => {
   await proxyRequest(req, res, `/api/url-parser/inspect?url=${encodeURIComponent(url)}`);
 });
 
+router.get("/url-parser/content", async (req, res) => {
+  const url = req.query.url as string | undefined;
+  if (!url) {
+    res.status(422).json({ error: "url query parameter is required" });
+    return;
+  }
+  const platform = (req.query.platform as string | undefined) ?? "";
+  await proxyRequest(
+    req,
+    res,
+    `/api/url-parser/content?url=${encodeURIComponent(url)}&platform=${encodeURIComponent(platform)}`,
+  );
+});
+
 router.get("/boostsheets", async (req, res) => {
   await proxyRequest(req, res, "/boostsheets");
 });

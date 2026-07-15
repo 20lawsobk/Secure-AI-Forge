@@ -19,6 +19,6 @@ Usage::
 from __future__ import annotations
 
 from .models import ParsedUrl
-from .core import parse_url, parse_topic_url
+from .core import parse_url, parse_topic_url, get_content_from_url
 
-__all__ = ["ParsedUrl", "parse_url", "parse_topic_url"]
+__all__ = ["ParsedUrl", "parse_url", "parse_topic_url", "get_content_from_url"]
