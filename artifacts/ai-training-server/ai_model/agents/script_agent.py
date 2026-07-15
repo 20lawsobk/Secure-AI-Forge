@@ -675,14 +675,32 @@ class ScriptAgent:
                         hook, body = _clean_text(sentences[0]), _clean_text(sentences[1])
 
             if self._is_meaningful(hook) and self._is_meaningful(body):
-                from ai_model.request_intelligence import looks_garbled
+                from ai_model.request_intelligence import garble_reason
+                import logging as _logging
+                _sa_logger = _logging.getLogger("script_agent")
                 _wl = f"{req.idea} {req.awareness or ''}"
-                if not looks_garbled(f"{hook}\n{body}", whitelist=_wl):
-                    if not cta or not self._is_meaningful(cta) or looks_garbled(cta, whitelist=_wl):
+                _hb_reason = garble_reason(f"{hook}\n{body}", whitelist=_wl)
+                if not _hb_reason:
+                    _cta_reason = garble_reason(cta, whitelist=_wl) if cta else ""
+                    if not cta or not self._is_meaningful(cta) or _cta_reason:
+                        if _cta_reason:
+                            _sa_logger.warning(
+                                "[garble-guard] model CTA suppressed (reason=%s, "
+                                "platform=%s), using awareness CTA: %.80r",
+                                _cta_reason, req.platform, cta,
+                            )
                         cta = _parse_cta_from_awareness(req.awareness, req.platform)
                         if not cta:
                             cta = PLATFORM_CTAS.get(req.platform.lower(), "Let me know what you think!")
                     return ScriptResponse(hook=hook, body=body, cta=cta, source="ai_model")
+                # Model hook/body suppressed → deterministic fallback. Log the
+                # reason so "model echoed metadata" (label_echo/tier_marker) is
+                # distinguishable from "model produced garbled tokens".
+                _sa_logger.warning(
+                    "[garble-guard] model output suppressed, falling back "
+                    "(reason=%s, platform=%s): %.120r",
+                    _hb_reason, req.platform, f"{hook} {body}",
+                )
         except Exception:
             pass
 

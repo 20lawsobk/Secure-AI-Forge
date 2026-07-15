@@ -20,7 +20,7 @@ _SERVER_ROOT = os.path.dirname(_HERE)
 if _SERVER_ROOT not in sys.path:
     sys.path.insert(0, _SERVER_ROOT)
 
-from ai_model.request_intelligence import looks_garbled  # noqa: E402
+from ai_model.request_intelligence import garble_reason, looks_garbled  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -282,3 +282,114 @@ class TestGuardCoversAllEmittedLabels:
         )
         block = _build_awareness_text(parsed)
         assert looks_garbled(block), "verbatim awareness block must be flagged"
+
+
+# ---------------------------------------------------------------------------
+# 4. garble_reason — the guard must SAY WHY it fired (observability)
+# ---------------------------------------------------------------------------
+
+import logging  # noqa: E402
+
+
+class TestGarbleReason:
+    """garble_reason distinguishes label echo vs tier marker vs glue tokens,
+    so suppress-and-fallback call sites can log a meaningful reason instead
+    of silently swapping in the deterministic candidate."""
+
+    def test_label_echo_reason(self):
+        assert garble_reason("Artist: Drake\nStream now.") == "label_echo"
+
+    def test_tier_marker_reason(self):
+        assert garble_reason("[HIGH] streaming spikes on Friday drops") == "tier_marker"
+
+    def test_glue_tokens_reason(self):
+        text = "This trackfrequency82 is beingpre-saved and beingdownloaded everywhere"
+        assert garble_reason(text) == "glue_tokens"
+
+    def test_clean_text_empty_reason(self):
+        assert garble_reason("New single out Friday — stream it everywhere! 🔥") == ""
+
+    def test_looks_garbled_consistency(self):
+        """looks_garbled must be exactly bool(garble_reason) for any input."""
+        samples = [
+            "Artist: Drake\nStream now.",
+            "[MED] Source: TikTok video",
+            "This trackfrequency82 beingpre-saved beingdownloaded everywhere",
+            "Clean caption — new drop out now! 🔥",
+            "",
+        ]
+        for s in samples:
+            assert looks_garbled(s) == bool(garble_reason(s)), repr(s)
+
+    def test_whitelist_respected_for_glue_but_not_labels(self):
+        wl = "Frequency82 beingpre"
+        assert garble_reason("Frequency82 just dropped — insane!", whitelist=wl) == ""
+        # Label echo is NEVER whitelisted
+        assert garble_reason("Artist: Frequency82", whitelist=wl) == "label_echo"
+
+
+class TestGuardLogsWarning:
+    """The suppression paths must emit a WARNING naming the reason — this is
+    the observable trail that prevents silent fallback."""
+
+    def test_ranking_penalty_logs_reason(self, caplog):
+        from ai_model.request_intelligence import build_brief, score_candidate
+        brief = build_brief(
+            modality="text", platform="instagram", topic="midnight drive",
+            goal="streams", tone="energetic",
+        )
+        echo_text = "Artist: Lunarvoss\nTitle: Midnight Drive\nStream now."
+        with caplog.at_level(logging.WARNING, logger="request_intelligence"):
+            score_candidate(echo_text, brief)
+        msgs = [r.message for r in caplog.records if "[garble-guard]" in r.message]
+        assert msgs, "score_candidate must WARN when penalising a garbled candidate"
+        assert "reason=label_echo" in msgs[0]
+
+    def test_script_agent_suppression_logs_reason(self, caplog):
+        """When the model 'output' echoes awareness labels, ScriptAgent must
+        fall back AND log the reason at WARNING level."""
+        from ai_model.agents.script_agent import ScriptAgent, ScriptRequest
+
+        class _EchoModel:
+            def generate(self, prompt, **kw):
+                return (
+                    "<STAGE_HOOK> [HIGH] Source: Spotify Track Artist: Lunarvoss "
+                    "something something longer text here "
+                    "<STAGE_BODY> Artist: Lunarvoss\nTitle: Midnight Drive and more "
+                    "body text that is meaningful enough to pass checks "
+                    "<STAGE_CTA> Stream it now everywhere"
+                )
+
+        agent = ScriptAgent(_EchoModel())
+        req = ScriptRequest(
+            idea="midnight drive", platform="instagram", goal="streams",
+            tone="energetic", awareness="[HIGH] Night-drive playlists trending",
+        )
+        with caplog.at_level(logging.WARNING, logger="script_agent"):
+            resp = agent.run(req)
+        assert resp.source != "ai_model", "echoed output must not be returned"
+        msgs = [r.message for r in caplog.records if "[garble-guard]" in r.message]
+        assert msgs, "ScriptAgent must WARN when suppressing model output"
+        assert "reason=label_echo" in msgs[0]
+
+    def test_distribution_agent_suppression_logs_reason(self, caplog):
+        from ai_model.agents.distribution_agent import (
+            DistributionAgent, DistributionRequest,
+        )
+
+        class _EchoModel:
+            def generate(self, prompt, **kw):
+                return "Genre: hip-hop | Mood: dark\nGenre: hip-hop caption echo text"
+
+        agent = DistributionAgent(_EchoModel())
+        req = DistributionRequest(
+            script="New single out Friday — stream it everywhere!",
+            platform="instagram", goal="streams",
+            awareness="[HIGH] Night-drive playlists trending on instagram",
+        )
+        with caplog.at_level(logging.WARNING, logger="distribution_agent"):
+            resp = agent.run(req)
+        assert "Genre:" not in resp.caption, "echoed caption must be suppressed"
+        msgs = [r.message for r in caplog.records if "[garble-guard]" in r.message]
+        assert msgs, "DistributionAgent must WARN when suppressing model caption"
+        assert "reason=label_echo" in msgs[0]

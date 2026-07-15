@@ -25,7 +25,10 @@ additive — endpoints keep their existing behaviour and merely gain an
 
 from __future__ import annotations
 
+import logging
 import re
+
+_ri_logger = logging.getLogger("request_intelligence")
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1072,7 +1075,14 @@ def score_candidate(text: str, brief: GenerationBrief) -> float:
     # whitelist carries the brief's full raw request context (augmented_idea
     # includes the raw topic) so legitimate alphanumeric names (e.g. an
     # artist called "Frequency82") are never penalised.
-    if looks_garbled(text, whitelist=f"{' '.join(brief.keywords)} {brief.augmented_idea}"):
+    _greason = garble_reason(
+        text, whitelist=f"{' '.join(brief.keywords)} {brief.augmented_idea}"
+    )
+    if _greason:
+        _ri_logger.warning(
+            "[garble-guard] candidate penalised (reason=%s, platform=%s): %.80r",
+            _greason, brief.platform, text,
+        )
         score -= 40.0
 
     return round(min(100.0, max(0.0, score)), 1)
@@ -1361,32 +1371,42 @@ _TIER_MARKER_RE = re.compile(
 )
 
 
-def looks_garbled(text: str, whitelist: str = "") -> bool:
-    """True when text shows glued-token / letter-digit-fusion artefacts OR
-    contains verbatim URL-parser awareness label lines.
+def garble_reason(text: str, whitelist: str = "") -> str:
+    """Classify WHY a text would be considered garbled.
+
+    Returns one of:
+      ``""``            — text is clean (not garbled)
+      ``"label_echo"``  — verbatim URL-parser awareness label line
+                          (e.g. ``Artist: Drake`` at a line start)
+      ``"tier_marker"`` — isolated awareness tier-marker line
+                          (e.g. ``[HIGH] …``)
+      ``"glue_tokens"`` — glued-token / letter-digit-fusion artefacts
+
+    This is the diagnostic companion to :func:`looks_garbled` — call sites
+    that suppress model output should log the reason so "model echoed
+    metadata" is distinguishable from "model produced garbled tokens".
 
     ``whitelist`` should carry the raw request context (topic, artist,
     awareness) — any *word* appearing there is trusted verbatim for the
-    glue-token check.  The label-echo check is never bypassed by the whitelist:
-    a label like ``Artist:`` is always wrong in user-facing output regardless of
-    whether the resolved artist name appears in the whitelist.
+    glue-token check.  The label-echo check is never bypassed by the
+    whitelist: a label like ``Artist:`` is always wrong in user-facing output
+    regardless of whether the resolved artist name appears in the whitelist.
     """
     if not text:
-        return False
+        return ""
 
     # ── URL-parser label-echo check (highest priority) ────────────────────────
     # Even one structured label line means the model echoed raw metadata.
-    label_hits = _URL_LABEL_RE.findall(text)
-    if label_hits:
-        return True
+    if _URL_LABEL_RE.findall(text):
+        return "label_echo"
     if _TIER_MARKER_RE.search(text):
-        return True
+        return "tier_marker"
 
     # ── Glued-token / letter-digit-fusion check ───────────────────────────────
     wl = set(re.findall(r"[a-z0-9]+", whitelist.lower()))
     words = re.findall(r"[A-Za-z0-9''\-]+", text)
     if not words:
-        return False
+        return ""
     bad = 0
     for w in words:
         base = w.strip("''-").lower()
@@ -1406,7 +1426,20 @@ def looks_garbled(text: str, whitelist: str = "") -> bool:
             if core.startswith(p) and len(core) - len(p) >= 4:
                 bad += 1
                 break
-    return bad >= 2 or (bad / len(words)) > 0.2
+    if bad >= 2 or (bad / len(words)) > 0.2:
+        return "glue_tokens"
+    return ""
+
+
+def looks_garbled(text: str, whitelist: str = "") -> bool:
+    """True when text shows glued-token / letter-digit-fusion artefacts OR
+    contains verbatim URL-parser awareness label lines.
+
+    Thin wrapper over :func:`garble_reason` — see it for semantics and for
+    the diagnostic reason string ("label_echo" / "tier_marker" /
+    "glue_tokens") that suppress-and-fallback call sites should log.
+    """
+    return bool(garble_reason(text, whitelist=whitelist))
 
 
 def deterministic_candidate(

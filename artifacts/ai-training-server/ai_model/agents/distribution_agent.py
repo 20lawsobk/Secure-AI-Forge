@@ -278,11 +278,19 @@ class DistributionAgent:
             output = self.model.generate(prompt)
             if self._is_meaningful(output):
                 # Also guard against garbled model output leaking into the caption.
-                # looks_garbled is never-raise; import lazily to avoid circular deps.
+                # garble_reason is never-raise; import lazily to avoid circular deps.
                 try:
-                    from ai_model.request_intelligence import looks_garbled as _lg
-                    if not _lg(output):
+                    from ai_model.request_intelligence import garble_reason as _gr
+                    _reason = _gr(output)
+                    if not _reason:
                         caption = output
+                    else:
+                        import logging as _logging
+                        _logging.getLogger("distribution_agent").warning(
+                            "[garble-guard] model caption suppressed, using "
+                            "script fallback (reason=%s, platform=%s): %.120r",
+                            _reason, req.platform, output,
+                        )
                 except Exception:
                     caption = output  # can't check — accept as-is
         except Exception:
