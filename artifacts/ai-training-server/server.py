@@ -6068,6 +6068,10 @@ class ApiGenerateVideoRequest(_AwarenessMixin):
     quality: str = "cinematic"
     user_audio_path: Optional[str] = None
     voiceover: bool = False
+    # Narrator controls — normalized in the voiceover module (invalid values
+    # silently fall back to defaults; never break a render).
+    voiceover_voice: Optional[str] = None
+    voiceover_wpm: Optional[int] = None
     scenes_override: Optional[List[SceneOverride]] = None
     # MaxBooster client aliases (script + music-video context, used as hints)
     hook: Optional[str] = None
@@ -7857,19 +7861,26 @@ _GENRE_DEFAULT_BPM: dict[str, float] = {
 
 def _voiceover_track_path(job_id: str, narration_text: str,
                           duration_sec: float,
-                          music_path: Optional[str] = None) -> Optional[str]:
+                          music_path: Optional[str] = None,
+                          voice: Optional[str] = None,
+                          wpm: Optional[int] = None) -> Optional[str]:
     """Synthesize a spoken narration track (in-house eSpeak NG) and duck any
     music soundtrack under it. Returns the audio path to mux, or None when
     speech synthesis is unavailable — callers keep their existing audio.
+    ``voice``/``wpm`` are normalized downstream (invalid → defaults).
     Never-raise."""
     try:
-        from ai_model.audio.voiceover import voiceover_track
+        from ai_model.audio.voiceover import (
+            voiceover_track, normalize_voice, normalize_wpm,
+        )
         path = voiceover_track(
             text=narration_text,
             out_dir=str(_UPLOADS_PATH),
             job_id=job_id,
             duration_sec=duration_sec,
             music_path=music_path,
+            voice=normalize_voice(voice),
+            wpm=normalize_wpm(wpm),
         )
         if path:
             print(f"[VideoJob] voiceover narration rendered for {job_id[:12]}", flush=True)
@@ -8300,6 +8311,8 @@ def _start_video_job(req: ApiGenerateVideoRequest, platform: str) -> tuple[str, 
                 _vo_path = _voiceover_track_path(
                     job_id, _vo_text, production.total_duration,
                     music_path=_audio_path,
+                    voice=getattr(req, "voiceover_voice", None),
+                    wpm=getattr(req, "voiceover_wpm", None),
                 )
                 if _vo_path:
                     _audio_path = _vo_path
@@ -8708,6 +8721,8 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
     )
     _gen_audio = bool(body.get("generate_audio", True))
     _want_voiceover = bool(body.get("voiceover", False))
+    _vo_voice = body.get("voiceover_voice")
+    _vo_wpm = body.get("voiceover_wpm")
 
     # ── Run plan() synchronously so scenes are available in this response ──
     # Only the heavy render step is deferred to a background thread.
@@ -8776,6 +8791,7 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
                 _vo_path = _voiceover_track_path(
                     job_id, _narration_script(_production),
                     _production.total_duration, music_path=_audio_path,
+                    voice=_vo_voice, wpm=_vo_wpm,
                 )
                 if _vo_path:
                     _audio_path = _vo_path

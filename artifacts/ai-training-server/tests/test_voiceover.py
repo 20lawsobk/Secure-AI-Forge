@@ -16,8 +16,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ai_model.audio.voiceover import (  # noqa: E402
     ESPEAK_BIN,
     VO_SAMPLE_RATE,
+    _VOICE_DEFAULT,
+    _WPM_DEFAULT,
     clean_vo_text,
     mix_voiceover_over_music,
+    normalize_voice,
+    normalize_wpm,
     synthesize_voiceover,
     voiceover_track,
 )
@@ -51,6 +55,28 @@ class TestCleanVoText:
         assert clean_vo_text("🔥🔥🔥 ✨") == ""
 
 
+class TestNarratorControls:
+    """Task: user-selectable narrator voice and speaking pace."""
+
+    def test_valid_voices_pass_through(self):
+        for v in ("en-gb", "fr", "es-419", "en-us+f3", "de"):
+            assert normalize_voice(v) == v
+
+    def test_invalid_voices_fall_back(self):
+        for v in ("", None, "../etc/passwd", "en us", "voice;rm -rf /", "x" * 40, 123):
+            assert normalize_voice(v) == _VOICE_DEFAULT
+
+    def test_valid_wpm_pass_through(self):
+        assert normalize_wpm(120) == 120
+        assert normalize_wpm("200") == 200
+        assert normalize_wpm(80) == 80
+        assert normalize_wpm(300) == 300
+
+    def test_invalid_wpm_fall_back(self):
+        for w in (None, "", "fast", 0, -5, 79, 301, 10_000):
+            assert normalize_wpm(w) == _WPM_DEFAULT
+
+
 needs_espeak = pytest.mark.skipif(
     not ESPEAK_BIN, reason="espeak-ng not installed in this environment"
 )
@@ -74,6 +100,28 @@ class TestSynthesizeVoiceover:
         # centres far higher. Centroid must sit in the speech band.
         centroid = _spectral_centroid(sr, data)
         assert 100.0 <= centroid <= 3000.0, f"centroid {centroid:.0f} Hz not speech-like"
+
+    def test_non_default_voice_and_pace(self, tmp_path):
+        text = "This narration should be rendered with a different voice and pace."
+        slow = tmp_path / "slow.wav"
+        fast = tmp_path / "fast.wav"
+        assert synthesize_voiceover(text, str(slow), voice="en-gb", wpm=100)
+        assert synthesize_voiceover(text, str(fast), voice="en-gb", wpm=280)
+        sr_s, data_s = _read_wav(slow)
+        sr_f, data_f = _read_wav(fast)
+        assert sr_s == sr_f == VO_SAMPLE_RATE
+        # Slower pace must yield a noticeably longer render.
+        assert len(data_s) > len(data_f) * 1.3
+
+    def test_invalid_voice_and_pace_still_render(self, tmp_path):
+        out = tmp_path / "fallback.wav"
+        ok = synthesize_voiceover(
+            "Bad settings must silently fall back to defaults.",
+            str(out), voice="not a voice;!", wpm="turbo",
+        )
+        assert ok
+        sr, data = _read_wav(out)
+        assert sr == VO_SAMPLE_RATE and len(data) > 0
 
     def test_empty_text_returns_false(self, tmp_path):
         assert synthesize_voiceover("🔥🔥", str(tmp_path / "x.wav")) is False

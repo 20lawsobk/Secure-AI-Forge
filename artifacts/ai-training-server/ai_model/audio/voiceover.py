@@ -40,6 +40,37 @@ ESPEAK_BIN = shutil.which("espeak-ng") or ""
 VO_SAMPLE_RATE = 44100
 
 _WPM_DEFAULT = 165  # natural narration pace
+_WPM_MIN, _WPM_MAX = 80, 300  # eSpeak stays intelligible in this band
+_VOICE_DEFAULT = "en-us"
+
+# eSpeak voice names are language codes with optional variant suffixes, e.g.
+# "en-us", "en-gb", "fr", "es-419", "en-us+f3" (female variant 3). Anything
+# that doesn't match this shape (shell metacharacters, paths, etc.) falls
+# back to the default — never-raise, and never passed to the binary raw.
+_VOICE_RE = re.compile(r"^[A-Za-z]{2,10}(?:-[A-Za-z0-9]{1,10}){0,3}(?:\+[A-Za-z0-9]{1,8})?$")
+
+
+def normalize_voice(voice) -> str:
+    """Return a safe eSpeak voice name; invalid input → default (never-raise)."""
+    try:
+        v = str(voice or "").strip()
+        if v and _VOICE_RE.match(v):
+            return v
+    except Exception:  # noqa: BLE001
+        pass
+    return _VOICE_DEFAULT
+
+
+def normalize_wpm(wpm) -> int:
+    """Return a speaking pace clamped to the intelligible band; invalid input
+    → default (never-raise)."""
+    try:
+        w = int(float(wpm))
+    except (TypeError, ValueError):
+        return _WPM_DEFAULT
+    if not (_WPM_MIN <= w <= _WPM_MAX):
+        return _WPM_DEFAULT
+    return w
 
 # ── Text cleaning ─────────────────────────────────────────────────────────────
 
@@ -86,12 +117,17 @@ def synthesize_voiceover(
     out_path: str,
     sample_rate: int = VO_SAMPLE_RATE,
     wpm: int = _WPM_DEFAULT,
-    voice: str = "en-us",
+    voice: str = _VOICE_DEFAULT,
 ) -> bool:
     """Render ``text`` as spoken narration into ``out_path`` (mono WAV at
     ``sample_rate``). Returns True on success, False on any failure (raises
     nothing) — callers fall back to a music-only or silent track.
+
+    ``voice`` and ``wpm`` are normalized here: invalid values silently fall
+    back to defaults, so no caller input can break the render.
     """
+    voice = normalize_voice(voice)
+    wpm = normalize_wpm(wpm)
     spoken = clean_vo_text(text)
     if not spoken or not ESPEAK_BIN:
         if not ESPEAK_BIN:
@@ -174,6 +210,8 @@ def voiceover_track(
     job_id: str,
     duration_sec: float,
     music_path: Optional[str] = None,
+    voice: str = _VOICE_DEFAULT,
+    wpm: int = _WPM_DEFAULT,
 ) -> Optional[str]:
     """High-level entry: synthesize narration for ``text`` and (when a music
     track is supplied) duck the music under it.
@@ -186,7 +224,7 @@ def voiceover_track(
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
         vo_wav = out / f"vo_{job_id[:12]}.wav"
-        if not synthesize_voiceover(text, str(vo_wav)):
+        if not synthesize_voiceover(text, str(vo_wav), voice=voice, wpm=wpm):
             return None
         if music_path and Path(music_path).exists():
             mixed = out / f"vomix_{job_id[:12]}.wav"
