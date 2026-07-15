@@ -218,6 +218,11 @@ def get_diffusion_frame(
     pipeline = _get_pipeline()
     if pipeline is None:
         return None
+    # Denoise at the pipeline's native resolution: the latent grid is fixed
+    # (LATENT_H x LATENT_W), so requesting a larger decode resolution only
+    # multiplies DDIM/VAE pixel work (~10x slower at 1920) without adding any
+    # detail — the caller-facing resize below produces the same image either
+    # way. Measured: 27.7s at 1920 vs ~2.7s at native 256 for one frame.
     frames = pipeline.generate(
         idea=idea,
         platform=platform,
@@ -225,7 +230,7 @@ def get_diffusion_frame(
         awareness=awareness,
         context=context or {},
         n_frames=1,
-        resolution=max(width, height),
+        resolution=RESOLUTION,
     )
     if not frames:
         return None

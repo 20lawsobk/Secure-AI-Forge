@@ -20,3 +20,8 @@ Model output must be sanitized before use as ffmpeg drawtext text:
 
 ## ffmpeg drawtext apostrophe escaping
 The `_esc()` function in `scenes.py` must NOT backslash-escape apostrophes (`'` → `\'`) because `\'` terminates the single-quoted drawtext string in ffmpeg's filter parser. Instead, apostrophes must be REMOVED (replaced with empty string).
+
+## Render speed budget (July 2026 profiling)
+Per-stage [VideoRender][Timing] prints now exist in scenes.py (bg/grade/encode), cinematic_engine.py (scenes_total/composite/workers), and server._render_only (build_scenes/soundtrack) — grep logs for "Timing" before guessing at bottlenecks.
+**Why:** 88s render for a 12s video turned out to be one bug: get_diffusion_frame denoised at resolution=max(w,h)=1920 though the latent grid is fixed 256-native — pure wasted pixel work (~25s/scene, zero added detail since the result is bilinear-resized anyway). Fix = always generate at native RESOLUTION and upscale; renders dropped 88s→35s with pixel-identical class of output.
+**How to apply:** never pass caller output resolution into the diffusion generate(); guard is tests/test_diffusion_frame_resolution.py (dimension contract + resolution spy + <15s speed guard). Scene rendering is serial (RENDER_GATE workers=1 under memory pressure) — that's deliberate, don't parallelize without checking Watchdog memory headroom.

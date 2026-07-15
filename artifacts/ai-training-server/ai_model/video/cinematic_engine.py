@@ -98,6 +98,8 @@ def render_cinematic_open(
         if i in results_map:
             scene_paths.append(results_map[i])
 
+    _t_scenes = time.time() - start_time
+
     if not scene_paths:
         return CinematicResult(
             success=False,
@@ -121,6 +123,13 @@ def render_cinematic_open(
         )
 
     cleanup_temp(scene_paths)
+
+    print(
+        f"[VideoRender][Timing] scenes_total={_t_scenes:.1f}s "
+        f"composite={time.time() - start_time - _t_scenes:.1f}s "
+        f"n_scenes={len(scene_paths)} workers={workers}",
+        flush=True,
+    )
 
     if not success:
         if scene_paths and os.path.exists(scene_paths[0]):

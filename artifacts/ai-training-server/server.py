@@ -8774,16 +8774,24 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
         try:
             from ai_model.video.cinematic_engine import render_cinematic_open
 
+            _t0 = time.time()
             scene_configs = _agent.build_open_scenes(_req, _production, _width, _height)
+            _t_build = time.time() - _t0
             dna        = ai_scene_builder.build_dna(_req.idea, _production.genre_detected, _production.tone_used)
             transition = "fadeblack" if dna.darkness > 0.70 else "dissolve" if dna.energy < 0.50 else "fade"
             # Native-audio parity: auto-soundtrack when no caller audio.
+            _t0 = time.time()
             _audio_path = _req.artist_context.get("audio_path")
             if not _audio_path and _gen_audio:
                 _audio_path = _auto_soundtrack_path(
                     job_id, _production.total_duration,
                     genre=_production.genre_detected or _req.genre,
                 )
+            print(
+                f"[VideoRender][Timing] build_scenes={_t_build:.1f}s "
+                f"soundtrack={time.time() - _t0:.1f}s job={job_id[:8]}",
+                flush=True,
+            )
 
             # Voice-over: real spoken narration from the planned scene texts,
             # music ducked underneath (never-raise; falls back to music).

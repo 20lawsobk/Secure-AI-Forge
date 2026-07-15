@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os
 import sys
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional, List
@@ -323,11 +324,13 @@ def _render_pil_based(
       2. Encode with ffmpeg using the PNG as a looped still + drawtext overlay.
     Falls back to a solid-colour render if PIL fails.
     """
+    _t0 = time.time()
     bg_png: Optional[str] = None
     try:
         bg_png = _pil_bg_frame(scene, width, height)
     except Exception:
         pass
+    _t_bg = time.time() - _t0
 
     if not bg_png or not os.path.exists(bg_png):
         return _render_fallback(scene, width, height, dur, out_path)
@@ -337,6 +340,7 @@ def _render_pil_based(
     # + creative colour matrix as a GEMM on the self-contained Digital GPU),
     # replacing the ad-hoc ffmpeg grade filter. Explicit fallback to the ffmpeg
     # grade preset if RTA is unavailable, so colour work never silently drops.
+    _t0 = time.time()
     _vrc_applied = False
     if scene.color_grade and os.environ.get("RTA_VIDEO_GRADE", "1") != "0":
         try:
@@ -350,6 +354,8 @@ def _render_pil_based(
         except Exception as _vrc_err:
             print(f"[RTA] VRC grade failed, using ffmpeg grade: {_vrc_err}")
             _vrc_applied = False
+
+    _t_grade = time.time() - _t0
 
     vf_parts: List[str] = []
 
@@ -391,7 +397,13 @@ def _render_pil_based(
     ]
 
     try:
+        _t0 = time.time()
         result = run_ffmpeg(cmd, timeout=45)
+        print(
+            f"[VideoRender][Timing] scene bg={_t_bg:.1f}s grade={_t_grade:.1f}s "
+            f"encode={time.time() - _t0:.1f}s dur={dur:.1f}s {width}x{height}",
+            flush=True,
+        )
         _safe_remove(bg_png)
         if result.returncode != 0:
             print(

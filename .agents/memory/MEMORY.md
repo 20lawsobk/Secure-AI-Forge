@@ -1,5 +1,5 @@
 - [KV-cache inference](kv-cache-inference.md) — transformer needs KV-cache (prefill+decode_one) or plan() takes 3+ min per call
-- [Video pipeline architecture](video-pipeline.md) — non-blocking job pattern, ffmpeg framerate fix, text cleaning rules
+- [Video pipeline architecture](video-pipeline.md) — non-blocking job pattern, ffmpeg framerate fix, text cleaning rules; diffusion bg must denoise at native RESOLUTION not output res (88s→35s); per-stage Timing logs exist
 - [Video scene text generation](video-scene-generation.md) — use dataset_sampler not model.generate_batch() for scene text; batch inference exists but model is undertrained
 - [Request intelligence layer](request-intelligence-layer.md) — shared pre-gen brief, additive `intelligence` block; compose_caption ranks captions; looks_garbled guard (ScriptAgent + score penalty, whitelist=request words)
 - [Idea vs awareness field separation](idea-awareness-field-separation.md) — never concatenate augmented/brief context into a raw `idea` field that gets templated into output; corrupts user-facing text
