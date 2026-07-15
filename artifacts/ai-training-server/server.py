@@ -7855,6 +7855,46 @@ _GENRE_DEFAULT_BPM: dict[str, float] = {
 }
 
 
+def _voiceover_track_path(job_id: str, narration_text: str,
+                          duration_sec: float,
+                          music_path: Optional[str] = None) -> Optional[str]:
+    """Synthesize a spoken narration track (in-house eSpeak NG) and duck any
+    music soundtrack under it. Returns the audio path to mux, or None when
+    speech synthesis is unavailable — callers keep their existing audio.
+    Never-raise."""
+    try:
+        from ai_model.audio.voiceover import voiceover_track
+        path = voiceover_track(
+            text=narration_text,
+            out_dir=str(_UPLOADS_PATH),
+            job_id=job_id,
+            duration_sec=duration_sec,
+            music_path=music_path,
+        )
+        if path:
+            print(f"[VideoJob] voiceover narration rendered for {job_id[:12]}", flush=True)
+        else:
+            print(f"[VideoJob] voiceover unavailable for {job_id[:12]} — keeping music/silent track", flush=True)
+        return path
+    except Exception as exc:  # noqa: BLE001 - narration must never break renders
+        print(f"[VideoJob] voiceover error ({exc}); keeping music/silent track", flush=True)
+        return None
+
+
+def _narration_script(production, hook: str = "", body: str = "", cta: str = "") -> str:
+    """Build the narration text: caller-supplied script parts win, otherwise
+    the planned scene texts (in order) form the spoken script."""
+    parts = [p.strip() for p in (hook, body, cta) if p and p.strip()]
+    if parts:
+        return ". ".join(parts)
+    try:
+        return ". ".join(
+            s.text.strip() for s in production.scenes if getattr(s, "text", "").strip()
+        )
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _auto_soundtrack_path(job_id: str, duration_sec: float,
                           bpm: Optional[float] = None,
                           key: Optional[str] = None,
@@ -8248,6 +8288,22 @@ def _start_video_job(req: ApiGenerateVideoRequest, platform: str) -> tuple[str, 
                     bpm=req.bpm, key=req.key,
                     genre=production.genre_detected or (req.genre or ""),
                 )
+
+            # Voice-over: synthesize REAL spoken narration (eSpeak NG) from the
+            # script and duck the soundtrack under it. Previously this flag was
+            # a silent no-op — users got the arpeggio synth ("birdcalls").
+            if getattr(req, "voiceover", False):
+                _vo_text = _narration_script(
+                    production,
+                    hook=req.hook or "", body=req.body or "", cta=req.cta or "",
+                )
+                _vo_path = _voiceover_track_path(
+                    job_id, _vo_text, production.total_duration,
+                    music_path=_audio_path,
+                )
+                if _vo_path:
+                    _audio_path = _vo_path
+                    _job_update(job_id, {"voiceover": True})
 
             result = render_cinematic_open(
                 scenes=scene_configs,
@@ -8651,6 +8707,7 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
         output_resolution=str(body.get("output_resolution") or ""),
     )
     _gen_audio = bool(body.get("generate_audio", True))
+    _want_voiceover = bool(body.get("voiceover", False))
 
     # ── Run plan() synchronously so scenes are available in this response ──
     # Only the heavy render step is deferred to a background thread.
@@ -8712,6 +8769,17 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
                     job_id, _production.total_duration,
                     genre=_production.genre_detected or _req.genre,
                 )
+
+            # Voice-over: real spoken narration from the planned scene texts,
+            # music ducked underneath (never-raise; falls back to music).
+            if _want_voiceover:
+                _vo_path = _voiceover_track_path(
+                    job_id, _narration_script(_production),
+                    _production.total_duration, music_path=_audio_path,
+                )
+                if _vo_path:
+                    _audio_path = _vo_path
+                    _job_update(job_id, {"voiceover": True})
 
             result     = render_cinematic_open(
                 scenes=scene_configs,
@@ -8788,6 +8856,7 @@ async def api_poll_video_job(job_id: str, _key=Depends(require_scope("read"))):
             "scenes_rendered": job.get("scenes_rendered", 0),
             "render_ms":       job.get("render_ms"),
             "technique":       job.get("technique"),
+            "voiceover":       bool(job.get("voiceover", False)),
         }
     if job["status"] == "error":
         return {"status": "error", "error": job.get("error", "Unknown error")}

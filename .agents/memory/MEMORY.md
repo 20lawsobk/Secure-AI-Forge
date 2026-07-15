@@ -44,4 +44,5 @@
 - [GPU kernel redesign](gpu-kernel-redesign.md) — HyperSIMDCore flash_attention is real tiled online-softmax (16x less score mem, faster at long T); conv2d/3d use strided im2col (1.4-2.3x); flash must loop over Tk not Tq, clamp block_size, conv preserves input dtype
 - [Quality leaderboard 100/100](quality-leaderboard.md) — scoring rules, final fixes, and constraints to preserve when touching script_agent or server.py
 - [Veo-parity video controls](veo-parity-video.md) — init_frame_b64→SDEdit prior is real image conditioning; bound b64 pre-decode; sample_count needs derived seeds; extension=last-frame+concat+one soundtrack
+- [Voice-over speech synthesis](voiceover-speech-synthesis.md) — narration = local eSpeak NG, explicit -ar 44100 everywhere (birdcall bug class); job poll fields are a whitelist
 - [Intent ↔ awareness sync](intent-awareness-sync.md) — tiers blend (65/35 energy, anchor+flavor) not override; caller awareness leads platform buffer; [INTENT] kv lines must never reach caption text
