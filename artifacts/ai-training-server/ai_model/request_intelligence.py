@@ -1364,6 +1364,17 @@ _URL_LABEL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Mid-line label echo: the URL parser emits pipe-joined segments like
+# "Genre: Hip-hop | Mood: dark", so a model echoing only a FRAGMENT (e.g. a
+# caption ending in "… | Mood: dark") never places the label at a line start
+# and slips past _URL_LABEL_RE. A known awareness label directly preceded by
+# a pipe separator is unambiguous metadata — ordinary prose with pipes
+# ("5 PM | doors open: 7") uses labels outside this fixed vocabulary.
+_MIDLINE_LABEL_RE = re.compile(
+    r"\|[ \t]*(?:Artist|Title|Album|Genre|Mood|Intent|Source|Context|BPM|Key|Year)\s*:",
+    re.IGNORECASE,
+)
+
 # A single isolated tier-marker line (no label) is also an awareness echo.
 _TIER_MARKER_RE = re.compile(
     r"(?m)^[ \t]*\[(?:HIGH|MED|LOW|MEDIUM)\][ \t]+\S",
@@ -1397,7 +1408,7 @@ def garble_reason(text: str, whitelist: str = "") -> str:
 
     # ── URL-parser label-echo check (highest priority) ────────────────────────
     # Even one structured label line means the model echoed raw metadata.
-    if _URL_LABEL_RE.findall(text):
+    if _URL_LABEL_RE.findall(text) or _MIDLINE_LABEL_RE.search(text):
         return "label_echo"
     if _TIER_MARKER_RE.search(text):
         return "tier_marker"

@@ -107,6 +107,29 @@ class TestLabelEchoDetected:
         assert looks_garbled(text), "Lowercase label lines should be flagged"
 
 
+class TestMidLineLabelEchoDetected:
+    """Pipe-preceded label fragments mid-line are still metadata echoes.
+    The parser emits pipe-joined lines ("Genre: Hip-hop | Mood: dark"); a
+    model echoing only the tail of such a line hides the label mid-line."""
+
+    def test_caption_ending_in_pipe_mood_fragment(self):
+        text = "Late-night energy, windows down… | Mood: dark"
+        assert looks_garbled(text), "mid-line '| Mood:' fragment should be flagged"
+
+    def test_midline_bpm_key_fragment(self):
+        text = "New drop hits hard | Key: F# minor and it shows"
+        assert looks_garbled(text), "mid-line '| Key:' fragment should be flagged"
+
+    def test_midline_fragment_case_insensitive(self):
+        text = "vibes all night | mood: euphoric"
+        assert looks_garbled(text), "lowercase mid-line label should be flagged"
+
+    def test_midline_label_never_whitelisted(self):
+        text = "Stream Midnight Drive | Genre: hip-hop"
+        assert looks_garbled(text, whitelist="Midnight Drive hip-hop Genre"), \
+            "label echo must not be bypassed by whitelist"
+
+
 # ---------------------------------------------------------------------------
 # 2. Negative cases — legitimate captions must NOT be flagged
 # ---------------------------------------------------------------------------
@@ -153,6 +176,15 @@ class TestLegitimateCaptionNotFlagged:
     def test_intent_word_in_prose(self):
         text = "My intent was to create something timeless for the fans."
         assert not looks_garbled(text), "'intent' in prose should not be flagged"
+
+    def test_pipes_in_ordinary_prose_not_flagged(self):
+        """Pipes with non-awareness labels are normal event-flyer prose."""
+        text = "Doors 5 PM | doors open: 7 | show starts: 8"
+        assert not looks_garbled(text), "event-flyer pipe prose should not be flagged"
+
+    def test_pipe_separated_prose_without_labels(self):
+        text = "New single | out everywhere | link in bio"
+        assert not looks_garbled(text), "plain pipe separators should not be flagged"
 
     def test_normal_instagram_caption(self):
         text = (
@@ -270,6 +302,23 @@ class TestGuardCoversAllEmittedLabels:
             f"_URL_LABEL_RE does not cover awareness label(s) {uncovered} — "
             "a field was added to _build_awareness_text() in "
             "ai_model/url_parser/core.py without updating _URL_LABEL_RE in "
+            "ai_model/request_intelligence.py"
+        )
+
+    def test_every_emitted_label_triggers_guard_midline(self):
+        """Drift guard for the mid-line matcher: every emitted awareness label
+        must also be caught when it appears pipe-preceded mid-line, so
+        _MIDLINE_LABEL_RE can't fall out of sync with _URL_LABEL_RE when new
+        fields are added to _build_awareness_text()."""
+        prefixes = _emitted_label_prefixes()
+        assert prefixes, "no label prefixes extracted — extraction broken"
+        uncovered = [
+            p for p in sorted(prefixes)
+            if not looks_garbled(f"Stream it now everywhere | {p}: Some Value")
+        ]
+        assert not uncovered, (
+            f"_MIDLINE_LABEL_RE does not cover awareness label(s) {uncovered} "
+            "in pipe-preceded mid-line form — update it in "
             "ai_model/request_intelligence.py"
         )
 
