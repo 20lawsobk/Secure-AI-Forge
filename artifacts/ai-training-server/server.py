@@ -766,6 +766,98 @@ def _fw_ingest(key: dict, content_type: str, payload: dict, meta: dict) -> None:
     except Exception as e:
         _srv_logger.debug(f"[Flywheel] ingest error ({content_type}): {e}")
 
+
+# Serialises read-modify-write of the audio dataset meta/index so two
+# concurrent admin renders can't clobber each other's index append.
+_AUDIO_DS_INGEST_LOCK = threading.Lock()
+
+
+def _fw_ingest_audio_render(key: dict, job_id: str, render: dict,
+                            genres: list) -> None:
+    """Audio arm of the admin content flywheel — never raises.
+
+    Pushes an admin-generated audio render back into the real-audio dataset
+    pool (``mb:dataset:audio``) so B-Lawz's generated output becomes an
+    additional dataset source for future renders, mirroring what
+    ``_fw_ingest`` does for text/video/image payloads.
+
+    Guards:
+      * admin-scope gated (same contract as ``_fw_ingest``)
+      * derivation guard — if the render's source sample is itself a
+        flywheel entry, skip (prevents copy-of-copy quality decay)
+      * content-hash dedup — identical bytes are never stored twice
+    """
+    if "admin" not in (key.get("scopes") or []):
+        return
+    try:
+        import base64 as _b64
+        import hashlib as _hl
+        from storage_client import get_storage
+
+        url = str(render.get("url") or "")
+        if not url.startswith("/uploads/"):
+            return
+        path = _UPLOADS_PATH / url.split("/")[-1]
+        if not path.exists():
+            return
+        raw = path.read_bytes()
+        if not raw or len(raw) > 12 * 1024 * 1024:  # sanity cap
+            return
+        sha = _hl.sha256(raw).hexdigest()
+
+        storage = get_storage()
+        with _AUDIO_DS_INGEST_LOCK:
+            meta = storage.get("mb:dataset:audio:meta") or {}
+            index = list(meta.get("index") or [])
+            # Derivation guard: don't re-ingest renders derived from
+            # flywheel-sourced tracks (copy-of-copy stacking).
+            src = render.get("source_sample") or {}
+            src_idx = src.get("idx")
+            if src_idx is not None:
+                for e in index:
+                    if int(e.get("idx", -1)) == int(src_idx):
+                        if str(e.get("source") or "") == "flywheel":
+                            return
+                        break
+            # Content dedup
+            if any(e.get("content_sha") == sha for e in index):
+                return
+            next_idx = max(
+                [int(e.get("idx", -1)) for e in index] + [int(meta.get("num_chunks", 0)) - 1]
+            ) + 1
+            bpm = float(render.get("bpm") or 0.0)
+            key_name = str(render.get("key") or "")
+            chunk = {
+                "idx": next_idx,
+                "title": f"blawz_flywheel_{job_id[:8]}",
+                "artist": "B-Lawz",
+                "genres": list(genres or []),
+                "source": "flywheel",
+                "derived_from": src_idx,
+                "bpm": bpm,
+                "key": key_name,
+                "duration_sec": render.get("duration"),
+                "sample_rate": render.get("sample_rate"),
+                "format": str(render.get("format") or "mp3"),
+                "b64": _b64.b64encode(raw).decode("ascii"),
+            }
+            storage.set(f"mb:dataset:audio:chunk:{next_idx}", chunk)
+            index.append({
+                "idx": next_idx, "bpm": bpm, "key": key_name,
+                "genres": chunk["genres"], "source": "flywheel",
+                "content_sha": sha,
+            })
+            meta["index"] = index
+            meta["num_chunks"] = next_idx + 1
+            storage.set("mb:dataset:audio:meta", meta)
+        print(
+            f"[flywheel] audio render job={job_id[:8]} ingested as dataset "
+            f"idx={next_idx} (bpm={bpm}, key={key_name!r}, genres={genres})",
+            flush=True,
+        )
+    except Exception as e:
+        _srv_logger.debug(f"[Flywheel] audio ingest error: {e}")
+
 # ─── Pydantic Schemas ────────────────────────────────────────────────────────
 
 class CreateApiKeyRequest(BaseModel):
@@ -8353,6 +8445,11 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
             # Which dataset sample was selected — lets producers audit the pick.
             "source_sample":     render.get("source_sample"),
         })
+        # ── Admin content flywheel (audio arm) ─────────────────────────────
+        # B-Lawz admin renders are auto-pushed back into the audio dataset
+        # pool as additional dataset sources (parity with text/video/image
+        # flywheel ingestion).  Never raises; gated + deduped inside.
+        _fw_ingest_audio_render(_key, job_id, render, _preferred_genres)
 
     _job_update(job_id, {"intelligence": brief.to_dict()})
     if _audio_tech is not None:

@@ -21,3 +21,8 @@ description: How /api/generate/audio renders real audio and how the ARC spectral
 ## Hang/deadline lessons
 - urllib3 `read=` timeout is PER-SOCKET-CHUNK, not total: a large b64 payload trickling under memory pressure never times out. Fix: absolute wall-clock deadline via `ThreadPoolExecutor.submit().result(timeout=30)` — but do NOT use a `with` block (`__exit__` = shutdown(wait=True), blocks on the hung worker). Use shutdown(wait=False).
 - Job-level backstop: 120s threading.Timer marks `error`. Terminal writes need an atomic claim (lock + flag, first writer wins) or timer-error vs late-done races produce nondeterministic status.
+
+## Admin content flywheel — audio arm
+- Admin (B-Lawz) renders auto-push into mb:dataset:audio via `_fw_ingest_audio_render` (parity with _fw_ingest for text/video/image). Never-raise, admin-scope gated, sha256 content dedup, module-level index lock.
+- Derivation guard: renders whose source_sample is itself a flywheel entry are NOT re-ingested (prevents copy-of-copy decay). Index entries carry `source: "flywheel"` + `content_sha`.
+- Verified live: render → ingested idx N → next matching request selects idx N → no second ingest.
