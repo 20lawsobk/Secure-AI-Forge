@@ -7716,48 +7716,37 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
     ]
 
     # ── Select best match: genre affinity first, then key, then tempo ──────
-    def _norm_key(k: Any) -> str:
-        return str(k or "").strip().lower()
-
-    want_key = _norm_key(target_key)
+    # Pure-function selector lives in ai_model/audio/track_selector.py so it
+    # can be unit-tested independently of the server and ffmpeg pipeline.
+    from ai_model.audio.track_selector import select_audio_sample as _select
+    want_key = str(target_key or "").strip().lower()
     want_bpm = float(target_bpm or 0.0)
-
-    def _bpm_dist(entry: dict) -> float:
-        b = float(entry.get("bpm") or 0.0)
-        return abs(b - want_bpm) if b > 0 else 1e6
-
-    def _genre_score(entry: dict) -> float:
-        """0.0 = at least one genre overlaps a preferred genre (best).
-        1.0 = no genre overlap (neutral — still selected if nothing better).
-        Partial substring matching handles "hip hop" ↔ "hip-hop", "r&b" ↔
-        "rnb", and live-chart shorthand vs full dataset genre names."""
-        if not _preferred_genres:
-            return 0.0
-        entry_genres = [
-            str(g).lower().strip().replace("-", " ").replace("_", " ")
-            for g in (entry.get("genres") or [])
-            if g is not None
-        ]
-        for pg in _preferred_genres:
-            pg_n = pg.replace("-", " ").replace("_", " ")
-            for eg in entry_genres:
-                if pg_n in eg or eg in pg_n:
-                    return 0.0
-        return 1.0
-
-    key_matches = [e for e in index if _norm_key(e.get("key")) == want_key]
-    pool = key_matches or index
-    # Sort by (genre_miss, bpm_distance, idx) so awareness-aligned tracks
-    # always rank ahead of equally-keyed but genre-mismatched alternatives.
-    best = min(pool, key=lambda e: (_genre_score(e), _bpm_dist(e), int(e.get("idx", 0))))
+    best, _key_matched = _select(index, want_key, want_bpm, _preferred_genres)
     best_idx = int(best.get("idx", 0))
     src_bpm = float(best.get("bpm") or 0.0)
     src_key = best.get("key")
     _matched_genres = best.get("genres") or []
+
+    # Surface the key-match fallback as an explicit warning so producers know
+    # their requested key was not found in the current dataset.  Rubberband
+    # will still pitch-shift to the target key, but the warning tells them
+    # the dataset would benefit from more variety.
+    _selection_warning: "str | None" = None
+    if not _key_matched and want_key:
+        _selection_warning = (
+            f"no dataset track matched key '{target_key}' — "
+            f"selected idx={best_idx} (key={src_key!r}, bpm={src_bpm}) "
+            f"as nearest BPM match; rubberband will pitch-shift to the target key"
+        )
+        print(
+            f"[audio_select] WARNING key fallback: want_key={want_key!r} "
+            f"not in index — using idx={best_idx} key={src_key!r}",
+            flush=True,
+        )
     print(
         f"[audio_select] job={job_id[:8]} preferred={_preferred_genres} "
         f"matched_genres={_matched_genres} idx={best_idx} "
-        f"bpm={src_bpm} key={src_key}",
+        f"bpm={src_bpm} key={src_key} key_matched={_key_matched}",
         flush=True,
     )
 
@@ -7881,6 +7870,10 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
         "loudness_lufs": loudness_lufs,
         "stems": stem_urls,
         "source_sample": {"idx": best_idx, "bpm": src_bpm, "key": src_key},
+        # None when an exact key match was found; non-None string when the
+        # selector fell back to the full index because no track matched the
+        # requested key.  Propagated into the job record and poll response.
+        "selection_warning": _selection_warning,
     }
 
 
@@ -8249,6 +8242,11 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
             "awareness_mood":   _preferred_mood or None,
             "awareness_source": "trending+intent" if _aw_genres_handler else (
                                 "intent" if _req_genre_handler else "none"),
+            # Non-None when no dataset track matched the requested key and the
+            # selector fell back to nearest-BPM.  Surfaced to producers via poll.
+            "selection_warning": render.get("selection_warning"),
+            # Which dataset sample was selected — lets producers audit the pick.
+            "source_sample":     render.get("source_sample"),
         })
 
     _job_update(job_id, {"intelligence": brief.to_dict()})
@@ -9176,9 +9174,14 @@ async def api_poll_audio_job(job_id: str, _key=Depends(require_scope("read"))):
             "source":           job.get("source", "heuristic"),
             "technique":        job.get("technique"),
             # Awareness provenance — which live signals shaped track selection
-            "awareness_genres": job.get("awareness_genres"),
-            "awareness_mood":   job.get("awareness_mood"),
-            "awareness_source": job.get("awareness_source"),
+            "awareness_genres":  job.get("awareness_genres"),
+            "awareness_mood":    job.get("awareness_mood"),
+            "awareness_source":  job.get("awareness_source"),
+            # Non-None string when the dataset had no track matching the
+            # requested key and the selector fell back to nearest-BPM.
+            "selection_warning": job.get("selection_warning"),
+            # Which dataset sample was selected (idx, bpm, key).
+            "source_sample":     job.get("source_sample"),
         }
     if job["status"] == "error":
         return {"status": "error", "error": job.get("error", "Unknown error")}
