@@ -492,6 +492,80 @@ _UPLOADS_PATH.mkdir(parents=True, exist_ok=True)
 (Path(__file__).parent / "uploads" / "images").mkdir(parents=True, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=str(_UPLOADS_PATH)), name="uploads")
 
+
+# ─── Uploads janitor ─────────────────────────────────────────────────────────
+# Renders (audio_*, video_*, stems, temp WAVs) accumulate on the VM's
+# persistent disk and are never re-read after the client fetches them.  An
+# unbounded uploads/ dir eventually fills the disk, which surfaces as ffmpeg
+# write failures mid-render and general production instability.  Sweep hourly:
+# delete generated files older than the TTL, oldest-first beyond the size cap.
+_UPLOADS_TTL_SEC = float(os.environ.get("UPLOADS_TTL_HOURS", "24")) * 3600
+_UPLOADS_MAX_BYTES = int(os.environ.get("UPLOADS_MAX_MB", "2048")) * 1024 * 1024
+# Only files matching generated-output prefixes are eligible — seed assets
+# (uploads/images/ and any hand-placed files) are never touched.
+_UPLOADS_SWEEP_PREFIXES = ("audio_", "video_", "scene_", "stem_", "tmp_")
+# Grace window: files younger than this are NEVER eligible for deletion, even
+# under the size cap.  Renders finish in minutes (120s job deadline), so this
+# conservatively protects all in-flight intermediates and gives clients hours
+# to download finished outputs before eviction can touch them.
+_UPLOADS_MIN_AGE_SEC = float(os.environ.get("UPLOADS_MIN_AGE_HOURS", "6")) * 3600
+
+
+def _uploads_janitor_sweep() -> None:
+    try:
+        entries = []
+        for p in _UPLOADS_PATH.iterdir():
+            if not p.is_file() or not p.name.startswith(_UPLOADS_SWEEP_PREFIXES):
+                continue
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            entries.append((p, st.st_mtime, st.st_size))
+        now = time.time()
+        removed = 0
+        # Grace window: anything younger than the min age is untouchable.
+        entries = [(p, m, s) for p, m, s in entries
+                   if now - m > _UPLOADS_MIN_AGE_SEC]
+        # Pass 1: TTL
+        survivors = []
+        for p, mtime, size in entries:
+            if now - mtime > _UPLOADS_TTL_SEC:
+                try:
+                    p.unlink(missing_ok=True)
+                    removed += 1
+                except OSError:
+                    pass
+            else:
+                survivors.append((p, mtime, size))
+        # Pass 2: total-size cap, oldest first
+        total = sum(s for _, _, s in survivors)
+        if total > _UPLOADS_MAX_BYTES:
+            for p, _, size in sorted(survivors, key=lambda e: e[1]):
+                if total <= _UPLOADS_MAX_BYTES:
+                    break
+                try:
+                    p.unlink(missing_ok=True)
+                    total -= size
+                    removed += 1
+                except OSError:
+                    pass
+        if removed:
+            print(f"[uploads-janitor] removed {removed} generated files "
+                  f"(remaining ~{total // (1024*1024)} MB)", flush=True)
+    except Exception as exc:  # noqa: BLE001 — janitor must never crash anything
+        print(f"[uploads-janitor] sweep error: {exc}", flush=True)
+
+
+def _uploads_janitor_loop() -> None:
+    while True:
+        _uploads_janitor_sweep()
+        time.sleep(3600)
+
+
+threading.Thread(target=_uploads_janitor_loop, name="uploads-janitor",
+                 daemon=True).start()
+
 # ─── AI Model Globals ────────────────────────────────────────────────────────
 
 _model_ready = False
@@ -8010,7 +8084,10 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
         r0 = run_ffmpeg(["ffmpeg", "-y", "-i", str(src_path), "-ac", "1",
                          "-ar", str(sample_rate), str(src_wav)], timeout=60)
         if r0.returncode != 0 or not src_wav.exists():
-            raise RuntimeError(f"source decode failed rc={r0.returncode}")
+            raise RuntimeError(
+                f"source decode failed rc={r0.returncode}: "
+                f"{(r0.stderr or '')[-300:]}"
+            )
 
         # 2) Retune + retime so the clip HITS the requested key & BPM.
         stage_in = src_wav
@@ -8077,9 +8154,26 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
                 print(f"[Producer] stems skipped: {_st_err}", flush=True)
 
         # 6) Master (optional LUFS) + export to the requested format.
-        _pt.master_export(looped_wav, out_path, fmt=fmt,
-                          sample_rate=sample_rate, bit_depth=bit_depth,
-                          loudness_lufs=loudness_lufs)
+        #    Degrade gracefully: a mastering failure must not kill the render —
+        #    fall back to a plain encode of the assembled clip.
+        try:
+            _pt.master_export(looped_wav, out_path, fmt=fmt,
+                              sample_rate=sample_rate, bit_depth=bit_depth,
+                              loudness_lufs=loudness_lufs)
+        except Exception as _mx_err:
+            print(f"[Producer] master_export failed — plain encode fallback: "
+                  f"{_mx_err}", flush=True)
+            loudness_lufs = None  # honest: no loudness normalization applied
+            codec = (["-codec:a", "pcm_s24le"] if fmt == "wav"
+                     else ["-codec:a", "libmp3lame", "-q:a", "2"])
+            r2 = run_ffmpeg(["ffmpeg", "-y", "-i", str(looped_wav),
+                             "-ar", str(sample_rate), *codec, str(out_path)],
+                            timeout=60)
+            if r2.returncode != 0 or not out_path.exists():
+                raise RuntimeError(
+                    f"final encode failed rc={r2.returncode}: "
+                    f"{(r2.stderr or '')[-300:]}"
+                )
     finally:
         for _p in _tmp:
             try:

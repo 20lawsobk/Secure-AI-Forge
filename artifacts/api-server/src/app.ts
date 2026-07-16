@@ -25,6 +25,21 @@ app.use(limiter);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// ─── Deployment healthcheck fast-paths ───────────────────────────────────────
+// The platform healthchecks GET "/", "/api" and "/uploads" and RESTARTS the VM
+// when they fail. These must return 200 immediately and NEVER depend on the
+// Python model server (which takes minutes to load) — otherwise every Python
+// restart window escalates into a full VM restart loop (observed flapping).
+app.get("/healthz", (_req: Request, res: Response) => {
+  res.status(200).json({ ok: true });
+});
+app.get(["/api", "/api/"], (_req: Request, res: Response) => {
+  res.status(200).json({ ok: true, service: "api-server" });
+});
+app.get(["/uploads", "/uploads/"], (_req: Request, res: Response) => {
+  res.status(200).json({ ok: true, service: "uploads-proxy" });
+});
+
 app.use("/api", router);
 
 // ─── Proxy /uploads/* directly to the Python AI server ──────────────────────
@@ -83,10 +98,34 @@ if (process.env.NODE_ENV === "production") {
 
   app.use(express.static(dashboardDist, { maxAge: "1d" }));
 
-  // SPA fallback — any unmatched GET returns index.html so React Router works
+  // SPA fallback — any unmatched GET returns index.html so React Router works.
+  // Never 500 here: the deployment healthcheck probes "/" and a 5xx gets the
+  // VM restarted. If the dashboard build is missing, serve a minimal 200 page.
   app.get("/*path", (_req: Request, res: Response) => {
-    res.sendFile(path.join(dashboardDist, "index.html"));
+    res.sendFile(path.join(dashboardDist, "index.html"), (err) => {
+      if (err && !res.headersSent) {
+        res
+          .status(200)
+          .type("html")
+          .send("<!doctype html><title>MaxCore</title><p>Server up — dashboard assets unavailable.</p>");
+      }
+    });
   });
 }
+
+// ─── Global error handler — never let an unhandled error become a bare 500 ──
+app.use(
+  (
+    err: Error,
+    _req: Request,
+    res: Response,
+    _next: express.NextFunction,
+  ) => {
+    console.error("[app] unhandled error:", err?.message || err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "internal", detail: String(err?.message || err) });
+    }
+  },
+);
 
 export default app;

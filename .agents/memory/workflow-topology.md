@@ -77,3 +77,7 @@ Proxy-only mode triggers whenever MODEL_API_PORT is unset. The production `serve
 
 ## Prod external port mapping (GCE/VM)
 - .replit maps externalPort 80 → localPort 5000, but prod `serve` defaulted PORT=8080 → nothing on 5000 → external health 000 while internal keepalive shows all endpoints alive. Deployment run must set PORT=5000 (now `bash -c "PORT=5000 MODEL_API_PORT=9878 pnpm start"`). Check the [[ports]] map FIRST when prod is externally unreachable but deployment logs look healthy.
+
+## Prod flapping root cause (healthchecks)
+- Platform healthchecks GET "/", "/api", "/uploads" and RESTART the VM on 5xx. Any Python boot/restart window used to 500 these → VM kill → minutes-long model reload → flap loop. app.ts now serves always-200 fast-paths for those exact paths (+ /healthz, SPA fallback never 500s, global error middleware). Keep healthcheck paths independent of Python.
+- uploads/ janitor (server.py, hourly, 24h TTL + 2GB cap, audio_/video_/scene_/stem_/tmp_ prefixes only) prevents VM disk-fill — disk-full surfaced as mid-render ffmpeg failures.
