@@ -7621,6 +7621,42 @@ def _render_audio_clip(job_id: str, bpm: float, key: str,
     return f"/uploads/audio_{job_id}.mp3"
 
 
+def _extract_awareness_genres(awareness: str) -> list:
+    """Parse trending genre names out of the awareness context string.
+
+    ContentAwarenessService (music mode) writes lines of the form:
+        Trending genres: trap, phonk, afrobeats
+    This extracts them as a lowercase list so audio track selection can prefer
+    samples whose genre metadata overlaps with live chart signals.
+    Never raises — returns an empty list on any parse failure.
+    """
+    import re as _re
+    try:
+        m = _re.search(r"[Tt]rending genres?:\s*([^\n]+)", awareness or "")
+        if not m:
+            return []
+        return [g.strip().lower() for g in m.group(1).split(",") if g.strip()]
+    except Exception:
+        return []
+
+
+def _extract_awareness_moods(awareness: str) -> list:
+    """Parse trending mood tokens out of the awareness context string.
+
+    ContentAwarenessService (music mode) writes:
+        Trending moods: melancholic, euphoric, nostalgic
+    Returns lowercase list. Never raises.
+    """
+    import re as _re
+    try:
+        m = _re.search(r"[Tt]rending moods?:\s*([^\n]+)", awareness or "")
+        if not m:
+            return []
+        return [g.strip().lower() for g in m.group(1).split(",") if g.strip()]
+    except Exception:
+        return []
+
+
 def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
                                duration_sec: float,
                                opts: Optional[dict] = None) -> dict:
@@ -7667,7 +7703,19 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
     target_bpm = float(opts.get("target_bpm") or bpm or 0.0)
     target_key = opts.get("target_key") or key
 
-    # ── Select best match: same key first, then closest tempo ─────────────
+    # ── Awareness-driven genre/mood preferences ────────────────────────────
+    # preferred_genres comes from the caller's opts dict (populated by the
+    # /api/generate/audio handler from brief.genre + live trending genres
+    # extracted from the ContentAwarenessService music-mode context string).
+    # Tracks whose stored genre metadata overlaps get a scoring bonus so the
+    # dataset render reflects live chart signals, not just key/BPM proximity.
+    _preferred_genres = [
+        g.lower().strip()
+        for g in (opts.get("preferred_genres") or [])
+        if g and str(g).strip()
+    ]
+
+    # ── Select best match: genre affinity first, then key, then tempo ──────
     def _norm_key(k: Any) -> str:
         return str(k or "").strip().lower()
 
@@ -7678,12 +7726,40 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
         b = float(entry.get("bpm") or 0.0)
         return abs(b - want_bpm) if b > 0 else 1e6
 
+    def _genre_score(entry: dict) -> float:
+        """0.0 = at least one genre overlaps a preferred genre (best).
+        1.0 = no genre overlap (neutral — still selected if nothing better).
+        Partial substring matching handles "hip hop" ↔ "hip-hop", "r&b" ↔
+        "rnb", and live-chart shorthand vs full dataset genre names."""
+        if not _preferred_genres:
+            return 0.0
+        entry_genres = [
+            str(g).lower().strip().replace("-", " ").replace("_", " ")
+            for g in (entry.get("genres") or [])
+            if g is not None
+        ]
+        for pg in _preferred_genres:
+            pg_n = pg.replace("-", " ").replace("_", " ")
+            for eg in entry_genres:
+                if pg_n in eg or eg in pg_n:
+                    return 0.0
+        return 1.0
+
     key_matches = [e for e in index if _norm_key(e.get("key")) == want_key]
     pool = key_matches or index
-    best = min(pool, key=lambda e: (_bpm_dist(e), int(e.get("idx", 0))))
+    # Sort by (genre_miss, bpm_distance, idx) so awareness-aligned tracks
+    # always rank ahead of equally-keyed but genre-mismatched alternatives.
+    best = min(pool, key=lambda e: (_genre_score(e), _bpm_dist(e), int(e.get("idx", 0))))
     best_idx = int(best.get("idx", 0))
     src_bpm = float(best.get("bpm") or 0.0)
     src_key = best.get("key")
+    _matched_genres = best.get("genres") or []
+    print(
+        f"[audio_select] job={job_id[:8]} preferred={_preferred_genres} "
+        f"matched_genres={_matched_genres} idx={best_idx} "
+        f"bpm={src_bpm} key={src_key}",
+        flush=True,
+    )
 
     sample = storage.get(f"mb:dataset:audio:chunk:{best_idx}")
     if not sample or not sample.get("b64"):
@@ -7989,6 +8065,33 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         awareness=_merged_awareness_for(req),
     )
 
+    # ── Awareness genre/mood conditioning (computed in handler scope) ──────
+    # Parse live trending genres from the same awareness string that was fed to
+    # build_brief() above. ContentAwarenessService (music mode) writes lines of
+    # the form "Trending genres: trap, phonk, afrobeats". We combine those with
+    # req.genre (explicit user intent) so _render_audio_from_dataset prefers
+    # tracks that match current chart signals.
+    # NOTE: these are captured as closure variables for _process() — do NOT
+    # call _merged_awareness_for() again inside the background thread.
+    _aw_str_handler = getattr(req, "awareness", "") or ""
+    _aw_genres_handler = _extract_awareness_genres(_aw_str_handler)
+    _aw_moods_handler  = _extract_awareness_moods(_aw_str_handler)
+    _req_genre_handler = (req.genre or "").lower().strip()
+    _preferred_genres_handler: list = list(dict.fromkeys(
+        filter(None,
+               ([_req_genre_handler] if _req_genre_handler else [])
+               + _aw_genres_handler
+        )
+    ))
+    _preferred_mood_handler = (brief.mood or "").strip()
+    if _preferred_genres_handler or _preferred_mood_handler:
+        print(
+            f"[audio_awareness] job={job_id[:8]} "
+            f"genres={_preferred_genres_handler} mood={_preferred_mood_handler!r} "
+            f"(req_genre={_req_genre_handler!r} trending={_aw_genres_handler})",
+            flush=True,
+        )
+
     # Unified conditioning bus: sonic technique (tempo/key/spectral tilt). When
     # TECHNIQUE_REAL_AUDIO=1 these can come from a real held audio sample;
     # otherwise they stay None and the brief-derived tempo band drives BPM.
@@ -8092,14 +8195,24 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
             _lufs = _pt_presets.LUFS_PRESETS.get(str(req.loudness_preset).lower())
         if _lufs is not None:
             _lufs = max(-40.0, min(0.0, float(_lufs)))
+        # ── Awareness conditioning: use pre-computed closure vars ─────────
+        # These were computed in the async handler scope (above _process) from
+        # req.awareness + req.genre so that _merged_awareness_for() is never
+        # called from inside a background thread (which can hang the event loop).
+        _preferred_genres = _preferred_genres_handler
+        _preferred_mood   = _preferred_mood_handler
         opts = {
-            "target_bpm":    target_bpm,
-            "target_key":    target_key,
-            "format":        _fmt,
-            "sample_rate":   _srate,
-            "bit_depth":     _bits,
-            "loudness_lufs": _lufs,
-            "stems":         bool(req.stems),
+            "target_bpm":       target_bpm,
+            "target_key":       target_key,
+            "format":           _fmt,
+            "sample_rate":      _srate,
+            "bit_depth":        _bits,
+            "loudness_lufs":    _lufs,
+            "stems":            bool(req.stems),
+            # Awareness conditioning — passed through to _render_audio_from_dataset
+            # so the sample selector can prefer genre-aligned tracks.
+            "preferred_genres": _preferred_genres,
+            "preferred_mood":   _preferred_mood,
         }
         # Render an actual in-house clip (key/tempo-conditioned) and serve it;
         # only mark "done" once the file exists on disk.
@@ -8117,20 +8230,25 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
             })
             return
         _job_update(job_id, {
-            "status":        "done",
-            "url":           render["url"],
-            "duration":      int(duration_sec),
-            "bpm":           render.get("bpm", target_bpm),
-            "key":           render.get("key", target_key),
-            "format":        render.get("format"),
-            "sample_rate":   render.get("sample_rate"),
-            "bit_depth":     render.get("bit_depth"),
-            "loudness_lufs": render.get("loudness_lufs"),
-            "stems":         render.get("stems") or {},
-            "seed":          _seed_base,
-            "concept":       audio_concept,
-            "style_hook":    style_hook,
-            "source":        model_source,
+            "status":           "done",
+            "url":              render["url"],
+            "duration":         int(duration_sec),
+            "bpm":              render.get("bpm", target_bpm),
+            "key":              render.get("key", target_key),
+            "format":           render.get("format"),
+            "sample_rate":      render.get("sample_rate"),
+            "bit_depth":        render.get("bit_depth"),
+            "loudness_lufs":    render.get("loudness_lufs"),
+            "stems":            render.get("stems") or {},
+            "seed":             _seed_base,
+            "concept":          audio_concept,
+            "style_hook":       style_hook,
+            "source":           model_source,
+            # Awareness provenance — which live signals shaped track selection
+            "awareness_genres": _preferred_genres,
+            "awareness_mood":   _preferred_mood or None,
+            "awareness_source": "trending+intent" if _aw_genres_handler else (
+                                "intent" if _req_genre_handler else "none"),
         })
 
     _job_update(job_id, {"intelligence": brief.to_dict()})
@@ -9052,11 +9170,15 @@ async def api_poll_audio_job(job_id: str, _key=Depends(require_scope("read"))):
             "bit_depth":     job.get("bit_depth"),
             "loudness_lufs": job.get("loudness_lufs"),
             "stems":         job.get("stems") or {},
-            "seed":          job.get("seed"),
-            "concept":   job.get("concept"),
-            "style_hook": job.get("style_hook"),
-            "source":    job.get("source", "heuristic"),
-            "technique": job.get("technique"),
+            "seed":             job.get("seed"),
+            "concept":          job.get("concept"),
+            "style_hook":       job.get("style_hook"),
+            "source":           job.get("source", "heuristic"),
+            "technique":        job.get("technique"),
+            # Awareness provenance — which live signals shaped track selection
+            "awareness_genres": job.get("awareness_genres"),
+            "awareness_mood":   job.get("awareness_mood"),
+            "awareness_source": job.get("awareness_source"),
         }
     if job["status"] == "error":
         return {"status": "error", "error": job.get("error", "Unknown error")}

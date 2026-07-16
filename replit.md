@@ -63,6 +63,23 @@ Without these, `ContentGenerationAwarenessService` and `IndustryMonitorService` 
 
 _Populate as you build_
 
+## First-run setup
+
+After a fresh import or new environment:
+
+1. **Install Node packages**: `pnpm install` (node_modules aren't checked in)
+2. **Start the workflow**: `Start application` — the Python AI server auto-provisions its venv on first boot (~1 min cold start)
+3. **Seed the audio dataset** — required before `/api/generate/audio` can return results:
+
+   ```bash
+   curl -X POST "http://localhost:9878/storage/datasets/audio/seed?count=12" \
+     -H "X-Admin-Key: $ADMIN_KEY"
+   ```
+
+   This runs in the background. Poll `GET /storage/datasets/audio/status` (same header) until `seeding_now` is `false` and `num_chunks > 0`. Typically takes 1–3 minutes. The seeder pulls real CC-licensed tracks from the Free Music Archive via HuggingFace and falls back to librosa's bundled examples if the HF datasets-server is unavailable.
+
+   > **Note**: `ADMIN_KEY` is available as an environment variable. The seed step is idempotent — re-running adds more tracks without replacing existing ones unless you pass `?replace=true`.
+
 ## Setup notes
 
 - Imported from GitHub; first run requires `pnpm install` (node_modules aren't checked in) and lets the Python server auto-provision its venv (torch, etc. — takes ~1 min on cold start). Both are now done and the `Start application` workflow runs cleanly.
