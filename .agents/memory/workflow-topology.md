@@ -74,3 +74,6 @@ bash (Start application) → pnpm → tsx → cluster primary (742)
 Proxy-only mode triggers whenever MODEL_API_PORT is unset. The production `serve` script in artifacts/api-server/package.json MUST set MODEL_API_PORT (it defaults to 9878 there) or the deployed app has NO Python owner: both api-server processes wait forever in proxy-only mode, the circuit breaker keeps tripping, and the entire /api surface 503s in prod while dev looks healthy.
 **Why:** July 2026 prod outage — deployment ran `pnpm start` → serve without MODEL_API_PORT; nobody spawned server.py.
 **How to apply:** never strip MODEL_API_PORT from the serve script; only the cluster primary calls ensurePythonServer, so a single deployed api-server artifact is safe from double-spawn.
+
+## Prod external port mapping (GCE/VM)
+- .replit maps externalPort 80 → localPort 5000, but prod `serve` defaulted PORT=8080 → nothing on 5000 → external health 000 while internal keepalive shows all endpoints alive. Deployment run must set PORT=5000 (now `bash -c "PORT=5000 MODEL_API_PORT=9878 pnpm start"`). Check the [[ports]] map FIRST when prod is externally unreachable but deployment logs look healthy.

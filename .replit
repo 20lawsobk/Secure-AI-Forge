@@ -11,9 +11,9 @@ id = "artifacts/mockup-sandbox"
 
 [deployment]
 router = "application"
-deploymentTarget = "gce"
+deploymentTarget = "vm"
 build = ["pnpm", "run", "build:production"]
-run = ["pnpm", "start"]
+run = ["bash", "-c", "PORT=5000 MODEL_API_PORT=9878 pnpm start"]
 
 [workflows]
 runButton = "Project"
