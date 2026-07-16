@@ -151,6 +151,66 @@ class FlywheelIngestor:
         with self._meta_lock(content_type):
             self._update_manifest(storage, meta_key, content_type, ts)
 
+        # ── Graduation: fold text into the live generation corpora ──────────
+        # Raw flywheel samples are archival; generation actually reads the
+        # `mb:phrases:<scene_type>` corpora (dataset_sampler tier 1).  Pushing
+        # the generated text there makes admin content a REAL dataset source
+        # immediately — and because quality_awareness.self_sufficiency()
+        # counts mb:phrases:*, every graduated phrase also shrinks the
+        # awareness buffer weight: the bridge recedes as B-Lawz's own corpus
+        # grows.  Never raises.
+        try:
+            self._graduate_phrases(storage, content_type, sample["payload"])
+        except Exception as exc:
+            _fw_logger.debug("[flywheel] graduation error (%s): %s",
+                             content_type, exc)
+
+    # Which payload fields graduate into which phrase corpus, per type.
+    # Scene types must match dataset_sampler's readers (hook/body/cta/verse…).
+    _GRADUATION_MAP: dict[str, dict[str, str]] = {
+        "scripts": {"hook": "hook", "body": "body", "cta": "cta"},
+        "social":  {"caption": "hook"},
+        "daw":     {"hook": "hook", "lyrics": "verse"},
+    }
+
+    def _graduate_phrases(self, storage: Any, content_type: str,
+                          payload: dict[str, Any]) -> None:
+        def _push(scene_type: str, text: Any) -> None:
+            if not isinstance(text, str):
+                return
+            phrase = text.strip()
+            if len(phrase) < 8 or len(phrase) > 280:
+                return
+            key = f"phrases:{scene_type}"
+            existing = storage.lrange(key, 0, -1) or []
+            if phrase not in existing:
+                storage.lpush(key, phrase)
+                storage.ltrim(key, 0, 255)
+
+        if content_type == "video":
+            # Scene packs: each scene's text graduates into its own corpus.
+            for scene in (payload.get("scenes") or []):
+                if isinstance(scene, dict):
+                    _push(str(scene.get("type") or "body"),
+                          scene.get("text") or scene.get("narration"))
+            return
+
+        field_map = self._GRADUATION_MAP.get(content_type)
+        if not field_map:
+            return  # images/distribution graduate through their own paths
+        for field, scene_type in field_map.items():
+            value = payload.get(field)
+            if isinstance(value, list):
+                for v in value[:5]:
+                    _push(scene_type, v)
+            else:
+                _push(scene_type, value)
+        # Social payloads often nest variants: [{platform, caption, ...}]
+        if content_type == "social":
+            for variant in (payload.get("variants") or [])[:8]:
+                if isinstance(variant, dict):
+                    _push("hook", variant.get("caption"))
+
     def _update_manifest(
         self,
         storage: Any,
