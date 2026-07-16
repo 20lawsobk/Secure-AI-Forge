@@ -32,3 +32,8 @@ long-timeout undici Agent pool, HIGH(10) passed 10/10 at ~340–357s.
   further rather than just lifting timeouts.
 - Other routes still using bare `fetch` for upstream model calls have the same
   latent 300s-abort bug; convert them the same way if they show 500s under load.
+
+## Progressive endpoint timeouts (Python side)
+- server.py has a progressive-timeout middleware: per-path budget classes (fast 10s / sync-gen 40s / heavy-submit 150s, default 40s), soft warn at 50%, hard structured 504 at 100%. Binary /api/video-job download+preview routes exempt.
+- ALL budgets for non-stream routes must stay <45s (Node proxy AbortController) or callers see opaque proxy aborts instead of the structured 504.
+- task.cancel() on call_next is safe but does not preempt threadpool work — job-level _RENDER_DEADLINE still owns in-render cancellation.

@@ -248,6 +248,94 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ─── Progressive request timeouts ────────────────────────────────────────────
+# Every endpoint gets a latency-class budget with escalating stages:
+#   stage 1 (soft, 50% of budget): slow-request warning logged, request continues
+#   stage 2 (hard, 100% of budget): 504 returned with structured detail
+# Binary download routes are exempt (large files stream at client pace).
+# Job-submit endpoints respond fast; the in-render work is governed by the
+# job-level _RENDER_DEADLINE backstop, not by this middleware.
+#
+# NOTE: the Node.js proxy (model-proxy.ts) aborts non-streaming requests at
+# 45s — sync-generation budgets stay below that so callers get a structured
+# 504 from Python rather than an opaque proxy abort.
+
+_TIMEOUT_EXEMPT_SUFFIXES = ("/download", "/file", "/video", "/preview")
+
+_TIMEOUT_CLASSES: list = [
+    # (path prefixes, budget seconds) — first match wins; order matters
+    (("/health", "/api/health", "/model/status", "/gpu/", "/dashboard/stats",
+      "/api/concurrency", "/api/video-job", "/api/audio-job", "/api/video-jobs",
+      "/api-keys", "/storage/status", "/storage/pipeline/status",
+      "/storage/datasets/audio/status", "/training/status",
+      "/training/continuous/status", "/training/puller/status",
+      "/api/awareness/quality/status"), 10.0),
+    (("/generate/audio", "/api/generate/audio", "/platform/video/generate",
+      "/api/generate-video", "/api/video/", "/platform/model/reload",
+      "/training/", "/storage/"), 150.0),
+    (("/content/generate", "/api/generate/", "/platform/", "/generate/",
+      "/api/url-parser", "/api/analyze", "/api/safety",
+      "/api/awareness/"), 40.0),
+]
+# Default stays below the Node proxy's 45s non-stream abort so unclassified
+# routes still return a structured 504 instead of an opaque proxy abort.
+_TIMEOUT_DEFAULT_BUDGET = 40.0
+
+
+def _timeout_budget_for(path: str) -> float:
+    for prefixes, budget in _TIMEOUT_CLASSES:
+        if path.startswith(prefixes):
+            return budget
+    return _TIMEOUT_DEFAULT_BUDGET
+
+
+@app.middleware("http")
+async def progressive_timeout_middleware(request, call_next):
+    from fastapi.responses import JSONResponse  # local: avoid top-level churn
+
+    path = request.url.path
+    # Exempt binary/streaming routes (video files, scene previews).
+    if path.startswith("/api/video-job/") and (
+        "/preview/" in path or path.endswith(_TIMEOUT_EXEMPT_SUFFIXES)
+    ):
+        return await call_next(request)
+
+    budget = _timeout_budget_for(path)
+    soft = budget * 0.5
+    start = time.time()
+
+    task = asyncio.ensure_future(call_next(request))
+    done, _ = await asyncio.wait({task}, timeout=soft)
+    if not done:
+        print(f"[timeout] SLOW {request.method} {path}: exceeded soft deadline "
+              f"{soft:.0f}s (budget {budget:.0f}s) — still running", flush=True)
+        done, _ = await asyncio.wait({task}, timeout=budget - soft)
+
+    if done:
+        response = task.result()
+        response.headers["X-Timeout-Budget"] = f"{budget:.0f}"
+        return response
+
+    # Hard deadline: abort the ASGI cycle, return a structured 504.
+    elapsed = time.time() - start
+    task.cancel()
+    task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+    print(f"[timeout] HARD {request.method} {path}: aborted after {elapsed:.1f}s "
+          f"(budget {budget:.0f}s)", flush=True)
+    return JSONResponse(
+        status_code=504,
+        content={
+            "success": False,
+            "error": "timeout",
+            "stage": "hard",
+            "detail": f"Request exceeded its {budget:.0f}s budget",
+            "budget_seconds": budget,
+            "elapsed_seconds": round(elapsed, 1),
+            "path": path,
+        },
+    )
+
+
 # ─── Async helper: run blocking calls off the event loop ─────────────────────
 
 async def _in_thread(fn):
