@@ -346,12 +346,17 @@ def _seed_locked(
                     continue
                 bpm, key = _estimate_bpm_key(mp3)
                 idx = start_idx + stored
+                # Normalise genre labels to names at seed time — HF/FMA rows
+                # carry numeric genre IDs which the awareness layer's genre
+                # names can never match.  (The selector also normalises at
+                # read time, so previously-seeded chunks keep working.)
+                from ai_model.audio.track_selector import normalize_genres
                 genres = row.get("genres")
                 sample = {
                     "idx": idx,
                     "title": str(row.get("title") or f"track_{idx}"),
                     "artist": str(row.get("artist") or ""),
-                    "genres": genres if isinstance(genres, list) else [],
+                    "genres": normalize_genres(genres if isinstance(genres, list) else []),
                     "license": str(row.get("license") or ""),
                     "instrumental": bool(row.get("instrumental")),
                     "source": active_source,

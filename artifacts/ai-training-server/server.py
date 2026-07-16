@@ -6036,6 +6036,10 @@ class ApiGenerateAudioRequest(_AwarenessMixin):
     artistProfileId: Optional[str] = None
     intent: Optional[str] = None
     platformRules: Optional[Any] = None
+    # Explicit caller mood — leads over the awareness brief's mood when set
+    # (caller awareness leads the platform buffer).  Conditions dataset track
+    # selection via the mood→genre affinity map.
+    mood: Optional[str] = None
     # Freeform creative direction for THIS request (parity with content route).
     instruction: Optional[str] = None
     extra_context: Optional[str] = None
@@ -7728,7 +7732,9 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
     from ai_model.audio.track_selector import select_audio_sample as _select
     want_key = str(target_key or "").strip().lower()
     want_bpm = float(target_bpm or 0.0)
-    best, _key_matched = _select(index, want_key, want_bpm, _preferred_genres)
+    _preferred_mood = str(opts.get("preferred_mood") or "").strip()
+    best, _key_matched = _select(index, want_key, want_bpm,
+                                 _preferred_genres, _preferred_mood)
     best_idx = int(best.get("idx", 0))
     src_bpm = float(best.get("bpm") or 0.0)
     src_key = best.get("key")
@@ -7766,17 +7772,27 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
     import concurrent.futures as _cfs
     print(f"[audio_render] fetching chunk idx={best_idx} for job={job_id[:8]}",
           flush=True)
+    # NOTE: no `with` block — ThreadPoolExecutor.__exit__ calls
+    # shutdown(wait=True), which would block on the hung worker and defeat
+    # the deadline.  shutdown(wait=False) lets the daemon-ish worker linger
+    # while the render thread proceeds to raise immediately.
+    _chunk_pool = _cfs.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix=f"AudioChunkFetch-{job_id[:8]}"
+    )
+    _chunk_fut = _chunk_pool.submit(
+        storage.get, f"mb:dataset:audio:chunk:{best_idx}"
+    )
     try:
-        with _cfs.ThreadPoolExecutor(max_workers=1) as _chunk_pool:
-            _chunk_fut = _chunk_pool.submit(
-                storage.get, f"mb:dataset:audio:chunk:{best_idx}"
-            )
-            sample = _chunk_fut.result(timeout=30)
+        sample = _chunk_fut.result(timeout=30)
     except _cfs.TimeoutError:
+        _chunk_fut.cancel()
+        _chunk_pool.shutdown(wait=False)
         raise RuntimeError(
             f"storage read of audio chunk {best_idx} timed out after 30 s "
             f"(server likely under memory pressure — job={job_id[:8]})"
         )
+    else:
+        _chunk_pool.shutdown(wait=False)
     if not sample or not sample.get("b64"):
         raise RuntimeError(
             f"real audio sample {best_idx} missing data in storage"
@@ -8107,7 +8123,13 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
                + _aw_genres_handler
         )
     ))
-    _preferred_mood_handler = (brief.mood or "").strip()
+    # Mood precedence: explicit caller mood → awareness brief mood → first
+    # trending mood from the live awareness buffer.  Caller leads.
+    _preferred_mood_handler = (
+        (getattr(req, "mood", None) or "").strip()
+        or (brief.mood or "").strip()
+        or (_aw_moods_handler[0].strip() if _aw_moods_handler else "")
+    )
     if _preferred_genres_handler or _preferred_mood_handler:
         print(
             f"[audio_awareness] job={job_id[:8]} "
@@ -8168,10 +8190,23 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         # 120 s gives the full pipeline (chunk fetch 30 s + ffmpeg decode +
         # rubberband + loop + master) comfortable headroom.
         _RENDER_DEADLINE = 120
-        _render_resolved = threading.Event()
+        # Terminal-state guard: exactly ONE writer (render thread or deadline
+        # timer) may set the job's terminal status.  Without this, a timer
+        # firing at ~120 s could be overwritten by a late "done" (or vice
+        # versa), making deadline semantics nondeterministic.
+        _terminal_lock = threading.Lock()
+        _terminal_claimed = [False]
+
+        def _claim_terminal() -> bool:
+            """Atomically claim the right to write the terminal status."""
+            with _terminal_lock:
+                if _terminal_claimed[0]:
+                    return False
+                _terminal_claimed[0] = True
+                return True
 
         def _deadline_handler() -> None:
-            if not _render_resolved.is_set():
+            if _claim_terminal():
                 print(
                     f"[audio_render] DEADLINE exceeded ({_RENDER_DEADLINE}s) "
                     f"for job={job_id[:8]} — marking error",
@@ -8278,8 +8313,9 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
             render = _render_audio_from_dataset(job_id, target_bpm, target_key,
                                                 duration_sec, opts)
         except Exception as exc:  # explicit failure — never claim a missing file
-            _render_resolved.set()
             _deadline_timer.cancel()
+            if not _claim_terminal():
+                return  # deadline timer already marked the job as error
             _job_update(job_id, {
                 "status": "error",
                 "url":    None,
@@ -8288,8 +8324,9 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
                 "error":  f"audio render failed: {exc}",
             })
             return
-        _render_resolved.set()
         _deadline_timer.cancel()
+        if not _claim_terminal():
+            return  # deadline timer already marked the job as error
         _job_update(job_id, {
             "status":           "done",
             "url":              render["url"],

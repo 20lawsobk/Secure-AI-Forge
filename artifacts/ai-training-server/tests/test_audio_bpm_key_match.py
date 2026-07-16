@@ -400,3 +400,83 @@ if __name__ == "__main__":
         e2e_ok = _run_e2e()
 
     sys.exit(0 if (unit_ok and e2e_ok) else 1)
+
+
+# ── Awareness ↔ dataset sync: numeric FMA genre IDs + mood affinity ──────────
+
+class TestGenreNormalization:
+    def test_numeric_fma_ids_map_to_names(self):
+        from ai_model.audio.track_selector import normalize_genres
+        assert normalize_genres([15, 21]) == ["electronic", "hip hop"]
+
+    def test_numeric_strings_map_to_names(self):
+        from ai_model.audio.track_selector import normalize_genres
+        assert normalize_genres(["91"]) == ["shoegaze"]
+
+    def test_unknown_ids_kept_as_strings(self):
+        from ai_model.audio.track_selector import normalize_genres
+        assert normalize_genres([999999]) == ["999999"]
+
+    def test_names_lowercased_and_dehyphenated(self):
+        from ai_model.audio.track_selector import normalize_genres
+        assert normalize_genres(["Hip-Hop", "Drum_and_Bass"]) == [
+            "hip hop", "drum and bass"]
+
+    def test_awareness_genre_matches_fma_id_track(self):
+        from ai_model.audio.track_selector import select_audio_sample
+        index = [
+            {"idx": 0, "bpm": 120, "key": "c major", "genres": [91]},   # shoegaze
+            {"idx": 1, "bpm": 120, "key": "c major", "genres": [15]},   # electronic
+        ]
+        best, matched = select_audio_sample(index, "c major", 120, ["electronic"])
+        assert matched and best["idx"] == 1
+
+class TestMoodAffinity:
+    def test_mood_breaks_tie_toward_affinity(self):
+        from ai_model.audio.track_selector import select_audio_sample
+        index = [
+            {"idx": 0, "bpm": 120, "key": "c major", "genres": ["folk"]},
+            {"idx": 1, "bpm": 120, "key": "c major", "genres": ["techno"]},
+        ]
+        best, _ = select_audio_sample(index, "c major", 120, [], "energetic")
+        assert best["idx"] == 1
+
+    def test_genre_intent_outranks_mood(self):
+        from ai_model.audio.track_selector import select_audio_sample
+        index = [
+            {"idx": 0, "bpm": 120, "key": "c major", "genres": ["folk"]},
+            {"idx": 1, "bpm": 120, "key": "c major", "genres": ["techno"]},
+        ]
+        best, _ = select_audio_sample(index, "c major", 120, ["folk"], "energetic")
+        assert best["idx"] == 0
+
+    def test_unknown_mood_is_noop(self):
+        from ai_model.audio.track_selector import select_audio_sample
+        index = [
+            {"idx": 0, "bpm": 118, "key": "c major", "genres": ["folk"]},
+            {"idx": 1, "bpm": 125, "key": "c major", "genres": ["techno"]},
+        ]
+        best, _ = select_audio_sample(index, "c major", 120, [], "zorbly")
+        assert best["idx"] == 0  # nearest BPM wins
+
+    def test_mood_with_numeric_fma_genres(self):
+        from ai_model.audio.track_selector import select_audio_sample
+        index = [
+            {"idx": 0, "bpm": 120, "key": "c major", "genres": [17]},  # folk
+            {"idx": 1, "bpm": 120, "key": "c major", "genres": [81]},  # techno
+        ]
+        best, _ = select_audio_sample(index, "c major", 120, [], "energetic")
+        assert best["idx"] == 1
+
+class TestNormalizeGenresMalformed:
+    def test_scalar_string_not_iterated_charwise(self):
+        from ai_model.audio.track_selector import normalize_genres
+        assert normalize_genres("Hip-Hop") == ["hip hop"]
+
+    def test_scalar_int(self):
+        from ai_model.audio.track_selector import normalize_genres
+        assert normalize_genres(91) == ["shoegaze"]
+
+    def test_none(self):
+        from ai_model.audio.track_selector import normalize_genres
+        assert normalize_genres(None) == []
