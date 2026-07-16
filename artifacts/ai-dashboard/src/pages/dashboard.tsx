@@ -18,6 +18,7 @@ import {
   AlertTriangle,
   Clock,
   RefreshCw,
+  Music,
 } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
@@ -73,12 +74,27 @@ export default function Dashboard() {
     retry: false,
   });
 
+  const { data: audioStatus, refetch: refetchAudio } = useQuery({
+    queryKey: ["audio-dataset-status", adminKey],
+    queryFn: async () => {
+      const res = await fetch(`${BASE}/storage/datasets/audio/status`, {
+        headers: authHdr,
+      });
+      if (!res.ok) throw new Error("failed");
+      return res.json();
+    },
+    enabled: !!adminKey,
+    refetchInterval: 30_000,
+    retry: false,
+  });
+
   const handleRefreshAll = () => {
     refetchStats();
     refetchHealth();
     if (adminKey) {
       refetchStorage();
       refetchWatchdog();
+      refetchAudio();
     }
   };
 
@@ -403,6 +419,143 @@ export default function Dashboard() {
             )}
           </div>
         </div>
+      </div>
+
+      {/* Audio Library */}
+      <div className="glass-panel p-6 rounded-2xl">
+        <div className="flex items-center gap-3 mb-6">
+          <div className="p-2 bg-primary/10 rounded-lg">
+            <Music className="w-5 h-5 text-primary" />
+          </div>
+          <h3 className="text-lg font-display font-semibold text-white">
+            Audio Library
+          </h3>
+          {audioStatus?.seeding_now && (
+            <Badge
+              variant="outline"
+              className="ml-auto border-amber-500/50 text-amber-400 animate-pulse"
+            >
+              Seeding…
+            </Badge>
+          )}
+          {!audioStatus?.seeding_now && audioStatus && (
+            <Badge
+              variant="outline"
+              className={
+                (audioStatus.dataset?.num_chunks ?? 0) >=
+                (audioStatus.auto_growth?.threshold ?? 20)
+                  ? "ml-auto border-green-500/40 text-green-400"
+                  : "ml-auto border-amber-500/40 text-amber-400"
+              }
+            >
+              {(audioStatus.dataset?.num_chunks ?? 0) >=
+              (audioStatus.auto_growth?.threshold ?? 20)
+                ? "Healthy"
+                : "Growing"}
+            </Badge>
+          )}
+        </div>
+
+        {audioStatus ? (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            {/* Track count with progress bar */}
+            <div className="col-span-2 sm:col-span-1 p-4 bg-black/20 rounded-xl border border-white/5 flex flex-col gap-2">
+              <span className="text-xs text-muted-foreground">Tracks stored</span>
+              <span className="text-3xl font-display font-bold text-white">
+                {audioStatus.dataset?.num_chunks ?? 0}
+              </span>
+              {audioStatus.auto_growth?.threshold != null && (
+                <>
+                  <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden">
+                    <div
+                      className={`h-full rounded-full transition-all ${
+                        (audioStatus.dataset?.num_chunks ?? 0) >=
+                        audioStatus.auto_growth.threshold
+                          ? "bg-green-500"
+                          : "bg-amber-500"
+                      }`}
+                      style={{
+                        width: `${Math.min(
+                          100,
+                          ((audioStatus.dataset?.num_chunks ?? 0) /
+                            audioStatus.auto_growth.threshold) *
+                            100
+                        )}%`,
+                      }}
+                    />
+                  </div>
+                  <span className="text-xs text-muted-foreground">
+                    threshold: {audioStatus.auto_growth.threshold}
+                  </span>
+                </>
+              )}
+            </div>
+
+            {/* Last seeded */}
+            <div className="p-4 bg-black/20 rounded-xl border border-white/5 flex flex-col gap-1">
+              <span className="text-xs text-muted-foreground">Last seeded</span>
+              <span className="text-sm font-mono text-white">
+                {audioStatus.dataset?.seeded_at
+                  ? new Date(
+                      audioStatus.dataset.seeded_at * 1000
+                    ).toLocaleString(undefined, {
+                      month: "short",
+                      day: "numeric",
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })
+                  : "—"}
+              </span>
+            </div>
+
+            {/* Auto-seed count */}
+            <div className="p-4 bg-black/20 rounded-xl border border-white/5 flex flex-col gap-1">
+              <span className="text-xs text-muted-foreground">Auto-seeds run</span>
+              <span className="text-sm font-mono text-white">
+                {audioStatus.auto_growth?.auto_seed_count ?? "—"}
+              </span>
+              {audioStatus.auto_growth?.last_auto_seed_at && (
+                <span className="text-xs text-muted-foreground">
+                  last:{" "}
+                  {new Date(
+                    audioStatus.auto_growth.last_auto_seed_at * 1000
+                  ).toLocaleString(undefined, {
+                    month: "short",
+                    day: "numeric",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
+                </span>
+              )}
+            </div>
+
+            {/* Source + interval */}
+            <div className="p-4 bg-black/20 rounded-xl border border-white/5 flex flex-col gap-1">
+              <span className="text-xs text-muted-foreground">Source</span>
+              <span className="text-xs font-mono text-white truncate">
+                {audioStatus.dataset?.source
+                  ? audioStatus.dataset.source.replace("huggingface:", "HF — ").replace("librosa:", "librosa — ")
+                  : "—"}
+              </span>
+              {audioStatus.auto_growth?.interval_hours != null && (
+                <span className="text-xs text-muted-foreground mt-1">
+                  checks every {audioStatus.auto_growth.interval_hours}h
+                </span>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center justify-center h-[96px] bg-black/20 rounded-xl border border-white/5 border-dashed">
+            <button
+              onClick={() =>
+                window.dispatchEvent(new Event("openAuthDialog"))
+              }
+              className="text-xs text-primary hover:text-primary/80 transition-colors underline underline-offset-2 cursor-pointer"
+            >
+              Enter admin key to view audio library status
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

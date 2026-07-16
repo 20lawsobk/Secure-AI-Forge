@@ -1315,6 +1315,13 @@ def _init_storage():
         )
         _watchdog = get_watchdog()
 
+    # ── Auto-start DataPuller so audio auto-growth fires without manual intervention
+    _data_puller.start(interval_minutes=30)
+    print("[Storage] DataPuller auto-started (30-min pull cycle, audio auto-growth enabled)")
+
+    # ── Immediate audio check: seed if below threshold without waiting 30 min
+    _data_puller.check_audio_now()
+
     # Inject references the watchdog needs to monitor everything
     _watchdog.storage           = storage
     _watchdog.training_state    = _training_state

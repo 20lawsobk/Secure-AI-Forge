@@ -11,6 +11,7 @@ and pushes a deduplicated snapshot back to pdim for cross-session continuity.
 
 import json
 import logging
+import os
 import time
 import threading
 import hashlib
@@ -116,8 +117,12 @@ class DataPuller:
     # triggers a top-up seed (replace=False) up to AUDIO_GROWTH_BATCH tracks.
     # Auto-seeds are rate-limited to AUDIO_GROWTH_INTERVAL_HOURS between runs
     # so that a slow-starting storage backend doesn't cause a flood of seeds.
-    AUDIO_GROWTH_THRESHOLD    = 20    # grow if dataset has fewer than this many chunks
-    AUDIO_GROWTH_BATCH        = 6     # tracks to add per auto-seed run
+    #
+    # Configurable via env vars (no code changes needed):
+    #   AUDIO_SEED_THRESHOLD — grow when dataset has fewer than this many chunks (default 20)
+    #   AUDIO_SEED_TARGET    — tracks to add per auto-seed run (default 6)
+    AUDIO_GROWTH_THRESHOLD    = int(os.environ.get("AUDIO_SEED_THRESHOLD", "20"))
+    AUDIO_GROWTH_BATCH        = int(os.environ.get("AUDIO_SEED_TARGET", "6"))
     AUDIO_GROWTH_INTERVAL_SEC = 6 * 3600  # minimum 6 hours between auto-seeds
 
     def __init__(self, storage):
@@ -173,6 +178,21 @@ class DataPuller:
     def pull_now(self) -> dict:
         """Trigger a synchronous pull (runs in caller's thread)."""
         return self._do_pull()
+
+    def check_audio_now(self) -> None:
+        """Run an immediate audio-growth check in a background daemon thread.
+
+        Called at server startup so generation is never dry on the first
+        request — there is no need to wait for the first 30-min pull cycle.
+        The check is non-blocking and never-raise.
+        """
+        def _run():
+            try:
+                self._auto_seed_audio()
+            except Exception as exc:
+                logger.warning("[DataPuller] startup audio check failed (non-fatal): %s", exc)
+
+        threading.Thread(target=_run, daemon=True, name="DataPuller-audio-startup").start()
 
     def get_state(self) -> dict:
         with self._lock:
