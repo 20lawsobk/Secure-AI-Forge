@@ -62,3 +62,6 @@ false "done", WAV cleaned up via `try/finally`). It is transient: the same durat
 
 ## CPU-contention starvation of short encodes (July 2026)
 Short audio ffmpeg encodes (<1s warm) hit their timeout in prod when a concurrent video render saturated CPU (a 4s video encode stretched to 38s). Fix: `run_ffmpeg(niceness=10)` prefixes the ABSOLUTE `nice` binary (never preexec_fn — that forces fork() and reintroduces EIO); video scene/fallback/composite encodes run at nice+10 (timeouts 90/90/180s), scene render threads self-deprioritize via os.setpriority on native tid (never-raise), audio encode timeout 45→120s as headroom. Verified: audio render done in 7s while video render in flight. Prefix must be applied AFTER FFMPEG_BIN substitution so cmd[0] stays absolute for posix_spawn.
+
+## CPU-starvation timeouts (prod, 2-CPU VM)
+- Under concurrent model inference, even a trivial ffmpeg decode can blow a 60s budget — surfaces as `TimeoutExpired: Command '[...ffmpeg... audio_src_*...]' timed out`, not a crash. run_ffmpeg now retries TimeoutExpired with a DOUBLED budget per attempt (60→120→240). Don't "fix" by only raising the base timeout; the escalating retry is what absorbs load spikes.

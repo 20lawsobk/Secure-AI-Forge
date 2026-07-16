@@ -67,6 +67,11 @@ def run_ffmpeg(
     last_exc: BaseException | None = None
     for attempt in range(retries + 1):
         err_path = None
+        # CPU starvation on the 2-CPU prod VM (model inference + concurrent
+        # generations) can make even a trivial decode blow its budget.  Each
+        # retry doubles the timeout so a starved-but-healthy ffmpeg gets room
+        # to finish instead of failing the whole render.
+        attempt_timeout = timeout * (2 ** attempt)
         try:
             fd, err_path = tempfile.mkstemp(suffix=".ffmpeg.err")
             with os.fdopen(fd, "w+") as err_file:
@@ -76,11 +81,20 @@ def run_ffmpeg(
                     stdout=subprocess.DEVNULL,
                     stderr=err_file,
                     close_fds=False,
-                    timeout=timeout,
+                    timeout=attempt_timeout,
                 )
                 err_file.seek(0)
                 stderr_text = err_file.read()
             return FfmpegResult(returncode=proc.returncode, stderr=stderr_text)
+        except subprocess.TimeoutExpired as exc:
+            last_exc = exc
+            print(
+                f"[VideoRender][WARN] ffmpeg timed out after {attempt_timeout}s "
+                f"(attempt {attempt + 1}/{retries + 1}) — likely CPU starvation; "
+                f"retrying with doubled budget",
+                file=sys.stderr,
+            )
+            time.sleep(0.5 * (attempt + 1))
         except OSError as exc:
             last_exc = exc
             if exc.errno not in _RETRYABLE_ERRNOS:
