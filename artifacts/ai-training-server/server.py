@@ -7757,11 +7757,35 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
         flush=True,
     )
 
-    sample = storage.get(f"mb:dataset:audio:chunk:{best_idx}")
+    # Fetch the chunk with a hard wall-clock deadline.
+    # urllib3's read= timeout is *per-socket-chunk* (not total response time),
+    # so a large b64 audio payload arriving byte-by-byte under memory pressure
+    # can block the thread for minutes even with an 8 s socket timeout.  A
+    # concurrent.futures deadline enforces an absolute ceiling regardless of
+    # how the storage client is configured.
+    import concurrent.futures as _cfs
+    print(f"[audio_render] fetching chunk idx={best_idx} for job={job_id[:8]}",
+          flush=True)
+    try:
+        with _cfs.ThreadPoolExecutor(max_workers=1) as _chunk_pool:
+            _chunk_fut = _chunk_pool.submit(
+                storage.get, f"mb:dataset:audio:chunk:{best_idx}"
+            )
+            sample = _chunk_fut.result(timeout=30)
+    except _cfs.TimeoutError:
+        raise RuntimeError(
+            f"storage read of audio chunk {best_idx} timed out after 30 s "
+            f"(server likely under memory pressure — job={job_id[:8]})"
+        )
     if not sample or not sample.get("b64"):
         raise RuntimeError(
             f"real audio sample {best_idx} missing data in storage"
         )
+    print(
+        f"[audio_render] chunk fetched ({len(sample.get('b64', '')) // 1024} KB b64)"
+        f" for job={job_id[:8]}",
+        flush=True,
+    )
 
     raw = _b64.b64decode(sample["b64"])
     src_path = _UPLOADS_PATH / f"audio_src_{job_id}.mp3"
@@ -8136,6 +8160,39 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         import time as _t
         import numpy as _np2
         _t.sleep(2)
+
+        # ── Job-level render deadline ──────────────────────────────────────
+        # If _render_audio_from_dataset hangs (e.g. slow storage chunk read
+        # under memory pressure, or a frozen ffmpeg posix_spawn), the job
+        # must still resolve rather than staying "pending" forever.
+        # 120 s gives the full pipeline (chunk fetch 30 s + ffmpeg decode +
+        # rubberband + loop + master) comfortable headroom.
+        _RENDER_DEADLINE = 120
+        _render_resolved = threading.Event()
+
+        def _deadline_handler() -> None:
+            if not _render_resolved.is_set():
+                print(
+                    f"[audio_render] DEADLINE exceeded ({_RENDER_DEADLINE}s) "
+                    f"for job={job_id[:8]} — marking error",
+                    flush=True,
+                )
+                try:
+                    _job_update(job_id, {
+                        "status": "error",
+                        "error": (
+                            f"audio render timed out after {_RENDER_DEADLINE}s "
+                            "— server is likely under memory pressure; "
+                            "try again shortly"
+                        ),
+                    })
+                except Exception:
+                    pass  # never raise from timer thread
+
+        _deadline_timer = threading.Timer(_RENDER_DEADLINE, _deadline_handler)
+        _deadline_timer.daemon = True
+        _deadline_timer.start()
+
         fp  = req.style_fingerprint
         # Reproducibility: an explicit seed makes BPM/key derivation (and thus
         # the whole render) deterministic, fixing the classic "great result I
@@ -8221,6 +8278,8 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
             render = _render_audio_from_dataset(job_id, target_bpm, target_key,
                                                 duration_sec, opts)
         except Exception as exc:  # explicit failure — never claim a missing file
+            _render_resolved.set()
+            _deadline_timer.cancel()
             _job_update(job_id, {
                 "status": "error",
                 "url":    None,
@@ -8229,6 +8288,8 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
                 "error":  f"audio render failed: {exc}",
             })
             return
+        _render_resolved.set()
+        _deadline_timer.cancel()
         _job_update(job_id, {
             "status":           "done",
             "url":              render["url"],
