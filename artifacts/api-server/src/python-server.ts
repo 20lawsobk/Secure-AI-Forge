@@ -3,6 +3,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import net from "net";
 import { Agent, request as undiciRequest } from "undici";
+import { setPythonRestarting } from "./server-state.js";
 
 const PYTHON_PORT = parseInt(process.env.MODEL_API_PORT || "9878", 10);
 
@@ -105,6 +106,45 @@ async function pollUntilOpen(port: number, maxMs = 6_000): Promise<boolean> {
   return false;
 }
 
+// ─── HTTP hang probe ─────────────────────────────────────────────────────────
+// Distinguishes three states:
+//   'down'    — TCP port not open (Python crashed or not yet started)
+//   'hung'    — TCP port open but HTTP /health does not respond within 10 s
+//               (deadlock, OOM-frozen process, etc.)
+//   'healthy' — HTTP /health returned a non-5xx status
+//
+// This is the ONE intentional use of AbortController in the codebase: detecting
+// a genuinely hung OS process requires a real time-bound probe — there is no
+// other observable signal when a process holds its port but stops processing.
+
+async function probeHttpHealth(): Promise<"healthy" | "hung" | "down"> {
+  const portOpen = await isPortOpen(PYTHON_PORT, 2_000);
+  if (!portOpen) return "down";
+
+  // Port is bound — check if the HTTP layer is alive
+  const controller = new AbortController();
+  const hangTimer = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const { statusCode, body } = await undiciRequest(
+      `http://localhost:${PYTHON_PORT}/health`,
+      {
+        method: "GET",
+        dispatcher: _warmPool,
+        signal: controller.signal,
+        headersTimeout: 0,
+        bodyTimeout: 0,
+      },
+    );
+    await body.dump();
+    clearTimeout(hangTimer);
+    return statusCode < 500 ? "healthy" : "hung";
+  } catch {
+    clearTimeout(hangTimer);
+    // ECONNREFUSED when port was just measured open = race; AbortError = true hang
+    return "hung";
+  }
+}
+
 // ─── Post-startup warm-up pass ────────────────────────────────────────────────
 // After Python confirms model_loaded=true, POST /api/warm to exercise the
 // Digital GPU inference chains (transformer → flash-attn → pocket GEMM) before
@@ -166,12 +206,17 @@ async function fireWarmPass(): Promise<void> {
         }
       } catch { /* ignore parse errors */ }
       console.log(`[Python] Warm-up pass complete — ${summary || "ok"}`);
+      // Signal the proxy that Python is fully ready — held requests will drain
+      setPythonRestarting(false);
     } else {
       console.warn(`[Python] Warm-up pass returned ${statusCode}: ${raw.slice(0, 300)}`);
+      // Still mark ready so requests aren't held indefinitely; keepalive re-warms
+      setPythonRestarting(false);
     }
   } catch (err) {
     // Never fatal — keepalive will re-warm on next deep-warm cycle
     console.warn(`[Python] Warm-up pass failed (non-fatal): ${err}`);
+    setPythonRestarting(false);
   }
 }
 
@@ -220,15 +265,21 @@ function spawnPython() {
     const delay = backoffMs();
     console.log(`[Python] Server exited (code ${code ?? "?"}, signal ${signal ?? "none"}). Restart #${consecutiveCrashes} in ${delay}ms…`);
 
+    // Park incoming requests until the warm pass confirms Python is ready
+    setPythonRestarting(true);
+
     restartScheduled = true;
     setTimeout(() => {
       spawnPython();
-      // After each crash-restart, re-run the warm-up pass once Python is back
+      // After each crash-restart, re-run the warm-up pass once Python is back.
+      // fireWarmPass() calls setPythonRestarting(false) on completion (success or
+      // failure) so held requests are always eventually released.
       waitForModelReady(180_000).then((ready) => {
         if (ready) {
           fireWarmPass().catch(() => {});
         } else {
-          console.warn("[Python] Model did not report ready within 3 min after restart — skipping warm pass");
+          console.warn("[Python] Model did not report ready within 3 min after restart — releasing held requests anyway");
+          setPythonRestarting(false);
         }
       });
     }, delay);
@@ -236,16 +287,50 @@ function spawnPython() {
 }
 
 // ─── Health monitor ────────────────────────────────────────────────────────────
+// Polls every HEALTH_POLL_INTERVAL_MS.  Handles three states:
+//
+//   down    — Port closed and no tracked process: spawn a new one.
+//             (If our pythonProcess is still tracked, the exit event will fire
+//              and handle the restart — avoid double-spawn.)
+//
+//   hung    — Port open but HTTP /health doesn't respond in 10 s.
+//             We own the process → SIGKILL so the exit event fires and triggers
+//             the normal backoff-restart path.
+//             We don't own it → log only (can't force-kill an external process).
+//
+//   healthy — Nothing to do.
 
 function startHealthMonitor() {
   if (healthTimer) return;
   healthTimer = setInterval(async () => {
-    if (shuttingDown || pythonProcess || restartScheduled) return;
-    const up = await isPortOpen(PYTHON_PORT);
-    if (!up) {
+    if (shuttingDown || restartScheduled) return;
+
+    const status = await probeHttpHealth();
+
+    if (status === "down") {
+      if (pythonProcess) return;  // exit event in flight — don't double-spawn
       console.log("[Python] Health monitor: server is down — restarting...");
+      setPythonRestarting(true);
       spawnPython();
+      waitForModelReady(180_000).then((ready) => {
+        if (ready) fireWarmPass().catch(() => {});
+        else { console.warn("[Python] Model not ready after monitor-triggered restart"); setPythonRestarting(false); }
+      });
+      return;
     }
+
+    if (status === "hung") {
+      console.warn("[Python] Health monitor: server is HUNG (port open, HTTP unresponsive) — force-killing…");
+      setPythonRestarting(true);
+      if (pythonProcess) {
+        // SIGKILL bypasses the process's signal handlers so a deadlocked process
+        // is guaranteed to die.  The exit event fires → normal backoff restart.
+        pythonProcess.kill("SIGKILL");
+      } else {
+        console.warn("[Python] Hung process not owned by us — cannot force-kill; requests will be held until it recovers");
+      }
+    }
+    // 'healthy' — nothing to do
   }, HEALTH_POLL_INTERVAL_MS);
   healthTimer.unref();
 }
