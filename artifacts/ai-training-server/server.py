@@ -7954,11 +7954,35 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
     storage = get_storage()
     meta = storage.get("mb:dataset:audio:meta")
     if not meta or int(meta.get("num_chunks", 0)) <= 0:
-        raise RuntimeError(
-            "no real audio dataset available in storage (mb:dataset:audio); "
-            "seed it via POST /storage/datasets/audio/seed — refusing to "
-            "synthesize a fallback"
-        )
+        # Before failing hard, check if the dataset is actively being seeded
+        # (e.g. during the 30–90 s startup auto-seed window).  If so, wait up
+        # to 45 s for the first chunk to appear so the job can complete
+        # normally rather than returning an error that confuses the caller.
+        from workers.seed_audio_dataset import is_seeding as _is_seeding_render
+        if _is_seeding_render():
+            _wait_deadline = time.time() + 45
+            print(
+                f"[audio_render] dataset empty but seeding in progress — "
+                f"waiting up to 45 s for first chunk (job={job_id[:8]})",
+                flush=True,
+            )
+            while time.time() < _wait_deadline:
+                time.sleep(3)
+                meta = storage.get("mb:dataset:audio:meta")
+                if meta and int(meta.get("num_chunks", 0)) > 0:
+                    print(
+                        f"[audio_render] first chunk available after "
+                        f"{45 - max(0, _wait_deadline - time.time()):.0f}s "
+                        f"wait (job={job_id[:8]}) — proceeding",
+                        flush=True,
+                    )
+                    break
+        if not meta or int(meta.get("num_chunks", 0)) <= 0:
+            raise RuntimeError(
+                "no real audio dataset available in storage (mb:dataset:audio); "
+                "seed it via POST /storage/datasets/audio/seed — refusing to "
+                "synthesize a fallback"
+            )
 
     index = meta.get("index") or [
         {"idx": i} for i in range(int(meta["num_chunks"]))
@@ -8356,6 +8380,38 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
                 "duration": req.duration,
             }
 
+    # ── Early-exit: dataset empty while seeding is in progress ────────────────
+    # The startup auto-seed runs in a background thread and takes 30–90 s.
+    # If the dataset is still empty AND seeding is in progress, spawning a job
+    # that would immediately fail is unhelpful.  Return 503 + Retry-After so
+    # clients can display a "warming up" state and retry automatically.
+    # (If the dataset is empty and NOT seeding, fall through to normal job
+    # creation so the existing explicit error message is preserved for the
+    # truly-unseeded case.)
+    try:
+        from storage_client import get_storage as _gs_early
+        from workers.seed_audio_dataset import is_seeding as _is_seeding_early
+        _early_meta = _gs_early().get("mb:dataset:audio:meta")
+        _dataset_ready_early = _early_meta and int(_early_meta.get("num_chunks", 0)) > 0
+        if not _dataset_ready_early and _is_seeding_early():
+            from fastapi.responses import JSONResponse as _JR
+            return _JR(
+                status_code=503,
+                headers={"Retry-After": "30"},
+                content={
+                    "error":              "seeding_in_progress",
+                    "seeding_now":        True,
+                    "message": (
+                        "The audio library is still being built in the background "
+                        "(typically 30–90 s on first start). "
+                        "Please retry in about 30 seconds."
+                    ),
+                    "retry_after_seconds": 30,
+                },
+            )
+    except Exception:
+        pass  # storage probe failed — proceed to normal job creation
+
     job_id = str(uuid.uuid4())
     with _active_jobs_lock:
         _active_jobs[_adigest] = job_id
@@ -8367,6 +8423,7 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         "bpm":        None,
         "key":        None,
         "error":      None,
+        "seeding_now": False,
     })
 
     # ── Request intelligence: analyse intent & sonic strategy up front ─────
