@@ -5,7 +5,7 @@ Converts the live awareness context string + Visual DNA parameters into a
 fixed-size conditioning tensor that the Temporal DiT cross-attends over.
 
 Design:
-  - Keyword vocabulary of 64 music/content domain terms → one-hot presence vector
+  - Keyword vocabulary of music/content domain terms → weighted presence vector
   - Visual DNA float params (energy, darkness, warmth, saturation) appended
   - Linear projection to (N_TOKENS, D_MODEL) conditioning sequence
   - Same awareness → deterministically same conditioning (no randomness here)
@@ -13,6 +13,17 @@ Design:
 The N_TOKENS conditioning tokens are treated as "style memory" — the DiT
 cross-attends over them on every denoising step, so they continuously bias the
 generated frames toward the current industry moment.
+
+Vocab coverage (129 terms, no duplicates):
+  Platforms    — all major + emerging (Threads, Bluesky, Pinterest, Snapchat…)
+  Genres       — current landscape incl. amapiano, citypop, bedroom, rage,
+                 pluggnb, synthwave, grime, jersey, emo, shoegaze, funk…
+  Distribution — viral, fyp, shorts, reels, editorial, exclusive, debut…
+  Production   — 808, bass, hook, drop, beat, sample, bpm, mix, master…
+  Mood & Tone  — cinematic, soulful, nostalgic, aggressive, smooth, polished…
+  Visual       — neon, aesthetic, retro, vintage, futuristic, pastel, grunge…
+  Timing       — morning, night, peak, weekend, summer, winter, midnight…
+  Signal       — high, medium, low, urgent
 """
 from __future__ import annotations
 
@@ -25,18 +36,51 @@ N_TOKENS: int = 8
 D_MODEL: int = 256
 
 VOCAB: List[str] = [
+    # ── Platforms ──────────────────────────────────────────────────────────────
     "tiktok", "instagram", "youtube", "facebook", "twitter", "linkedin",
+    "threads", "bluesky", "pinterest", "snapchat", "discord", "twitch",
+    "soundcloud", "bereal", "spotify", "apple",
+
+    # ── Genres & Subgenres ─────────────────────────────────────────────────────
     "phonk", "trap", "drill", "afrobeats", "latin", "hyperpop", "rnb",
     "soul", "indie", "lofi", "jazz", "pop", "reggaeton", "tropical",
+    "amapiano", "citypop", "bedroom", "rage", "pluggnb", "synthwave",
+    "grime", "gospel", "dancehall", "country", "edm", "house", "techno",
+    "hiphop", "cumbia", "baile", "jersey", "emo", "shoegaze", "funk",
+
+    # ── Distribution & Discovery ───────────────────────────────────────────────
     "viral", "trending", "algorithm", "shorts", "reels", "playlist",
-    "editorial", "spotify", "apple", "growth", "engagement", "conversion",
+    "editorial", "growth", "engagement", "conversion", "fyp", "exclusive",
+    "debut", "premiere", "release", "challenge",
+
+    # ── Music Production ───────────────────────────────────────────────────────
+    "808", "bass", "hook", "drop", "build", "chorus", "verse",
+    "beat", "sample", "wave", "bop", "bridge", "tempo", "bpm",
+    "mix", "master", "prod", "collab", "feature", "duet", "freestyle",
+
+    # ── Mood & Tone ────────────────────────────────────────────────────────────
     "dark", "bright", "energetic", "calm", "melancholic", "euphoric",
     "hype", "cinematic", "moody", "warm", "cool", "gritty", "clean",
-    "808", "bass", "hook", "drop", "build", "chorus", "verse",
-    "collab", "feature", "duet", "challenge", "fyp", "freestyle", "release",
+    "soulful", "nostalgic", "raw", "polished", "aggressive", "smooth",
+
+    # ── Visual / Aesthetic ────────────────────────────────────────────────────
+    "neon", "aesthetic", "retro", "vintage", "minimal", "vibrant",
+    "futuristic", "pastel", "grunge",
+
+    # ── Timing & Context ─────────────────────────────────────────────────────
     "morning", "evening", "night", "peak", "weekend", "summer",
+    "winter", "midnight", "spring",
+
+    # ── Signal Strength ───────────────────────────────────────────────────────
     "high", "medium", "low", "urgent",
 ]
+
+# Sanity-check at import time: no duplicate terms allowed.
+_seen: set[str] = set()
+for _term in VOCAB:
+    assert _term not in _seen, f"Duplicate VOCAB entry: {_term!r}"
+    _seen.add(_term)
+del _seen, _term
 
 _VOCAB_IDX = {w: i for i, w in enumerate(VOCAB)}
 _VOCAB_SIZE = len(VOCAB)
@@ -45,7 +89,11 @@ _INPUT_SIZE = _VOCAB_SIZE + _DNA_SIZE
 
 
 def _presence_vector(awareness: str) -> torch.Tensor:
-    """Build a float32 one-hot presence vector over VOCAB from the awareness string."""
+    """Build a float32 weighted presence vector over VOCAB from the awareness string.
+
+    Base match  → 1.0
+    [HIGH] line → +0.5 (capped at 2.0), so HIGH-signal terms bias diffusion more
+    """
     vec = torch.zeros(_VOCAB_SIZE, dtype=torch.float32)
     text_lower = awareness.lower()
     for word, idx in _VOCAB_IDX.items():

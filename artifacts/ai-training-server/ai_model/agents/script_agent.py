@@ -88,7 +88,10 @@ def _parse_signals_for_platform(awareness: str, platform: str) -> List[str]:
     signals: List[str] = []
     plat_lower = platform.lower()
     other_platforms = [
-        p for p in ["tiktok", "instagram", "youtube", "facebook", "twitter", "linkedin", "threads"]
+        p for p in [
+            "tiktok", "instagram", "youtube", "facebook", "twitter", "linkedin",
+            "threads", "bluesky", "pinterest", "snapchat", "discord", "twitch",
+        ]
         if p != plat_lower
     ]
 
@@ -401,11 +404,19 @@ def _detect_genre_from_awareness(awareness: str, explicit_genre: str = "") -> st
         return explicit_genre.lower().strip()
     if not awareness:
         return ""
-    # Look for genre mentions in awareness
+    # Look for genre mentions in awareness — ordered longest-first so substrings
+    # don't shadow their parent genres (e.g. "bedroom pop" before "pop").
     genre_patterns = [
-        "drill", "afrobeats", "lofi", "lo-fi", "pop", "rnb", "r&b",
-        "hip-hop", "hip hop", "hiphop", "indie", "edm", "house", "techno",
-        "electronic", "trap", "dancehall", "soul", "jazz", "country",
+        # Longest / most-specific first so substrings don't shadow parent genres
+        "amapiano", "city pop", "citypop", "bedroom pop", "bedroom",
+        "pluggnb", "plug gnb", "synthwave", "hyperpop",
+        "jersey club", "baile funk", "afrobeats", "afro beats",
+        "drill", "dancehall", "reggaeton", "lo-fi", "lofi",
+        "gospel", "grime", "shoegaze",
+        "rnb", "r&b", "hip-hop", "hip hop", "hiphop",
+        "indie", "edm", "house", "techno", "electronic",
+        "trap", "soul", "jazz", "country",
+        "emo", "funk", "latin", "tropical", "pop",
     ]
     aw_lower = awareness.lower()
     for g in genre_patterns:
