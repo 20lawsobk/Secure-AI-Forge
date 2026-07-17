@@ -369,15 +369,20 @@ export async function ensurePythonServer(): Promise<void> {
   startHealthMonitor();
 
   // ── Production warm-up pass ───────────────────────────────────────────────
-  // Wait for model_loaded=true, then exercise the Digital GPU inference chains
-  // so the reserved VM is fully hot before the first real user request.
+  // Hold incoming user requests until the model is fully hot so the first real
+  // request never hits a cold KV-cache or uncompiled kernel path.
+  // setPythonRestarting(true) parks requests at the proxy hold-queue;
+  // fireWarmPass() clears it via setPythonRestarting(false) on completion
+  // (success or failure) so requests are never held indefinitely.
   // Runs in background — never blocks startKeepalive() or worker fork.
-  waitForModelReady(180_000).then((ready) => {
+  setPythonRestarting(true);
+  waitForModelReady(180_000).then((ready): Promise<void> | void => {
     if (ready) {
       return fireWarmPass();
     }
     console.warn("[Python] Model did not become ready within 3 min — warm pass skipped; keepalive will retry on next deep-warm cycle");
-  }).catch(() => {});
+    setPythonRestarting(false);
+  }).catch(() => { setPythonRestarting(false); });
 }
 
 export function stopPythonServer() {

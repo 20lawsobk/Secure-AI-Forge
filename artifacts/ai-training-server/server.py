@@ -272,7 +272,7 @@ _TIMEOUT_CLASSES: list = [
       "/api/awareness/quality/status"), 10.0),
     (("/generate/audio", "/api/generate/audio", "/platform/video/generate",
       "/api/generate-video", "/api/video/", "/platform/model/reload",
-      "/training/", "/storage/"), 150.0),
+      "/api/warm", "/training/", "/storage/"), 150.0),
     (("/content/generate", "/api/generate/", "/platform/", "/generate/",
       "/api/url-parser", "/api/analyze", "/api/safety",
       "/api/awareness/"), 40.0),

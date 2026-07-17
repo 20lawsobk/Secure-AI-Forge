@@ -3,6 +3,7 @@ import os from "os";
 import app from "./app";
 import { ensurePythonServer, stopPythonServer } from "./python-server";
 import { startKeepalive, stopKeepalive } from "./keepalive";
+import { startWarmService } from "./services/keepalive.js";
 
 // ─── Required secrets / env-var gate ─────────────────────────────────────────
 // Fail fast on startup rather than serving broken requests or exposing an
@@ -55,6 +56,11 @@ if (cluster.isPrimary) {
 
   // Keepalive: warm all endpoints on a 20s cycle so the AI server never idles
   startKeepalive();
+
+  // Warm-status observer: polls /api/warm/status until the deep-warm pass
+  // (fired by python-server.ts) reaches a terminal state; exposes the result
+  // via getWarmStatus() / waitUntilWarm() for the system-readiness endpoint.
+  startWarmService();
 
   for (let i = 0; i < NUM_WORKERS; i++) {
     cluster.fork();
