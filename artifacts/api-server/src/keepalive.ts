@@ -127,8 +127,8 @@ async function pingOne(path: string): Promise<boolean> {
       method: "GET",
       dispatcher: _pingPool,
       headers,
-      headersTimeout: 8_000,
-      bodyTimeout: 8_000,
+      headersTimeout: 0,
+      bodyTimeout: 0,
     });
     await body.dump();
     return statusCode < 500;
@@ -163,8 +163,8 @@ async function runDeepWarm(): Promise<void> {
         dispatcher: _pingPool,
         headers,
         body: "{}",
-        headersTimeout: 30_000,
-        bodyTimeout: 60_000,  // warm pass can take up to ~30 s after a cold restart
+        headersTimeout: 0,
+        bodyTimeout: 0,
       },
     );
     const raw = await body.text();

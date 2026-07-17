@@ -121,7 +121,7 @@ async function waitForModelReady(maxMs = 180_000): Promise<boolean> {
       const { statusCode, body } = await undiciRequest(
         `http://localhost:${PYTHON_PORT}/health`,
         { method: "GET", dispatcher: _warmPool, headers,
-          headersTimeout: 5_000, bodyTimeout: 5_000 },
+          headersTimeout: 0, bodyTimeout: 0 },
       );
       const raw = await body.text();
       if (statusCode === 200) {
@@ -149,8 +149,8 @@ async function fireWarmPass(): Promise<void> {
         dispatcher: _warmPool,
         headers,
         body: "{}",
-        headersTimeout: 30_000,
-        bodyTimeout: 90_000,  // warm pass: model load + 1 inference can take up to 60 s
+        headersTimeout: 0,
+        bodyTimeout: 0,
       },
     );
     const raw = await body.text();

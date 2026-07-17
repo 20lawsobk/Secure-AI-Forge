@@ -156,10 +156,7 @@ async function enrichWithAwareness(
   mode: ContentGenerationMode,
 ): Promise<void> {
   try {
-    const ctx = await Promise.race([
-      contentAwarenessService.getContextForMode(mode),
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), 3_000)),
-    ]);
+    const ctx = await contentAwarenessService.getContextForMode(mode);
     if (ctx && ctx.confidence > 0 && ctx.contextString) {
       req.body = {
         ...(req.body as Record<string, unknown>),
@@ -197,8 +194,8 @@ function handleProxyNetworkError(
   if (e.name === "AbortError" || e.code === "ABORT_ERR") {
     _cbRecordFailure();
     res.status(504).json({
-      error: "Upstream timeout",
-      detail: "AI training server did not respond within 45 s.",
+      error: "Upstream aborted",
+      detail: "AI training server connection was aborted.",
     });
   } else if (
     (e as NodeJS.ErrnoException).code === "ECONNREFUSED" ||
@@ -262,9 +259,6 @@ async function proxyRequest(
   try {
     const url = `${MODEL_API_BASE}${path}`;
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 45_000);
-
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
     };
@@ -278,20 +272,14 @@ async function proxyRequest(
       headers["X-Api-Key"] = _SERVER_FALLBACK_KEY;
     }
 
-    let upstreamRes: Awaited<ReturnType<typeof undiciRequest>>;
-    try {
-      upstreamRes = await undiciRequest(url, {
-        method: req.method as any,
-        signal: controller.signal,
-        dispatcher: _keepAlivePool,
-        headers,
-        body: !isGet && req.body ? JSON.stringify(req.body) : undefined,
-        headersTimeout: 0,
-        bodyTimeout: 300_000,
-      });
-    } finally {
-      clearTimeout(timeoutId);
-    }
+    const upstreamRes = await undiciRequest(url, {
+      method: req.method as any,
+      dispatcher: _keepAlivePool,
+      headers,
+      body: !isGet && req.body ? JSON.stringify(req.body) : undefined,
+      headersTimeout: 0,
+      bodyTimeout: 0,
+    });
 
     const data = await parseBodyText(upstreamRes.body);
 
@@ -341,8 +329,6 @@ async function proxyBinary(
 
   try {
     const url = `${MODEL_API_BASE}${path}`;
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 45_000);
 
     const headers: Record<string, string> = {};
     if (req.headers["x-admin-key"]) {
@@ -353,19 +339,13 @@ async function proxyBinary(
       headers["X-Api-Key"] = _SERVER_FALLBACK_KEY;
     }
 
-    let upstreamRes: Awaited<ReturnType<typeof undiciRequest>>;
-    try {
-      upstreamRes = await undiciRequest(url, {
-        method: req.method as any,
-        signal: controller.signal,
-        dispatcher: _keepAlivePool,
-        headers,
-        headersTimeout: 0,
-        bodyTimeout: 300_000,
-      });
-    } finally {
-      clearTimeout(timeoutId);
-    }
+    const upstreamRes = await undiciRequest(url, {
+      method: req.method as any,
+      dispatcher: _keepAlivePool,
+      headers,
+      headersTimeout: 0,
+      bodyTimeout: 0,
+    });
 
     if (upstreamRes.statusCode >= 500) {
       _cbRecordFailure();
@@ -421,15 +401,6 @@ async function proxyBinaryStream(
 
   try {
     const url = `${MODEL_API_BASE}${path}`;
-    const controller = new AbortController();
-    // Large video files can take a while to transfer; only abort on true
-    // inactivity (no bytes for 5 minutes), not on total transfer time.
-    let idleTimer: NodeJS.Timeout = setTimeout(() => {}, 0);
-    const bumpIdleTimer = () => {
-      clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => controller.abort(), 300_000);
-    };
-    bumpIdleTimer();
 
     const headers: Record<string, string> = {};
     if (req.headers["x-admin-key"]) {
@@ -440,20 +411,13 @@ async function proxyBinaryStream(
       headers["X-Api-Key"] = _SERVER_FALLBACK_KEY;
     }
 
-    let upstreamRes: Awaited<ReturnType<typeof undiciRequest>>;
-    try {
-      upstreamRes = await undiciRequest(url, {
-        method: req.method as any,
-        signal: controller.signal,
-        dispatcher: _keepAlivePool,
-        headers,
-        headersTimeout: 0,
-        bodyTimeout: 0,
-      });
-    } catch (err) {
-      clearTimeout(idleTimer);
-      throw err;
-    }
+    const upstreamRes = await undiciRequest(url, {
+      method: req.method as any,
+      dispatcher: _keepAlivePool,
+      headers,
+      headersTimeout: 0,
+      bodyTimeout: 0,
+    });
 
     if (upstreamRes.statusCode >= 500) {
       _cbRecordFailure();
@@ -462,7 +426,6 @@ async function proxyBinaryStream(
     }
 
     if (upstreamRes.statusCode !== 200) {
-      clearTimeout(idleTimer);
       const text = await upstreamRes.body.text();
       try {
         res.status(upstreamRes.statusCode).json(JSON.parse(text));
@@ -484,12 +447,10 @@ async function proxyBinaryStream(
     res.status(200);
 
     for await (const chunk of upstreamRes.body) {
-      bumpIdleTimer();
       if (!res.write(chunk)) {
         await new Promise((resolve) => res.once("drain", resolve));
       }
     }
-    clearTimeout(idleTimer);
     res.end();
   } catch (err) {
     handleProxyNetworkError(err, res, path);
@@ -976,11 +937,11 @@ router.get("/system/readiness", async (_req, res) => {
 
   try {
     const { Agent: UA, request: ur } = await import("undici") as typeof import("undici");
-    const pool = new UA({ keepAliveTimeout: 5_000, connections: 2 });
+    const pool = new UA({ connections: 2 });
 
     const [healthRes, warmRes] = await Promise.allSettled([
-      ur(`${PYTHON_BASE}/health`,          { method: "GET", dispatcher: pool, headers: makeHeaders(), headersTimeout: 5_000, bodyTimeout: 5_000 }),
-      ur(`${PYTHON_BASE}/api/warm/status`, { method: "GET", dispatcher: pool, headers: makeHeaders(), headersTimeout: 5_000, bodyTimeout: 5_000 }),
+      ur(`${PYTHON_BASE}/health`,          { method: "GET", dispatcher: pool, headers: makeHeaders(), headersTimeout: 0, bodyTimeout: 0 }),
+      ur(`${PYTHON_BASE}/api/warm/status`, { method: "GET", dispatcher: pool, headers: makeHeaders(), headersTimeout: 0, bodyTimeout: 0 }),
     ]);
 
     if (healthRes.status === "fulfilled" && healthRes.value.statusCode === 200) {

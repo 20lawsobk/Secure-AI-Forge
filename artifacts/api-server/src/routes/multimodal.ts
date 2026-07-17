@@ -27,8 +27,8 @@ const _modelPool = new Agent({
   keepAliveMaxTimeout: 60_000,
   connections: 32,
   pipelining: 1,
-  headersTimeout: 900_000,
-  bodyTimeout: 900_000,
+  headersTimeout: 0,
+  bodyTimeout: 0,
 });
 
 // ─── Types ────────────────────────────────────────────────────────────────────

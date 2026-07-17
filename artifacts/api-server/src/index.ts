@@ -86,18 +86,12 @@ if (cluster.isPrimary) {
     console.log(`[Cluster] Worker ${process.pid} listening on port ${port}`);
   });
 
-  // This server's job is proxying long-running model generations. Under
-  // concurrent multimodal load a single honest request can legitimately spend
-  // many minutes awaiting the upstream model, during which no bytes flow on the
-  // client socket. `server.timeout` (socket inactivity) MUST stay 0 or those
-  // valid in-flight generations get aborted mid-render — this is why Node
-  // defaults it to 0 for long-response servers. `requestTimeout` and
-  // `headersTimeout` stay bounded so a slow/stalled CLIENT request (slowloris)
-  // is still rejected; they govern receiving the request, not the response.
-  server.requestTimeout = 300_000;
+  // Self-contained environment — no external clients, no slowloris risk.
+  // All timeouts disabled so long-running model generations are never aborted.
+  server.requestTimeout = 0;
   server.timeout = 0;
-  server.headersTimeout = 65_000;
-  server.keepAliveTimeout = 60_000;
+  server.headersTimeout = 0;
+  server.keepAliveTimeout = 0;
 
   const shutdown = () => {
     server.close(() => process.exit(0));
