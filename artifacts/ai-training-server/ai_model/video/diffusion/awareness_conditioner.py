@@ -33,7 +33,7 @@ VOCAB: List[str] = [
     "dark", "bright", "energetic", "calm", "melancholic", "euphoric",
     "hype", "cinematic", "moody", "warm", "cool", "gritty", "clean",
     "808", "bass", "hook", "drop", "build", "chorus", "verse",
-    "collab", "feature", "duet", "challenge", "challenge", "fyp", "viral",
+    "collab", "feature", "duet", "challenge", "fyp", "freestyle", "release",
     "morning", "evening", "night", "peak", "weekend", "summer",
     "high", "medium", "low", "urgent",
 ]
