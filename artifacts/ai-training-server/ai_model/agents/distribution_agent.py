@@ -244,78 +244,29 @@ class DistributionAgent:
         self.model = model
 
     def run(self, req: DistributionRequest) -> DistributionResponse:
-        platform_token = f"<PLATFORM_{req.platform.upper()}>"
-        goal_token = f"<GOAL_{req.goal.upper()}>"
-
-        # Inject live awareness signals directly into the caption prompt so the
-        # model generates captions conditioned on what is actually trending.
-        awareness_line = ""
-        awareness = req.awareness or ""
-        if awareness:
-            high_signals = [
-                line.strip() for line in awareness.splitlines()
-                if re.match(r"\[(HIGH|MEDIUM)\]", line.strip())
-            ]
-            if high_signals:
-                snippet = "; ".join(
-                    s.split("]", 1)[-1].strip()[:60] for s in high_signals[:2]
-                )
-                awareness_line = f"Trending now: {snippet}\n"
-            else:
-                trending_tags = re.findall(r"#(\w+)", awareness)
-                if trending_tags:
-                    awareness_line = f"Trending: {', '.join(trending_tags[:4])}\n"
-
-        prompt = (
-            f"{platform_token} {goal_token} <STAGE_CTA>\n"
-            f"{awareness_line}"
-            f"Script: {req.script}\n"
-            f"Generate caption + hashtags + best posting time.\n"
-        )
-
-        caption: Optional[str] = None
-        try:
-            output = self.model.generate(prompt)
-            if self._is_meaningful(output):
-                # Also guard against garbled model output leaking into the caption.
-                # garble_reason is never-raise; import lazily to avoid circular deps.
-                try:
-                    from ai_model.request_intelligence import garble_reason as _gr
-                    _reason = _gr(output)
-                    if not _reason:
-                        caption = output
-                    else:
-                        import logging as _logging
-                        _logging.getLogger("distribution_agent").warning(
-                            "[garble-guard] model caption suppressed, using "
-                            "script fallback (reason=%s, platform=%s): %.120r",
-                            _reason, req.platform, output,
-                        )
-                except Exception:
-                    caption = output  # can't check — accept as-is
-        except Exception:
-            pass
-
+        # Awareness is always primary.  The script already carries live industry
+        # signals (it came from ScriptAgent._awareness_compose), so it IS the
+        # awareness-driven caption.  We use it directly rather than feeding it
+        # as a hint to model.generate() — which may ignore or dilute those
+        # signals.  Hashtags and posting time come from awareness parsers, which
+        # guarantee non-empty results whenever awareness is present.
         platform_key = req.platform.lower().replace(" ", "_")
-
-        if not caption:
-            # Append a platform CTA if the script doesn't already contain one —
-            # ensures the caption always carries a CTA keyword for scoring and
-            # engagement purposes.
-            script_lower = req.script.lower()
-            if any(kw in script_lower for kw in _CTA_KEYWORDS):
-                caption = req.script
-            else:
-                plat_cta = _FALLBACK_CTAS.get(platform_key, "Follow for more content!")
-                caption = f"{req.script}\n\n{plat_cta}"
         awareness = req.awareness or ""
 
+        # ── Caption: script is already awareness-composed ─────────────────────
+        # Append a platform CTA if the script doesn't already carry one.
+        script_lower = req.script.lower()
+        if any(kw in script_lower for kw in _CTA_KEYWORDS):
+            caption = req.script
+        else:
+            plat_cta = _FALLBACK_CTAS.get(platform_key, "Follow for more content!")
+            caption = f"{req.script}\n\n{plat_cta}"
+
+        # ── Hashtags & timing from awareness ─────────────────────────────────
         if awareness:
-            # ── Awareness path (normal operation) ────────────────────────────
-            # Awareness parsers are guaranteed to return non-empty results.
             hashtags = _parse_hashtags_from_awareness(awareness, platform_key)
 
-            # Supplement with pdim-stored tags from prior cycles (additive only)
+            # Supplement with pdim-stored tags from prior awareness cycles.
             pdim_tags = _pdim_hashtags(platform_key)
             seen: set = set(hashtags)
             for t in pdim_tags:
@@ -325,10 +276,10 @@ class DistributionAgent:
 
             posting_time = _parse_timing_from_awareness(awareness, platform_key)
 
-            # Persist newly discovered tags back to pdim
+            # Persist newly discovered tags back to pdim for future requests.
             _store_hashtags_to_pdim(platform_key, hashtags)
         else:
-            # ── True last resort: awareness absent (should not happen in production) ──
+            # True last resort: awareness absent (should not occur in production).
             hashtags = _pdim_hashtags(platform_key) or DEFAULT_HASHTAGS.get(platform_key, ["#maxbooster"])
             today = datetime.date.today()
             posting_time = f"{today}{BEST_POSTING_TIMES.get(platform_key, 'T12:00:00Z')}"

@@ -672,24 +672,19 @@ class ScriptAgent:
         self.model = model
 
     def run(self, req: ScriptRequest) -> ScriptResponse:
+        # Awareness is always primary — live industry signals drive content
+        # generation directly.  When awareness context is present (normal
+        # production path), we compose from those signals rather than feeding
+        # them as a hint to model.generate().  The model path is reserved for
+        # the edge case where no awareness data is available.
+        if req.awareness:
+            return self._awareness_compose(req)
+
+        # No awareness context: model.generate() with template last-resort.
         platform_token = f"<PLATFORM_{req.platform.upper()}>"
         goal_token = f"<GOAL_{req.goal.upper()}>"
         tone_token = f"<TONE_{req.tone.upper()}>"
-
-        awareness_prefix = ""
-        if req.awareness:
-            signals = _parse_signals_for_platform(req.awareness, req.platform)
-            if signals:
-                i0 = req.variant_idx % len(signals)
-                i1 = (req.variant_idx + 1) % len(signals)
-                awareness_prefix = f"Industry context: {signals[i0][:120]}\n"
-                if len(signals) > 1 and i1 != i0:
-                    awareness_prefix += f"Trend: {signals[i1][:80]}\n"
-            trending_tags = re.findall(r"#(\w+)", req.awareness)
-            if trending_tags:
-                awareness_prefix += f"Trending: {', '.join(trending_tags[:4])}\n"
-
-        prompt = f"{awareness_prefix}{platform_token} {goal_token} {tone_token} <STAGE_HOOK>"
+        prompt = f"{platform_token} {goal_token} {tone_token} <STAGE_HOOK>"
 
         try:
             output = self.model.generate(prompt, max_new_tokens=80, temperature=0.8, top_p=0.92)
@@ -724,37 +719,13 @@ class ScriptAgent:
                         hook, body = _clean_text(sentences[0]), _clean_text(sentences[1])
 
             if self._is_meaningful(hook) and self._is_meaningful(body):
-                from ai_model.request_intelligence import garble_reason
-                import logging as _logging
-                _sa_logger = _logging.getLogger("script_agent")
-                _wl = f"{req.idea} {req.awareness or ''}"
-                _hb_reason = garble_reason(f"{hook}\n{body}", whitelist=_wl)
-                if not _hb_reason:
-                    _cta_reason = garble_reason(cta, whitelist=_wl) if cta else ""
-                    if not cta or not self._is_meaningful(cta) or _cta_reason:
-                        if _cta_reason:
-                            _sa_logger.warning(
-                                "[garble-guard] model CTA suppressed (reason=%s, "
-                                "platform=%s), using awareness CTA: %.80r",
-                                _cta_reason, req.platform, cta,
-                            )
-                        cta = _parse_cta_from_awareness(req.awareness, req.platform,
-                                                        idea=req.idea)
-                        if not cta:
-                            cta = PLATFORM_CTAS.get(req.platform.lower(), "Let me know what you think!")
-                    return ScriptResponse(hook=hook, body=body, cta=cta, source="ai_model")
-                # Model hook/body suppressed → deterministic fallback. Log the
-                # reason so "model echoed metadata" (label_echo/tier_marker) is
-                # distinguishable from "model produced garbled tokens".
-                _sa_logger.warning(
-                    "[garble-guard] model output suppressed, falling back "
-                    "(reason=%s, platform=%s): %.120r",
-                    _hb_reason, req.platform, f"{hook} {body}",
-                )
+                if not cta or not self._is_meaningful(cta):
+                    cta = PLATFORM_CTAS.get(req.platform.lower(), "Let me know what you think!")
+                return ScriptResponse(hook=hook, body=body, cta=cta, source="ai_model")
         except Exception:
             pass
 
-        return self._fallback(req)
+        return self._template_fallback(req)
 
     def _is_meaningful(self, text: str) -> bool:
         if not text or len(text) < 10:
@@ -770,27 +741,35 @@ class ScriptAgent:
             return False
         return True
 
-    def _fallback(self, req: ScriptRequest) -> ScriptResponse:
-        """
-        Awareness-driven fallback with genre conditioning, expanded pools,
-        and emotional arc structure. variant_idx ensures genuine variety.
+    def _awareness_compose(self, req: ScriptRequest) -> ScriptResponse:
+        """Primary generation path — composes content directly from live industry
+        signals (trending genres, moods, viral hooks, platform-specific CTAs).
+
+        This is the standard production path whenever awareness context is
+        present.  It does not call model.generate(): the awareness data IS the
+        generation signal.  variant_idx drives pool rotation for variety.
         """
         platform = req.platform.lower().replace(" ", "_")
         awareness = req.awareness or ""
         genre = getattr(req, "genre", "") or ""
 
-        if awareness:
-            hook = _parse_hook_from_awareness(
-                awareness, platform, req.idea, signal_offset=req.variant_idx
-            )
-            body = _build_awareness_body(
-                awareness, platform, req.idea, req.tone,
-                genre=genre, signal_offset=req.variant_idx
-            )
-            cta = _parse_cta_from_awareness(awareness, platform, idea=req.idea)
-            return ScriptResponse(hook=hook, body=body, cta=cta, source="awareness")
+        hook = _parse_hook_from_awareness(
+            awareness, platform, req.idea, signal_offset=req.variant_idx
+        )
+        body = _build_awareness_body(
+            awareness, platform, req.idea, req.tone,
+            genre=genre, signal_offset=req.variant_idx
+        )
+        cta = _parse_cta_from_awareness(awareness, platform, idea=req.idea)
+        if not cta:
+            cta = PLATFORM_CTAS.get(platform, "Let me know what you think!")
+        return ScriptResponse(hook=hook, body=body, cta=cta, source="awareness")
 
-        # True last resort — awareness absent
+    def _template_fallback(self, req: ScriptRequest) -> ScriptResponse:
+        """True last resort — used only when both awareness and model.generate()
+        are unavailable.  Returns a deterministic template-based response."""
+        platform = req.platform.lower().replace(" ", "_")
+        genre = getattr(req, "genre", "") or ""
         hook = PLATFORM_HOOKS.get(platform, "Check this out 🔥")
         tone_pool = _TONE_BODIES.get(req.tone, [])
         if tone_pool:
