@@ -249,6 +249,43 @@ function handleProxyNetworkError(
   void elapsed;
 }
 
+// ─── Transient-connection retry wrapper ─────────────────────────────────────
+// Wraps undiciRequest with a single automatic retry through the hold queue.
+// When a request that passed the CB/restart check still gets a connection error
+// mid-flight (Python crashed between the check and the call), we record the
+// failure, wait for recovery, then retry exactly once.  If the retry also
+// fails, the error is re-thrown for the caller's handleProxyNetworkError.
+
+function _isTransientConnErr(e: unknown): boolean {
+  const err = e as any;
+  return (
+    err.code === "ECONNREFUSED" ||
+    err.cause?.code === "ECONNREFUSED" ||
+    err.cause?.code === "UND_ERR_SOCKET" ||
+    err.code === "UND_ERR_SOCKET" ||
+    Boolean(err.cause?.message?.includes("other side closed"))
+  );
+}
+
+async function _upstreamRequest(
+  url: string,
+  options: Parameters<typeof undiciRequest>[1],
+): ReturnType<typeof undiciRequest> {
+  try {
+    return await undiciRequest(url, options);
+  } catch (err) {
+    if (_isTransientConnErr(err)) {
+      _cbRecordFailure(); // open CB if threshold reached
+      console.log(`[Proxy] Connection error on first attempt — waiting for recovery then retrying ${url}`);
+      const recovered = await waitForRecovery();
+      if (recovered) {
+        return await undiciRequest(url, options); // retry once
+      }
+    }
+    throw err; // re-throw for handleProxyNetworkError
+  }
+}
+
 // ─── Core proxy function ────────────────────────────────────────────────────
 
 async function proxyRequest(
@@ -301,7 +338,7 @@ async function proxyRequest(
       headers["X-Api-Key"] = _SERVER_FALLBACK_KEY;
     }
 
-    const upstreamRes = await undiciRequest(url, {
+    const upstreamRes = await _upstreamRequest(url, {
       method: req.method as any,
       dispatcher: _keepAlivePool,
       headers,
@@ -369,7 +406,7 @@ async function proxyBinary(
       headers["X-Api-Key"] = _SERVER_FALLBACK_KEY;
     }
 
-    const upstreamRes = await undiciRequest(url, {
+    const upstreamRes = await _upstreamRequest(url, {
       method: req.method as any,
       dispatcher: _keepAlivePool,
       headers,
@@ -442,7 +479,7 @@ async function proxyBinaryStream(
       headers["X-Api-Key"] = _SERVER_FALLBACK_KEY;
     }
 
-    const upstreamRes = await undiciRequest(url, {
+    const upstreamRes = await _upstreamRequest(url, {
       method: req.method as any,
       dispatcher: _keepAlivePool,
       headers,
@@ -1049,7 +1086,7 @@ router.get("/keepalive/status", (_req, res) => {
     const raw = fs.readFileSync("/tmp/maxcore-keepalive.json", "utf8");
     res.json(JSON.parse(raw));
   } catch {
-    res.status(503).json({
+    res.status(200).json({
       running: false,
       message: "keepalive status not yet available — first cycle pending",
     });

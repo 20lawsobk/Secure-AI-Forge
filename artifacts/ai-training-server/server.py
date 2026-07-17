@@ -379,6 +379,49 @@ def _get_gpu_pool():
     return _gpu_pool
 
 
+# ─── Model-readiness & worker-readiness helpers ──────────────────────────────
+# These replace the old instant-503 guards that fired whenever an endpoint was
+# hit before _init_ai_model() / _init_workers() had finished.  Requests now
+# park here (250 ms sleep loop) for up to their respective deadlines, then
+# raise 503 with a Retry-After header only if the subsystem truly never came up.
+
+async def _wait_for_model_ready(max_wait: float = 30.0) -> None:
+    """Wait until _model_ready is True, then return.  Raises HTTP 503 on timeout."""
+    if _model_ready:
+        return  # fast path — already ready
+    deadline = time.monotonic() + max_wait
+    while time.monotonic() < deadline:
+        if _model_ready:
+            return
+        await asyncio.sleep(0.25)
+    raise HTTPException(
+        status_code=503,
+        detail="AI model is still initialising — it should be ready in a moment. Please retry.",
+        headers={"Retry-After": "5"},
+    )
+
+
+async def _wait_for_workers(max_wait: float = 20.0):
+    """Return (continuous_trainer, data_puller) once both are initialised.
+    Raises HTTP 503 with Retry-After if workers remain None after max_wait seconds."""
+    deadline = time.monotonic() + max_wait
+    while time.monotonic() < deadline:
+        with _workers_lock:
+            ct, dp = _continuous_trainer, _data_puller
+        if ct is not None and dp is not None:
+            return ct, dp
+        await asyncio.sleep(0.25)
+    with _workers_lock:
+        ct, dp = _continuous_trainer, _data_puller
+    if ct is None or dp is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Background workers are still starting up — please retry in a moment.",
+            headers={"Retry-After": "5"},
+        )
+    return ct, dp
+
+
 def _digest_str(fields: dict) -> str:
     """Stable digest string for a dict of request fields (used as pool spawn key)."""
     payload = json.dumps(fields, sort_keys=True, default=str).encode()
@@ -2985,7 +3028,7 @@ async def continuous_start(req: ContinuousStartRequest, _key = Depends(require_s
         ct = _continuous_trainer
         dp = _data_puller
     if ct is None or dp is None:
-        raise HTTPException(status_code=503, detail="Workers not initialized yet — try again in a few seconds")
+        ct, dp = await _wait_for_workers()
     if not dp.state.get("status") == "pulling" and not dp._running:
         dp.start(interval_minutes=req.interval_minutes * req.pull_every_n_cycles)
     return ct.start(
@@ -3047,7 +3090,7 @@ async def puller_pull(background_tasks: BackgroundTasks, _key = Depends(require_
     with _workers_lock:
         dp = _data_puller
     if dp is None:
-        raise HTTPException(status_code=503, detail="DataPuller not initialized yet")
+        _, dp = await _wait_for_workers()
     background_tasks.add_task(dp.pull_now)
     return {"success": True, "message": "Data pull triggered in background"}
 
@@ -3057,7 +3100,7 @@ async def puller_start_auto(interval_minutes: int = 30, _key = Depends(require_s
     with _workers_lock:
         dp = _data_puller
     if dp is None:
-        raise HTTPException(status_code=503, detail="DataPuller not initialized yet")
+        _, dp = await _wait_for_workers()
     return dp.start(interval_minutes=interval_minutes)
 
 
@@ -3431,18 +3474,7 @@ async def generate_content(req: ContentRequest, _key = Depends(require_scope("ge
     topic = _resolve_topic_from_url(req.topic)
     effective_awareness = _effective_awareness(platform, _merged_awareness_for(req))
 
-    if not _model_ready or _script_agent is None:
-        # Model not ready yet — signal the client to retry rather than returning
-        # a template built around a bare domain/URL slug.
-        _srv_logger.warning(
-            "[generate-from-url] empty generatedContent for topic %r — "
-            "model not ready; client should retry",
-            topic,
-        )
-        raise HTTPException(
-            status_code=503,
-            detail="empty generatedContent — model warming up, please retry",
-        )
+    await _wait_for_model_ready()
 
     async def _run_content_inference():
         from ai_model.agents.script_agent import ScriptRequest
@@ -3503,7 +3535,7 @@ async def generate_content(req: ContentRequest, _key = Depends(require_scope("ge
         raise
     except ValueError as e:
         _srv_logger.warning("[generate-from-url] %s topic=%r platform=%s", e, topic, platform)
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Generation returned empty output: {e}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -3954,11 +3986,7 @@ async def platform_social_generate(req: PlatformSocialRequest, _key = Depends(re
     effective_awareness = _effective_awareness(platform, _merged_awareness_for(req))
 
     variants = []
-    if not _model_ready or _script_agent is None:
-        raise HTTPException(
-            status_code=503,
-            detail="empty generatedContent — model warming up, please retry",
-        )
+    await _wait_for_model_ready()
 
     for i in range(req.num_variants):
         try:
@@ -3980,7 +4008,7 @@ async def platform_social_generate(req: PlatformSocialRequest, _key = Depends(re
                 )))
                 return s, d
 
-            script, dist = await asyncio.wait_for(_run_variant(), timeout=20.0)
+            script, dist = await _run_variant()
             if not any([script.hook.strip(), script.body.strip(), script.cta.strip()]):
                 raise HTTPException(
                     status_code=503,
@@ -3996,11 +4024,6 @@ async def platform_social_generate(req: PlatformSocialRequest, _key = Depends(re
             }
         except HTTPException:
             raise
-        except asyncio.TimeoutError:
-            raise HTTPException(
-                status_code=503,
-                detail="empty generatedContent — generation timed out, please retry",
-            )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
         variant["variant"] = i + 1
@@ -4056,12 +4079,7 @@ async def platform_social_autopilot(req: PlatformAutopilotRequest, _key = Depend
     dominant_tags = list(dict.fromkeys(top_tags))[:3]
     dominant_type = max(set(top_types), key=top_types.count) if top_types else "post"
 
-    # Use the model to suggest next actions — 503 if model not ready
-    if not _model_ready or _script_agent is None:
-        raise HTTPException(
-            status_code=503,
-            detail="empty generatedContent — model warming up, please retry",
-        )
+    await _wait_for_model_ready()
 
     next_topics = []
     schedule: list[str] = []
@@ -4150,11 +4168,7 @@ async def platform_daw_generate(req: PlatformDAWRequest, _key = Depends(require_
         goal = "artistry"
         tone = req.mood
 
-    if not _model_ready or _script_agent is None:
-        raise HTTPException(
-            status_code=503,
-            detail="empty generatedContent — model warming up, please retry",
-        )
+    await _wait_for_model_ready()
 
     try:
         from ai_model.agents.script_agent import ScriptRequest
@@ -4207,11 +4221,7 @@ async def platform_distribution_plan(req: PlatformDistributionRequest, _key = De
     """
     start = time.time()
 
-    if not _model_ready or _distribution_agent is None:
-        raise HTTPException(
-            status_code=503,
-            detail="empty generatedContent — model warming up, please retry",
-        )
+    await _wait_for_model_ready()
 
     try:
         from ai_model.agents.distribution_agent import DistributionRequest
@@ -4312,11 +4322,7 @@ async def platform_video_generate(req: PlatformVideoRequest, _key = Depends(requ
     # Universal URL Parser: resolve topic from any URL/platform link
     _vid_topic = _resolve_topic_from_url(req.topic)
 
-    if not _model_ready or _script_agent is None:
-        raise HTTPException(
-            status_code=503,
-            detail="empty generatedContent — model warming up, please retry",
-        )
+    await _wait_for_model_ready()
 
     async def _run_model_inference():
         from ai_model.agents.script_agent import ScriptRequest
@@ -4354,7 +4360,7 @@ async def platform_video_generate(req: PlatformVideoRequest, _key = Depends(requ
     _coalesced_inference: list = []
 
     async def _coalesced_video():
-        result = await asyncio.wait_for(_run_model_inference(), timeout=25.0)
+        result = await _run_model_inference()
         _coalesced_inference.append(result)
         return result
 
@@ -4420,11 +4426,6 @@ async def platform_video_generate(req: PlatformVideoRequest, _key = Depends(requ
             "duration_seconds": req.duration_seconds,
         })
         return _result
-    except asyncio.TimeoutError:
-        raise HTTPException(
-            status_code=503,
-            detail="empty generatedContent — generation timed out, please retry",
-        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -6000,7 +6001,7 @@ async def start_training_from_storage(
     pipeline = get_pipeline()
     session = pipeline.get_session()
     if not session:
-        raise HTTPException(status_code=503, detail="No training session found in storage server. "
+        raise HTTPException(status_code=404, detail="No training session found in storage server. "
                             "Check /storage/session for details.")
 
     job_id = str(uuid.uuid4())[:8]
@@ -8454,10 +8455,9 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         if not _dataset_ready_early and _is_seeding_early():
             from fastapi.responses import JSONResponse as _JR
             return _JR(
-                status_code=503,
+                status_code=202,
                 headers={"Retry-After": "30"},
                 content={
-                    "error":              "seeding_in_progress",
                     "seeding_now":        True,
                     "message": (
                         "The audio library is still being built in the background "
@@ -8987,8 +8987,7 @@ async def api_generate_video(req: ApiGenerateVideoRequest, _key=Depends(require_
     the existing PLATFORM_RATIOS / _PLATFORM_SPECS logic in VideoAgent) and
     returns all job_ids in a single response instead of requiring N calls.
     """
-    if not _model_ready or _script_agent is None or _visual_spec_agent is None or _creative_model is None:
-        raise HTTPException(status_code=503, detail="AI model is still initialising — try again shortly")
+    await _wait_for_model_ready()
 
     if req.platforms:
         _plats = [normalize_platform(p) for p in req.platforms if p]
@@ -9072,8 +9071,7 @@ async def api_video_extend(req: ApiVideoExtendRequest, _key=Depends(require_scop
     soundtrack is then re-rendered across the full extended duration so the
     audio stays coherent instead of stitching two different tracks.
     """
-    if not _model_ready or _script_agent is None or _visual_spec_agent is None or _creative_model is None:
-        raise HTTPException(status_code=503, detail="AI model is still initialising — try again shortly")
+    await _wait_for_model_ready()
 
     if not (req.idea or "").strip():
         raise HTTPException(status_code=422, detail="'idea' is required — describe what the continuation should show")
@@ -9254,8 +9252,7 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
     """
     body = await request.json()
 
-    if not _model_ready or _script_agent is None or _visual_spec_agent is None or _creative_model is None:
-        raise HTTPException(status_code=503, detail="AI model is still initialising — try again shortly")
+    await _wait_for_model_ready()
 
     idea         = str(body.get("idea", "")).strip()
     platform     = str(body.get("platform", "tiktok")).strip().lower()
