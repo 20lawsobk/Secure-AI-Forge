@@ -19,6 +19,7 @@
 - [Dynamic batching coalescer](dynamic-batching-coalescer.md) — opt-in cross-request generate batching; lone batcher thread owns model (never take INFERENCE_GATE); left-pad+kpm = logits-exact, text-exact only B=1
 - [mypy object-from-dict pattern](mypy-object-dict-pattern.md) — state dicts → dict[str,Any]; constant config dicts → cast() at use; call-arg errors are often real bugs (TrainConfig takes one cfg dict)
 - [pdim storage topology](pdim-storage-topology.md) — WRONGPASS=token/instance mismatch (scan+PING); universal read-timeout=pdim app itself down (not fixable here); health = POST {"cmd":"PING"} to exec URL
+- [Audio/image delivery contract](audio-image-delivery-contract.md) — stereo 320k CBR everywhere (ARC per-channel), 180s cap w/ scaled deadlines, render_text:false=pure artwork, Bearer auth accepted
 - [real-audio generation](real-audio-generation.md) — /api/generate/audio renders from seeded FMA dataset in pdim (no synth fallback); seed via admin POST /storage/datasets/audio/seed; field is `b64`; seeder module is import-cached so restart to reload edits
 - [Producer audio controls](producer-audio-controls.md) — exact key/BPM (rubberband), LUFS master, HPSS stems, seed; all never-raise; render returns a dict not a URL; additive fields flow through proxy for free
 - [PDIM pocket multiplication](pdim-pocket-multiply.md) — pocket = one orchestrator dedup namespace; unbounded nesting is path namespacing + compressed payloads; pass digests not arrays; auth is X-Api-Key

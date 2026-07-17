@@ -865,9 +865,13 @@ AI_SERVER_KEY          = os.environ.get("AI_SERVER_KEY")
 
 _ENV_BYPASS_KEYS: set = {k for k in [ADMIN_KEY_ENV, AI_TRAINING_KEY_PROD, AI_SERVER_KEY] if k}
 
-def verify_api_key(x_api_key: str = Header(None), x_admin_key: str = Header(None)):
-    """Verify API key from X-Api-Key or X-Admin-Key header."""
-    raw_key = x_api_key or x_admin_key
+def verify_api_key(x_api_key: str = Header(None), x_admin_key: str = Header(None),
+                   authorization: str = Header(None)):
+    """Verify API key from X-Api-Key, X-Admin-Key, or Authorization: Bearer."""
+    bearer = None
+    if authorization and authorization.lower().startswith("bearer "):
+        bearer = authorization[7:].strip()
+    raw_key = x_api_key or x_admin_key or bearer
     if not raw_key:
         raise HTTPException(status_code=401, detail="API key required")
 
@@ -923,8 +927,10 @@ def require_scope(scope: str):
         return key
     return checker
 
-def verify_admin(x_admin_key: str = Header(None)):
-    """Admin-only endpoint auth."""
+def verify_admin(x_admin_key: str = Header(None), authorization: str = Header(None)):
+    """Admin-only endpoint auth (X-Admin-Key or Authorization: Bearer)."""
+    if not x_admin_key and authorization and authorization.lower().startswith("bearer "):
+        x_admin_key = authorization[7:].strip()
     if not x_admin_key:
         raise HTTPException(status_code=401, detail="X-Admin-Key header required")
 
@@ -4457,7 +4463,9 @@ async def platform_model_info(_key = Depends(verify_api_key)):
             "batches_from_storage": t_state.get("batches_from_storage", 0),
         },
         "storage": {
-            "connected": storage.is_available,
+            # Cached flag only — never trigger a lazy network ping from this
+            # route. It must answer in <1 s even when pdim is cold/offline.
+            "connected": bool(getattr(storage, "_available", False)),
             "dataset_bytes": 7696581394432,
             "dataset_tb": round(7696581394432 / 1e12, 2),
         },
@@ -6306,6 +6314,9 @@ class ApiGenerateImageRequest(_AwarenessMixin):
     # then composites the poster typography on top. Any other/absent value keeps
     # the fast procedural PIL background. Env RTA_IMAGE_ENGINE sets the default.
     render_engine: Optional[str] = None
+    # When False, no text is composited onto the image (no headline, no intent
+    # tag) — pure artwork for cover art. Default True keeps the poster layout.
+    render_text: Optional[bool] = None
     # Freeform creative direction for THIS request (parity with content route).
     instruction: Optional[str] = None
     extra_context: Optional[str] = None
@@ -7775,6 +7786,7 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
                     intent=purpose,
                     style_tags=slot_style_tags,
                     background=_rta_bg,
+                    suppress_text=(req.render_text is False),
                 )
                 result = await _in_thread(lambda r=_req: _image_engine.render(r))
             except Exception as _img_err:
@@ -8163,8 +8175,9 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
     applied_key = target_key or src_key
     _tmp = [src_path, src_wav, tuned_wav, looped_wav]
     try:
-        # 1) Decode source → mono WAV (dataset samples are mono 44.1 kHz).
-        r0 = run_ffmpeg(["ffmpeg", "-y", "-i", str(src_path), "-ac", "1",
+        # 1) Decode source → stereo WAV. Dataset samples may be mono; -ac 2
+        #    upmixes so the delivered master is always true stereo.
+        r0 = run_ffmpeg(["ffmpeg", "-y", "-i", str(src_path), "-ac", "2",
                          "-ar", str(sample_rate), str(src_wav)], timeout=60)
         if r0.returncode != 0 or not src_wav.exists():
             raise RuntimeError(
@@ -8195,15 +8208,18 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
             print(f"[Producer] retune/retime skipped (serving source key/bpm): "
                   f"{_rr_err}", flush=True)
 
-        # 3) Loop / trim to the requested duration with fades.
-        fade_out_start = max(0.0, float(duration_sec) - 0.3)
+        # 3) Loop / trim to the requested duration with fades. A 1.5 s musical
+        #    fade-out (scaled down for very short clips) prevents the abrupt
+        #    mid-phrase hard clip at the end of the render.
+        fade_len = min(1.5, max(0.3, float(duration_sec) * 0.05))
+        fade_out_start = max(0.0, float(duration_sec) - fade_len)
         r1 = run_ffmpeg(
             ["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(stage_in),
              "-t", f"{float(duration_sec):.2f}",
              "-af", (f"afade=t=in:st=0:d=0.05,"
-                     f"afade=t=out:st={fade_out_start:.2f}:d=0.3"),
+                     f"afade=t=out:st={fade_out_start:.2f}:d={fade_len:.2f}"),
              str(looped_wav)],
-            timeout=60,
+            timeout=90,
         )
         if r1.returncode != 0 or not looped_wav.exists():
             raise RuntimeError(
@@ -8248,10 +8264,11 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
                   f"{_mx_err}", flush=True)
             loudness_lufs = None  # honest: no loudness normalization applied
             codec = (["-codec:a", "pcm_s24le"] if fmt == "wav"
-                     else ["-codec:a", "libmp3lame", "-q:a", "2"])
+                     else ["-codec:a", "libmp3lame", "-b:a", "320k"])
             r2 = run_ffmpeg(["ffmpeg", "-y", "-i", str(looped_wav),
-                             "-ar", str(sample_rate), *codec, str(out_path)],
-                            timeout=60)
+                             "-ac", "2", "-ar", str(sample_rate), *codec,
+                             str(out_path)],
+                            timeout=90)
             if r2.returncode != 0 or not out_path.exists():
                 raise RuntimeError(
                     f"final encode failed rc={r2.returncode}: "
@@ -8297,28 +8314,41 @@ def _arc_spectral_clean_file(audio_path) -> None:
     wav_in = mp3_path.with_suffix(".arc_in.wav")
     wav_out = mp3_path.with_suffix(".arc_out.wav")
     try:
-        r = run_ffmpeg(["ffmpeg", "-y", "-i", str(mp3_path), "-ac", "1",
-                        "-ar", "44100", "-f", "wav", str(wav_in)], timeout=60)
+        # Stereo-preserving: decode to 2ch and denoise each channel
+        # independently, so ARC never collapses a stereo master to mono.
+        r = run_ffmpeg(["ffmpeg", "-y", "-i", str(mp3_path), "-ac", "2",
+                        "-ar", "44100", "-f", "wav", str(wav_in)], timeout=120)
         if r.returncode != 0 or not wav_in.exists():
             raise RuntimeError(f"decode failed rc={r.returncode}")
         with wave.open(str(wav_in), "rb") as wf:
             sr = wf.getframerate()
+            n_ch = wf.getnchannels()
             raw = wf.readframes(wf.getnframes())
         samples = _np.frombuffer(raw, dtype="<i2").astype(_np.float32) / 32768.0
-        cleaned = _rta.api.spectral_clean_audio(samples, sr)
+        if n_ch > 1:
+            interleaved = samples.reshape(-1, n_ch)
+            cleaned_ch = [
+                _rta.api.spectral_clean_audio(
+                    _np.ascontiguousarray(interleaved[:, c]), sr)
+                for c in range(n_ch)
+            ]
+            cleaned = _np.stack(cleaned_ch, axis=1).reshape(-1)
+        else:
+            cleaned = _rta.api.spectral_clean_audio(samples, sr)
         out16 = _np.clip(cleaned, -1.0, 1.0)
         out16 = (out16 * 32767.0).astype("<i2")
         with wave.open(str(wav_out), "wb") as wf:
-            wf.setnchannels(1)
+            wf.setnchannels(n_ch)
             wf.setsampwidth(2)
             wf.setframerate(sr)
             wf.writeframes(out16.tobytes())
         if is_wav:
             r2 = run_ffmpeg(["ffmpeg", "-y", "-i", str(wav_out), "-codec:a",
-                             "pcm_s16le", str(mp3_path)], timeout=60)
+                             "pcm_s16le", str(mp3_path)], timeout=120)
         else:
             r2 = run_ffmpeg(["ffmpeg", "-y", "-i", str(wav_out), "-codec:a",
-                             "libmp3lame", "-q:a", "4", str(mp3_path)], timeout=60)
+                             "libmp3lame", "-b:a", "320k", str(mp3_path)],
+                            timeout=120)
         if r2.returncode != 0:
             raise RuntimeError(f"re-encode failed rc={r2.returncode}")
     finally:
@@ -8578,7 +8608,11 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         # must still resolve rather than staying "pending" forever.
         # 120 s gives the full pipeline (chunk fetch 30 s + ffmpeg decode +
         # rubberband + loop + master) comfortable headroom.
-        _RENDER_DEADLINE = 120
+        # Scale the render deadline with the requested duration: long-form
+        # clips (up to 180 s) need proportionally more time in the loop/trim,
+        # rubberband, and mastering stages. Floor stays at 120 s.
+        _req_dur = max(4.0, min(float(req.duration or 30), 180.0))
+        _RENDER_DEADLINE = max(120, int(_req_dur * 1.5) + 60)
         # Terminal-state guard: exactly ONE writer (render thread or deadline
         # timer) may set the job's terminal status.  Without this, a timer
         # firing at ~120 s could be overwritten by a late "done" (or vice
@@ -8697,7 +8731,10 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         }
         # Render an actual in-house clip (key/tempo-conditioned) and serve it;
         # only mark "done" once the file exists on disk.
-        duration_sec = max(4.0, min(float(req.duration or 30), 60.0))
+        # Honor long-form requests: leaseable beats run 2–3 minutes. Cap at
+        # 3 min to bound render time (loop/trim + mastering stay under the
+        # 120 s job deadline for the longest allowed clip).
+        duration_sec = max(4.0, min(float(req.duration or 30), 180.0))
         try:
             render = _render_audio_from_dataset(job_id, target_bpm, target_key,
                                                 duration_sec, opts)

@@ -136,14 +136,16 @@ def master_export(in_wav: Path, out_path: Path, *, fmt: str = "mp3",
     cmd = ["ffmpeg", "-y", "-i", str(in_wav)]
     if filters:
         cmd += ["-af", ",".join(filters)]
-    cmd += ["-ar", str(int(sample_rate))]
+    # Always deliver stereo — dataset sources may be mono; -ac 2 upmixes.
+    cmd += ["-ac", "2", "-ar", str(int(sample_rate))]
 
     if fmt == "wav":
         codec = _PCM_CODEC.get(int(bit_depth), "pcm_s24le")
         cmd += ["-codec:a", codec, str(out_path)]
     else:
-        cmd += ["-codec:a", "libmp3lame", "-q:a", str(int(mp3_quality)),
-                str(out_path)]
+        # CBR 320 kbps — leaseable-beat delivery quality (VBR -q:a produced
+        # ~92 kbps files that were rejected downstream).
+        cmd += ["-codec:a", "libmp3lame", "-b:a", "320k", str(out_path)]
 
     r = run_ffmpeg(cmd, timeout=timeout)
     if r.returncode != 0 or not Path(out_path).exists():

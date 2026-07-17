@@ -84,6 +84,11 @@ class ImageRequest:
     # background; all accent bars, brackets and typography are still composited
     # on top, so the poster layout is preserved over real rendered pixels.
     background: Optional[np.ndarray] = None
+    # When True, NO text is drawn on the canvas — no headline, no intent
+    # sub-label. Used for cover art where the prompt string must never appear
+    # as literal typography. Accent bars/dividers are also skipped so the
+    # output is pure artwork.
+    suppress_text: bool = False
 
 
 @dataclass
@@ -347,35 +352,36 @@ class ImageEngine:
             by0, by1 = sorted([cy, cy + dy * span])
             draw.rectangle([bx0, by0, bx1, by1], fill=accent)
 
-        # ── Platform label (top-right) ─────────────────────────────────────────
-        plat_font_sz  = max(18, w // 52)
-        plat_font     = _load_font(plat_font_sz, bold=False)
-        plat_label    = req.platform.upper()
-        plat_x        = w - pad - len(plat_label) * (plat_font_sz // 1.7)
-        plat_y        = pad + bar_h + 8
-        # Shadow
-        draw.text((plat_x + 2, plat_y + 2), plat_label, font=plat_font,
-                  fill=(0, 0, 0, 120))
-        draw.text((plat_x, plat_y), plat_label, font=plat_font, fill=accent)
+        # ── Platform label (top-right) + artist badge (top-left) ──────────────
+        if not req.suppress_text:
+            plat_font_sz  = max(18, w // 52)
+            plat_font     = _load_font(plat_font_sz, bold=False)
+            plat_label    = req.platform.upper()
+            plat_x        = w - pad - len(plat_label) * (plat_font_sz // 1.7)
+            plat_y        = pad + bar_h + 8
+            # Shadow
+            draw.text((plat_x + 2, plat_y + 2), plat_label, font=plat_font,
+                      fill=(0, 0, 0, 120))
+            draw.text((plat_x, plat_y), plat_label, font=plat_font, fill=accent)
 
-        # ── Artist / intent badge (top-left) ──────────────────────────────────
-        badge_font_sz = max(16, w // 56)
-        badge_font    = _load_font(badge_font_sz, bold=True)
-        badge_label   = req.artist_name.upper()
-        draw.text((pad + 4, plat_y + 2), badge_label, font=badge_font,
-                  fill=(0, 0, 0, 120))
-        draw.text((pad, plat_y), badge_label, font=badge_font, fill=text_col)
+            badge_font_sz = max(16, w // 56)
+            badge_font    = _load_font(badge_font_sz, bold=True)
+            badge_label   = req.artist_name.upper()
+            draw.text((pad + 4, plat_y + 2), badge_label, font=badge_font,
+                      fill=(0, 0, 0, 120))
+            draw.text((pad, plat_y), badge_label, font=badge_font, fill=text_col)
 
         # ── Central divider line ───────────────────────────────────────────────
         centre_y   = h // 2
-        line_thick = max(2, h // 300)
-        glow_color = tuple(min(255, int(c * 1.4)) for c in accent)
-        draw.rectangle([pad * 3, centre_y - line_thick * 2,
-                        w - pad * 3, centre_y + line_thick * 2],
-                       fill=(*glow_color, 40))
-        draw.rectangle([pad * 3, centre_y - line_thick // 2,
-                        w - pad * 3, centre_y + line_thick // 2],
-                       fill=accent)
+        if not req.suppress_text:
+            line_thick = max(2, h // 300)
+            glow_color = tuple(min(255, int(c * 1.4)) for c in accent)
+            draw.rectangle([pad * 3, centre_y - line_thick * 2,
+                            w - pad * 3, centre_y + line_thick * 2],
+                           fill=(*glow_color, 40))
+            draw.rectangle([pad * 3, centre_y - line_thick // 2,
+                            w - pad * 3, centre_y + line_thick // 2],
+                           fill=accent)
 
         # ── Main headline text (above divider) ────────────────────────────────
         headline_font_sz = max(32, w // (22 if is_portrait else 28))
@@ -384,7 +390,8 @@ class ImageEngine:
         # Always sanitize before drawing — `prompt` is a generation/style
         # description that may carry brief scaffolding (goal/audience/ids);
         # only the cleaned, short headline is ever rendered on-canvas.
-        headline_text    = _clean_headline(req.headline or req.prompt)
+        headline_text    = ("" if req.suppress_text
+                            else _clean_headline(req.headline or req.prompt))
         lines            = _wrap_text(headline_text, max_chars)[:4]  # cap 4 lines
 
         line_gap  = int(headline_font_sz * 1.25)
@@ -400,23 +407,24 @@ class ImageEngine:
             draw.text((lx, ly), line, font=headline_font, fill=text_col)
 
         # ── Sub-label (below divider) — intent tag ────────────────────────────
-        sub_font_sz = max(20, w // 44)
-        sub_font    = _load_font(sub_font_sz, bold=False)
-        sub_label   = f"#{req.intent.upper()} • {' • '.join(t.upper() for t in req.style_tags[:3])}"
-        sub_y       = centre_y + int(h * 0.04)
-        draw.text((pad + int(w * 0.05) + 2, sub_y + 2), sub_label, font=sub_font,
-                  fill=(0, 0, 0, 140))
-        draw.text((pad + int(w * 0.05), sub_y), sub_label, font=sub_font,
-                  fill=accent)
+        if not req.suppress_text:
+            sub_font_sz = max(20, w // 44)
+            sub_font    = _load_font(sub_font_sz, bold=False)
+            sub_label   = f"#{req.intent.upper()} • {' • '.join(t.upper() for t in req.style_tags[:3])}"
+            sub_y       = centre_y + int(h * 0.04)
+            draw.text((pad + int(w * 0.05) + 2, sub_y + 2), sub_label, font=sub_font,
+                      fill=(0, 0, 0, 140))
+            draw.text((pad + int(w * 0.05), sub_y), sub_label, font=sub_font,
+                      fill=accent)
 
-        # ── Style tag dots ────────────────────────────────────────────────────
-        dot_y  = sub_y + sub_font_sz + 16
-        dot_r  = max(5, w // 160)
-        dot_dx = dot_r * 3
-        for idx in range(min(len(req.style_tags), 5)):
-            cx = pad + int(w * 0.05) + idx * dot_dx * 2
-            draw.ellipse([cx - dot_r, dot_y - dot_r, cx + dot_r, dot_y + dot_r],
-                         fill=accent)
+            # ── Style tag dots (keyed to the sub-label position) ──────────────
+            dot_y  = sub_y + sub_font_sz + 16
+            dot_r  = max(5, w // 160)
+            dot_dx = dot_r * 3
+            for idx in range(min(len(req.style_tags), 5)):
+                cx = pad + int(w * 0.05) + idx * dot_dx * 2
+                draw.ellipse([cx - dot_r, dot_y - dot_r, cx + dot_r, dot_y + dot_r],
+                             fill=accent)
 
         # ── Save (atomic: write to a temp sibling, then rename into place so a
         # concurrent reader or a crash never observes a partial/zero-byte file) ──
