@@ -6366,6 +6366,9 @@ class ApiGenerateAudioRequest(_AwarenessMixin):
     loudness_preset: Optional[str] = None
     # Remix-ready stems (drums / bass / melody), time-aligned WAVs.
     stems: Optional[bool] = False
+    # Awareness-driven song arrangement (intro/verse/hook/… via stem
+    # automation). Default ON for clips ≥24 s; pass False for a plain loop.
+    arrange: Optional[bool] = None
 
 
 class SceneOverride(BaseModel):
@@ -8208,24 +8211,65 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
             print(f"[Producer] retune/retime skipped (serving source key/bpm): "
                   f"{_rr_err}", flush=True)
 
-        # 3) Loop / trim to the requested duration with fades. A 1.5 s musical
-        #    fade-out (scaled down for very short clips) prevents the abrupt
-        #    mid-phrase hard clip at the end of the render.
+        # 3) Assemble to the requested duration. Awareness-driven ARRANGEMENT
+        #    first (structured intro/verse/hook/outro via stem automation,
+        #    conditioned by the live-industry awareness genres and gated on
+        #    the borrowed-knowledge retirement contract); plain loop as the
+        #    never-raise fallback. Both paths end with musical fades.
+        arrangement_plan = None
+        arranged_wav = _UPLOADS_PATH / f"audio_arr_{job_id}.wav"
+        _tmp.append(arranged_wav)
+        _want_arrange = (opts.get("arrange") is not False
+                         and float(duration_sec) >= 24.0)
+        if _want_arrange:
+            try:
+                from ai_model.audio import arrangement as _arr
+                _plan = _arr.build_plan(
+                    float(duration_sec), float(applied_bpm or src_bpm or 120),
+                    genre=(opts.get("genre") or None),
+                    mood=(opts.get("preferred_mood") or None),
+                    trending_genres=opts.get("preferred_genres") or [],
+                    seed=opts.get("seed"),
+                )
+                if _arr.realize(stage_in, arranged_wav, _plan,
+                                sample_rate=sample_rate,
+                                run_ffmpeg=run_ffmpeg,
+                                uploads_dir=_UPLOADS_PATH,
+                                job_tag=job_id[:8]):
+                    arrangement_plan = _arr.plan_summary(_plan)
+                    print(f"[Arrange] audio_{job_id}: "
+                          f"{'→'.join(s['section'] for s in arrangement_plan)}",
+                          flush=True)
+            except Exception as _arr_err:
+                print(f"[Arrange] skipped (plain loop): {_arr_err}", flush=True)
+
         fade_len = min(1.5, max(0.3, float(duration_sec) * 0.05))
         fade_out_start = max(0.0, float(duration_sec) - fade_len)
-        r1 = run_ffmpeg(
-            ["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(stage_in),
-             "-t", f"{float(duration_sec):.2f}",
-             "-af", (f"afade=t=in:st=0:d=0.05,"
-                     f"afade=t=out:st={fade_out_start:.2f}:d={fade_len:.2f}"),
-             str(looped_wav)],
-            timeout=90,
-        )
-        if r1.returncode != 0 or not looped_wav.exists():
-            raise RuntimeError(
-                f"ffmpeg assemble failed (rc={r1.returncode}): "
-                f"{r1.stderr[-300:]}"
+        _fade_af = (f"afade=t=in:st=0:d=0.05,"
+                    f"afade=t=out:st={fade_out_start:.2f}:d={fade_len:.2f}")
+        if arrangement_plan:
+            # Arranged track is already full-length — just apply edge fades.
+            r1 = run_ffmpeg(
+                ["ffmpeg", "-y", "-i", str(arranged_wav),
+                 "-t", f"{float(duration_sec):.2f}", "-af", _fade_af,
+                 str(looped_wav)],
+                timeout=max(90, int(float(duration_sec) * 1.2) + 30),
             )
+            if r1.returncode != 0 or not looped_wav.exists():
+                # Honest fallback: drop the arrangement claim and loop plain.
+                arrangement_plan = None
+        if not arrangement_plan:
+            r1 = run_ffmpeg(
+                ["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(stage_in),
+                 "-t", f"{float(duration_sec):.2f}", "-af", _fade_af,
+                 str(looped_wav)],
+                timeout=max(90, int(float(duration_sec) * 1.2) + 30),
+            )
+            if r1.returncode != 0 or not looped_wav.exists():
+                raise RuntimeError(
+                    f"ffmpeg assemble failed (rc={r1.returncode}): "
+                    f"{r1.stderr[-300:]}"
+                )
 
         # 4) RTA-1 ARC spectral restoration (opt-in, env-gated) ───────────────
         if os.environ.get("RTA_AUDIO_SPECTRAL") == "1":
@@ -8290,6 +8334,9 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
         "bit_depth": bit_depth if fmt == "wav" else None,
         "loudness_lufs": loudness_lufs,
         "stems": stem_urls,
+        # Section plan actually rendered (None = plain loop). Additive field —
+        # flows through the api-server proxy and job poll untouched.
+        "arrangement": arrangement_plan,
         "source_sample": {"idx": best_idx, "bpm": src_bpm, "key": src_key},
         # None when an exact key match was found; non-None string when the
         # selector fell back to the full index because no track matched the
@@ -8728,6 +8775,11 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
             # so the sample selector can prefer genre-aligned tracks.
             "preferred_genres": _preferred_genres,
             "preferred_mood":   _preferred_mood,
+            # Arrangement controls: genre + seed condition the section plan;
+            # arrange=False opts out (plain loop).
+            "genre":            req.genre,
+            "seed":             req.seed,
+            "arrange":          req.arrange,
         }
         # Render an actual in-house clip (key/tempo-conditioned) and serve it;
         # only mark "done" once the file exists on disk.
@@ -8764,6 +8816,9 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
             "bit_depth":        render.get("bit_depth"),
             "loudness_lufs":    render.get("loudness_lufs"),
             "stems":            render.get("stems") or {},
+            # Section plan actually rendered (None = plain loop) — the
+            # awareness-driven arrangement provenance producers see in poll.
+            "arrangement":      render.get("arrangement"),
             "seed":             _seed_base,
             "concept":          audio_concept,
             "style_hook":       style_hook,
@@ -9701,6 +9756,8 @@ async def api_poll_audio_job(job_id: str, _key=Depends(require_scope("read"))):
             "bit_depth":     job.get("bit_depth"),
             "loudness_lufs": job.get("loudness_lufs"),
             "stems":         job.get("stems") or {},
+            # Awareness-driven section plan actually rendered (null = plain loop).
+            "arrangement":   job.get("arrangement"),
             "seed":             job.get("seed"),
             "concept":          job.get("concept"),
             "style_hook":       job.get("style_hook"),
