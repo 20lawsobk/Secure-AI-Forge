@@ -2,6 +2,7 @@ import { spawn, ChildProcess } from "child_process";
 import path from "path";
 import { fileURLToPath } from "url";
 import net from "net";
+import { Agent, request as undiciRequest } from "undici";
 
 const PYTHON_PORT = parseInt(process.env.MODEL_API_PORT || "9878", 10);
 
@@ -43,6 +44,18 @@ const MIN_HEALTHY_RUN_MS = 60_000;
 // Poll interval for the health monitor (detects silent crashes)
 const HEALTH_POLL_INTERVAL_MS = 15_000;
 
+// ─── Internal HTTP pool (warm-pass calls only) ────────────────────────────────
+// Dedicated undici agent so post-startup warm-up requests never share
+// the keepalive pool and can't stall real proxy traffic.
+const _warmPool = new Agent({
+  keepAliveTimeout: 30_000,
+  keepAliveMaxTimeout: 60_000,
+  connections: 2,
+  pipelining: 1,
+});
+
+const ADMIN_KEY = process.env.ADMIN_KEY ?? "";
+
 let pythonProcess: ChildProcess | null = null;
 let consecutiveCrashes = 0;
 let lastStartTime = 0;
@@ -61,18 +74,9 @@ function isPortOpen(port: number, timeoutMs = 1000): Promise<boolean> {
   return new Promise((resolve) => {
     const sock = new net.Socket();
     sock.setTimeout(timeoutMs);
-    sock.on("connect", () => {
-      sock.destroy();
-      resolve(true);
-    });
-    sock.on("error", () => {
-      sock.destroy();
-      resolve(false);
-    });
-    sock.on("timeout", () => {
-      sock.destroy();
-      resolve(false);
-    });
+    sock.on("connect", () => { sock.destroy(); resolve(true); });
+    sock.on("error",   () => { sock.destroy(); resolve(false); });
+    sock.on("timeout", () => { sock.destroy(); resolve(false); });
     sock.connect(port, "127.0.0.1");
   });
 }
@@ -83,22 +87,9 @@ function waitForPort(port: number, timeoutMs = 45_000): Promise<void> {
     const poll = () => {
       const sock = new net.Socket();
       sock.setTimeout(1000);
-      sock.on("connect", () => {
-        sock.destroy();
-        resolve();
-      });
-      sock.on("error", () => {
-        sock.destroy();
-        Date.now() < deadline
-          ? setTimeout(poll, 500)
-          : reject(new Error(`Timeout waiting for port ${port}`));
-      });
-      sock.on("timeout", () => {
-        sock.destroy();
-        Date.now() < deadline
-          ? setTimeout(poll, 500)
-          : reject(new Error(`Timeout waiting for port ${port}`));
-      });
+      sock.on("connect", () => { sock.destroy(); resolve(); });
+      sock.on("error",   () => { sock.destroy(); Date.now() < deadline ? setTimeout(poll, 500) : reject(new Error(`Timeout waiting for port ${port}`)); });
+      sock.on("timeout", () => { sock.destroy(); Date.now() < deadline ? setTimeout(poll, 500) : reject(new Error(`Timeout waiting for port ${port}`)); });
       sock.connect(port, "127.0.0.1");
     };
     poll();
@@ -112,6 +103,76 @@ async function pollUntilOpen(port: number, maxMs = 6_000): Promise<boolean> {
     await new Promise((r) => setTimeout(r, 500));
   }
   return false;
+}
+
+// ─── Post-startup warm-up pass ────────────────────────────────────────────────
+// After Python confirms model_loaded=true, POST /api/warm to exercise the
+// Digital GPU inference chains (transformer → flash-attn → pocket GEMM) before
+// any real user traffic arrives.  On a reserved VM this runs once per deploy so
+// the very first request hits a hot path, not a cold one.
+
+async function waitForModelReady(maxMs = 180_000): Promise<boolean> {
+  const deadline = Date.now() + maxMs;
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (ADMIN_KEY) headers["X-Admin-Key"] = ADMIN_KEY;
+
+  while (Date.now() < deadline) {
+    try {
+      const { statusCode, body } = await undiciRequest(
+        `http://localhost:${PYTHON_PORT}/health`,
+        { method: "GET", dispatcher: _warmPool, headers,
+          headersTimeout: 5_000, bodyTimeout: 5_000 },
+      );
+      const raw = await body.text();
+      if (statusCode === 200) {
+        const parsed = JSON.parse(raw) as { model_loaded?: boolean };
+        if (parsed.model_loaded === true) return true;
+      }
+    } catch {
+      // server still starting — keep polling
+    }
+    await new Promise((r) => setTimeout(r, 3_000));
+  }
+  return false;
+}
+
+async function fireWarmPass(): Promise<void> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (ADMIN_KEY) headers["X-Admin-Key"] = ADMIN_KEY;
+
+  try {
+    console.log("[Python] Firing production warm-up pass (POST /api/warm)…");
+    const { statusCode, body } = await undiciRequest(
+      `http://localhost:${PYTHON_PORT}/api/warm`,
+      {
+        method: "POST",
+        dispatcher: _warmPool,
+        headers,
+        body: "{}",
+        headersTimeout: 30_000,
+        bodyTimeout: 90_000,  // warm pass: model load + 1 inference can take up to 60 s
+      },
+    );
+    const raw = await body.text();
+    if (statusCode === 200) {
+      let summary = "";
+      try {
+        const parsed = JSON.parse(raw) as Record<string, unknown>;
+        const subs = parsed["subsystems"] as Record<string, { ok: boolean; ms: number }> | undefined;
+        if (subs) {
+          summary = Object.entries(subs)
+            .map(([k, v]) => `${k}:${v.ok ? "✓" : "✗"}(${v.ms}ms)`)
+            .join(" ");
+        }
+      } catch { /* ignore parse errors */ }
+      console.log(`[Python] Warm-up pass complete — ${summary || "ok"}`);
+    } else {
+      console.warn(`[Python] Warm-up pass returned ${statusCode}: ${raw.slice(0, 300)}`);
+    }
+  } catch (err) {
+    // Never fatal — keepalive will re-warm on next deep-warm cycle
+    console.warn(`[Python] Warm-up pass failed (non-fatal): ${err}`);
+  }
 }
 
 // ─── Core spawn logic ─────────────────────────────────────────────────────────
@@ -131,12 +192,8 @@ function spawnPython() {
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  pythonProcess.stdout?.on("data", (d: Buffer) =>
-    process.stdout.write(`[Python] ${d}`),
-  );
-  pythonProcess.stderr?.on("data", (d: Buffer) =>
-    process.stderr.write(`[Python] ${d}`),
-  );
+  pythonProcess.stdout?.on("data", (d: Buffer) => process.stdout.write(`[Python] ${d}`));
+  pythonProcess.stderr?.on("data", (d: Buffer) => process.stderr.write(`[Python] ${d}`));
 
   pythonProcess.on("exit", async (code, signal) => {
     pythonProcess = null;
@@ -149,34 +206,36 @@ function spawnPython() {
 
     // If another process grabbed the port (e.g., standalone workflow restarted), don't fight it
     if (await isPortOpen(PYTHON_PORT)) {
-      console.log(
-        `[Python] Port ${PYTHON_PORT} is held by another process — standing by.`,
-      );
+      console.log(`[Python] Port ${PYTHON_PORT} is held by another process — standing by.`);
       return;
     }
 
     const uptime = Date.now() - lastStartTime;
     if (uptime >= MIN_HEALTHY_RUN_MS) {
-      console.log(
-        `[Python] Server was healthy for ${Math.round(uptime / 1000)}s — resetting backoff.`,
-      );
+      console.log(`[Python] Server was healthy for ${Math.round(uptime / 1000)}s — resetting backoff.`);
       consecutiveCrashes = 0;
     }
 
     consecutiveCrashes++;
     const delay = backoffMs();
-    console.log(
-      `[Python] Server exited (code ${code ?? "?"}, signal ${signal ?? "none"}). Restart #${consecutiveCrashes} in ${delay}ms…`,
-    );
+    console.log(`[Python] Server exited (code ${code ?? "?"}, signal ${signal ?? "none"}). Restart #${consecutiveCrashes} in ${delay}ms…`);
 
     restartScheduled = true;
-    setTimeout(spawnPython, delay);
+    setTimeout(() => {
+      spawnPython();
+      // After each crash-restart, re-run the warm-up pass once Python is back
+      waitForModelReady(180_000).then((ready) => {
+        if (ready) {
+          fireWarmPass().catch(() => {});
+        } else {
+          console.warn("[Python] Model did not report ready within 3 min after restart — skipping warm pass");
+        }
+      });
+    }, delay);
   });
 }
 
 // ─── Health monitor ────────────────────────────────────────────────────────────
-// Detects silent crashes (process died without triggering exit, or port went
-// away while the process was externally managed).
 
 function startHealthMonitor() {
   if (healthTimer) return;
@@ -188,7 +247,7 @@ function startHealthMonitor() {
       spawnPython();
     }
   }, HEALTH_POLL_INTERVAL_MS);
-  healthTimer.unref(); // don't prevent Node from exiting on its own
+  healthTimer.unref();
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -198,13 +257,9 @@ export async function ensurePythonServer(): Promise<void> {
     console.log(
       `[Python] DISABLE_PYTHON_SPAWN=1 — proxy-only mode, waiting for Python on port ${PYTHON_PORT}…`,
     );
-    // Still wait so the process doesn't report ready before Python is up,
-    // but never spawn or monitor — that's the owner's job.
     const alreadyUp = await pollUntilOpen(PYTHON_PORT, 60_000);
     if (!alreadyUp) {
-      console.warn(
-        `[Python] Proxy-only: port ${PYTHON_PORT} not yet open — requests will be retried by circuit breaker.`,
-      );
+      console.warn(`[Python] Proxy-only: port ${PYTHON_PORT} not yet open — requests will be retried by circuit breaker.`);
     } else {
       console.log(`[Python] AI training server ready on port ${PYTHON_PORT}`);
     }
@@ -214,9 +269,7 @@ export async function ensurePythonServer(): Promise<void> {
   const alreadyUp = await pollUntilOpen(PYTHON_PORT, 6_000);
 
   if (alreadyUp) {
-    console.log(
-      `[Python] AI training server already running on port ${PYTHON_PORT} — monitoring only.`,
-    );
+    console.log(`[Python] AI training server already running on port ${PYTHON_PORT} — monitoring only.`);
   } else {
     spawnPython();
     try {
@@ -224,13 +277,22 @@ export async function ensurePythonServer(): Promise<void> {
       consecutiveCrashes = 0;
       console.log(`[Python] AI training server ready on port ${PYTHON_PORT}`);
     } catch {
-      console.error(
-        "[Python] Warning: server did not respond in time — requests will be retried by proxy.",
-      );
+      console.error("[Python] Warning: server did not respond in time — requests will be retried by proxy.");
     }
   }
 
   startHealthMonitor();
+
+  // ── Production warm-up pass ───────────────────────────────────────────────
+  // Wait for model_loaded=true, then exercise the Digital GPU inference chains
+  // so the reserved VM is fully hot before the first real user request.
+  // Runs in background — never blocks startKeepalive() or worker fork.
+  waitForModelReady(180_000).then((ready) => {
+    if (ready) {
+      return fireWarmPass();
+    }
+    console.warn("[Python] Model did not become ready within 3 min — warm pass skipped; keepalive will retry on next deep-warm cycle");
+  }).catch(() => {});
 }
 
 export function stopPythonServer() {

@@ -6,11 +6,17 @@ import { Agent, request as undiciRequest } from "undici";
 const MODEL_API_PORT = process.env.MODEL_API_PORT || "9878";
 const MODEL_API_BASE = `http://localhost:${MODEL_API_PORT}`;
 
-// How often the full ping cycle repeats (ms)
+// How often the full GET ping cycle repeats (ms)
 const PING_INTERVAL_MS = 20_000;
 
 // Gap between individual pings inside one cycle (ms) — spreads load evenly
 const PING_STAGGER_MS = 800;
+
+// How often a deep-warm inference pass is fired (ms).
+// Every DEEP_WARM_INTERVAL_MS the keepalive POSTs /api/warm to exercise the
+// Digital GPU inference chains (transformer → flash-attn → pocket GEMM) so
+// KV-cache and GEMM dedup entries stay resident between real user requests.
+const DEEP_WARM_INTERVAL_MS = 5 * 60_000; // 5 minutes
 
 // Status snapshot path — written by the primary after each cycle so worker
 // processes can serve it via GET /api/keepalive/status without IPC.
@@ -82,7 +88,7 @@ export const PING_PATHS: readonly string[] = [
   "/api/models/engagement/state",
 ];
 
-// ─── Dedicated keep-alive pool for the pinger ────────────────────────────────
+// ─── Dedicated keep-alive pool ───────────────────────────────────────────────
 // Separate from the proxy pool so pings never starve real traffic.
 
 const _pingPool = new Agent({
@@ -99,6 +105,9 @@ let _cycleCount = 0;
 let _consecutiveAllFailed = 0;
 let _timer: ReturnType<typeof setTimeout> | null = null;
 let _lastCycleAt: string | null = null;
+let _lastDeepWarmAt: string | null = null;
+let _lastDeepWarmOk: boolean | null = null;
+let _nextDeepWarmAt = Date.now() + DEEP_WARM_INTERVAL_MS;
 
 // Per-endpoint health: true = last ping succeeded, false = last ping failed
 const _endpointHealth = new Map<string, boolean>(
@@ -111,26 +120,74 @@ const ADMIN_KEY = process.env.ADMIN_KEY ?? "";
 
 async function pingOne(path: string): Promise<boolean> {
   try {
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (ADMIN_KEY) headers["X-Admin-Key"] = ADMIN_KEY;
 
-    const { statusCode, body } = await undiciRequest(
-      `${MODEL_API_BASE}${path}`,
-      {
-        method: "GET",
-        dispatcher: _pingPool,
-        headers,
-        headersTimeout: 8_000,
-        bodyTimeout: 8_000,
-      },
-    );
-    // Drain the body so the connection is returned to the pool
+    const { statusCode, body } = await undiciRequest(`${MODEL_API_BASE}${path}`, {
+      method: "GET",
+      dispatcher: _pingPool,
+      headers,
+      headersTimeout: 8_000,
+      bodyTimeout: 8_000,
+    });
     await body.dump();
     return statusCode < 500;
   } catch {
     return false;
+  }
+}
+
+// How quickly to retry a deep-warm that failed (ms).
+// Used when the first pass fires before Python is up.  Normal steady-state
+// interval is DEEP_WARM_INTERVAL_MS (5 min).
+const DEEP_WARM_RETRY_MS = 2 * 60_000; // 2 minutes
+
+// ─── Deep-warm pass ──────────────────────────────────────────────────────────
+// POST /api/warm exercises the Digital GPU inference chains so KV-cache,
+// pocket GEMM dedup entries, and flash-attn kernel paths stay hot between
+// real user requests.  Safe to call repeatedly — Python side is idempotent
+// and never-raise.
+
+async function runDeepWarm(): Promise<void> {
+  const ADMIN_KEY_HDR = process.env.ADMIN_KEY ?? "";
+  try {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (ADMIN_KEY_HDR) headers["X-Admin-Key"] = ADMIN_KEY_HDR;
+
+    const { statusCode, body } = await undiciRequest(
+      `${MODEL_API_BASE}/api/warm`,
+      {
+        method: "POST",
+        dispatcher: _pingPool,
+        headers,
+        body: "{}",
+        headersTimeout: 30_000,
+        bodyTimeout: 60_000,  // warm pass can take up to ~30 s after a cold restart
+      },
+    );
+    const raw = await body.text();
+    _lastDeepWarmOk = statusCode < 500;
+    _lastDeepWarmAt = new Date().toISOString();
+
+    if (_lastDeepWarmOk) {
+      console.log(`[Keepalive] Deep-warm POST /api/warm → ${statusCode} ✓`);
+      // Success — next deep-warm at the normal steady-state interval
+      _nextDeepWarmAt = Date.now() + DEEP_WARM_INTERVAL_MS;
+    } else {
+      console.warn(
+        `[Keepalive] Deep-warm POST /api/warm → ${statusCode} (body: ${raw.slice(0, 200)})`,
+      );
+      // Python responded but returned an error — retry at the short interval
+      _nextDeepWarmAt = Date.now() + DEEP_WARM_RETRY_MS;
+    }
+  } catch (err) {
+    // Connection error (Python still starting) — schedule a fast retry
+    _lastDeepWarmOk = false;
+    _lastDeepWarmAt = new Date().toISOString();
+    _nextDeepWarmAt = Date.now() + DEEP_WARM_RETRY_MS;
+    console.warn(`[Keepalive] Deep-warm POST /api/warm failed — retrying in ${DEEP_WARM_RETRY_MS / 60000}min: ${err}`);
   }
 }
 
@@ -147,7 +204,6 @@ async function runCycle(): Promise<void> {
     _endpointHealth.set(path, success);
     success ? ok++ : fail++;
 
-    // Stagger between pings — last one needs no delay
     if (i < PING_PATHS.length - 1) {
       await new Promise((r) => setTimeout(r, PING_STAGGER_MS));
     }
@@ -166,17 +222,23 @@ async function runCycle(): Promise<void> {
     if (fail > 0) {
       const failed = PING_PATHS.filter((p) => !_endpointHealth.get(p));
       console.warn(
-        `[Keepalive] Cycle #${_cycleCount}: ${ok} ok, ${fail} failed — ` +
-          failed.join(", "),
+        `[Keepalive] Cycle #${_cycleCount}: ${ok} ok, ${fail} failed — ${failed.join(", ")}`,
       );
     } else {
-      console.log(
-        `[Keepalive] Cycle #${_cycleCount}: all ${ok} endpoints alive`,
-      );
+      console.log(`[Keepalive] Cycle #${_cycleCount}: all ${ok} endpoints alive`);
     }
   }
 
-  // Write status snapshot so worker processes can serve it without IPC
+  // ── Deep-warm check ────────────────────────────────────────────────────────
+  // Only fire when Python is actually up (at least one endpoint responded) and
+  // the interval has elapsed.  Skip during all-fail windows to avoid piling up
+  // requests against a restarting server.
+  if (fail < PING_PATHS.length && Date.now() >= _nextDeepWarmAt) {
+    _nextDeepWarmAt = Date.now() + DEEP_WARM_INTERVAL_MS;
+    // Run in background — don't block the ping cycle scheduling
+    runDeepWarm().catch(() => {});
+  }
+
   _flushStatus(ok, fail);
 }
 
@@ -196,6 +258,12 @@ function _flushStatus(ok: number, fail: number): void {
       totalEndpoints: PING_PATHS.length,
       summary: { ok, fail },
       endpoints,
+      deepWarm: {
+        intervalMs: DEEP_WARM_INTERVAL_MS,
+        lastDeepWarmAt: _lastDeepWarmAt,
+        lastDeepWarmOk: _lastDeepWarmOk,
+        nextDeepWarmAt: new Date(_nextDeepWarmAt).toISOString(),
+      },
     };
     fs.writeFileSync(STATUS_FILE, JSON.stringify(snapshot), "utf8");
   } catch {
@@ -218,6 +286,12 @@ export function getKeepaliveStatus(): Record<string, unknown> {
       totalEndpoints: PING_PATHS.length,
       summary: { ok: 0, fail: 0 },
       endpoints: {},
+      deepWarm: {
+        intervalMs: DEEP_WARM_INTERVAL_MS,
+        lastDeepWarmAt: null,
+        lastDeepWarmOk: null,
+        nextDeepWarmAt: new Date(_nextDeepWarmAt).toISOString(),
+      },
       message: "warming up — first cycle not yet complete",
     };
   }
@@ -228,18 +302,25 @@ export function getKeepaliveStatus(): Record<string, unknown> {
 export function startKeepalive(): void {
   _running = true;
   console.log(
-    `[Keepalive] Starting — pinging ${PING_PATHS.length} endpoints every ${PING_INTERVAL_MS / 1000}s`,
+    `[Keepalive] Starting — pinging ${PING_PATHS.length} endpoints every ${PING_INTERVAL_MS / 1000}s, ` +
+      `deep-warm every ${DEEP_WARM_INTERVAL_MS / 60000}min`,
   );
 
   const schedule = () => {
     _timer = setTimeout(async () => {
       await runCycle();
-      schedule(); // re-schedule after cycle completes (not setInterval) so pings never overlap
+      schedule();
     }, PING_INTERVAL_MS);
   };
 
-  // Run the first cycle immediately so the server is warm on startup
-  runCycle().then(schedule);
+  // Run the first cycle immediately so the server is warm on startup;
+  // also fire the first deep-warm right away (don't wait 5 min on boot)
+  runCycle().then(() => {
+    _nextDeepWarmAt = Date.now() + DEEP_WARM_INTERVAL_MS;
+    schedule();
+  });
+  // First deep-warm runs in parallel with the first ping cycle
+  runDeepWarm().catch(() => {});
 }
 
 export function stopKeepalive(): void {

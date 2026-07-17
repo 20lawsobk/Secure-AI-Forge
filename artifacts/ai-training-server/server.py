@@ -9754,6 +9754,120 @@ async def api_health():
     }
 
 
+# ─── Production warm-up ───────────────────────────────────────────────────────
+# Tracks the last deep-warm result so GET /api/warm/status is non-destructive.
+_deep_warm_status: dict[str, Any] = {
+    "state": "pending",   # pending | warm | partial | error
+    "cycles": 0,
+    "last_warm_at": None,
+    "subsystems": {},
+}
+
+
+@app.post("/api/warm")
+async def api_warm(_admin=Depends(verify_admin)):
+    """
+    Production warm-up pass — exercises the Digital GPU inference chains so the
+    reserved VM is fully hot before (or between) real user requests.
+
+    Runs one inference pass through:
+      • transformer / KV-cache  (ScriptAgent 1-token generation)
+      • content scorer          (DistributionAgent caption ranking)
+      • pocket GEMM dedup cache (stats probe confirms cache is active)
+      • quality awareness       (platform buffer re-prime)
+      • RTA Digital GPU         (global GEMM op-count probe)
+
+    Every step is never-raise.  Returns per-subsystem timing and the accumulated
+    warm_start status from the boot-time subsystem pre-warm.
+    Safe to call repeatedly — idempotent and cheap after the first pass.
+    """
+    import time as _wt
+
+    _deep_warm_status["cycles"] = _deep_warm_status.get("cycles", 0) + 1
+    results: dict[str, Any] = {}
+    overall_ok = True
+
+    def _step(name: str, fn) -> None:
+        nonlocal overall_ok
+        t0 = _wt.time()
+        try:
+            val = fn()
+            results[name] = {"ok": True, "ms": int((_wt.time() - t0) * 1000), "detail": val}
+        except Exception as exc:
+            results[name] = {"ok": False, "ms": int((_wt.time() - t0) * 1000), "error": f"{type(exc).__name__}: {exc}"}
+            overall_ok = False
+
+    # ── 1. Transformer / KV-cache ─────────────────────────────────────────────
+    # ScriptAgent.run() drives the full transformer forward pass including
+    # flash-attention and pocket-GEMM dedup — warms KV-cache and GEMM entries.
+    def _warm_transformer():
+        if not _model_ready or _script_agent is None:
+            return "skipped (model not ready)"
+        from ai_model.agents.script_agent import ScriptRequest
+        sr = _script_agent.run(ScriptRequest(
+            idea="warm", platform="tiktok", goal="growth", tone="energetic",
+        ))
+        return f"hook={sr.hook[:40]!r}"
+
+    # ── 2. Content scorer / DistributionAgent ─────────────────────────────────
+    def _warm_scorer():
+        if not _model_ready or _distribution_agent is None:
+            return "skipped (model not ready)"
+        from ai_model.agents.distribution_agent import DistributionRequest
+        dr = _distribution_agent.run(DistributionRequest(
+            script="warm start probe", platform="tiktok", goal="growth",
+        ))
+        return f"caption_len={len(dr.caption)}"
+
+    # ── 3. Pocket GEMM dedup cache ────────────────────────────────────────────
+    def _warm_pocket():
+        from ai_model.maxcore.pdim import get_pocket_accelerator
+        pa = get_pocket_accelerator()
+        stats = pa.stats()
+        return f"hits={stats.get('hits', 0)} misses={stats.get('misses', 0)}"
+
+    # ── 4. Quality awareness buffer ───────────────────────────────────────────
+    def _warm_awareness():
+        from ai_model import quality_awareness
+        quality_awareness.platform_awareness_string("tiktok")
+        return "ok"
+
+    # ── 5. RTA Digital GPU op-count probe ────────────────────────────────────
+    def _warm_rta():
+        from ai_model import rta as _rta
+        counts = _rta.global_op_counts()
+        total = sum(counts.values()) if isinstance(counts, dict) else 0
+        return f"total_ops={total}"
+
+    await _in_thread(lambda: _step("transformer",  _warm_transformer))
+    await _in_thread(lambda: _step("scorer",       _warm_scorer))
+    await _in_thread(lambda: _step("pocket_gemm",  _warm_pocket))
+    await _in_thread(lambda: _step("awareness",    _warm_awareness))
+    await _in_thread(lambda: _step("rta",          _warm_rta))
+
+    _deep_warm_status["state"] = "warm" if overall_ok else "partial"
+    _deep_warm_status["last_warm_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    _deep_warm_status["subsystems"] = results
+
+    return {
+        "hot": overall_ok,
+        "model_ready": _model_ready,
+        "warm_start": _warm_status,
+        "deep_warm": _deep_warm_status,
+        "subsystems": results,
+    }
+
+
+@app.get("/api/warm/status")
+async def api_warm_status(_admin=Depends(verify_admin)):
+    """Non-destructive warm-up status — returns last deep-warm result without running a new pass."""
+    return {
+        "model_ready": _model_ready,
+        "warm_start": _warm_status,
+        "deep_warm": _deep_warm_status,
+    }
+
+
 @app.get("/api/rta/status")
 async def api_rta_status(selftest: bool = False, _key=Depends(require_scope("generate"))):
     """RTA-1 rendering-fabric status. Proves the trinity (IRC/VRC/ARC) runs on the

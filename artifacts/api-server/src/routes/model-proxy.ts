@@ -933,6 +933,120 @@ router.get("/maxcore/pocket-accelerator/stats", async (req, res) => {
   await proxyRequest(req, res, "/api/maxcore/pocket-accelerator/stats");
 });
 
+// ─── Production warm-up endpoints ───────────────────────────────────────────
+
+// Trigger a Digital GPU inference warm pass (transformer → flash-attn → GEMM)
+router.post("/warm", async (req, res) => {
+  await proxyRequest(req, res, "/api/warm");
+});
+
+// Non-destructive: last warm-pass result without triggering a new one
+router.get("/warm/status", async (req, res) => {
+  await proxyRequest(req, res, "/api/warm/status");
+});
+
+// ─── System readiness ────────────────────────────────────────────────────────
+// Native Node.js endpoint — aggregates Python health + keepalive + deep-warm
+// state into a single view MaxBooster can poll to know the VM is fully hot.
+
+router.get("/system/readiness", async (_req, res) => {
+  const PYTHON_PORT = process.env.MODEL_API_PORT || "9878";
+  const PYTHON_BASE = `http://localhost:${PYTHON_PORT}`;
+  const ADMIN_KEY_HDR = process.env.ADMIN_KEY ?? "";
+
+  // Read keepalive snapshot (written by primary, safe from any worker)
+  let keepalive: Record<string, unknown> = {};
+  try {
+    keepalive = JSON.parse(fs.readFileSync("/tmp/maxcore-keepalive.json", "utf8")) as Record<string, unknown>;
+  } catch {
+    keepalive = { running: false, message: "first cycle pending" };
+  }
+
+  // Probe Python: fetch /health and /api/warm/status in parallel so we get
+  // both the model-loaded flag AND the Python-tracked deep_warm state in one pass.
+  let pythonHealth: Record<string, unknown> = {};
+  let pythonWarmStatus: Record<string, unknown> = {};
+  let pythonReachable = false;
+
+  const makeHeaders = (): Record<string, string> => {
+    const h: Record<string, string> = {};
+    if (ADMIN_KEY_HDR) h["X-Admin-Key"] = ADMIN_KEY_HDR;
+    return h;
+  };
+
+  try {
+    const { Agent: UA, request: ur } = await import("undici") as typeof import("undici");
+    const pool = new UA({ keepAliveTimeout: 5_000, connections: 2 });
+
+    const [healthRes, warmRes] = await Promise.allSettled([
+      ur(`${PYTHON_BASE}/health`,          { method: "GET", dispatcher: pool, headers: makeHeaders(), headersTimeout: 5_000, bodyTimeout: 5_000 }),
+      ur(`${PYTHON_BASE}/api/warm/status`, { method: "GET", dispatcher: pool, headers: makeHeaders(), headersTimeout: 5_000, bodyTimeout: 5_000 }),
+    ]);
+
+    if (healthRes.status === "fulfilled" && healthRes.value.statusCode === 200) {
+      pythonHealth = JSON.parse(await healthRes.value.body.text()) as Record<string, unknown>;
+      pythonReachable = true;
+    } else if (healthRes.status === "fulfilled") {
+      await healthRes.value.body.dump();
+    }
+
+    if (warmRes.status === "fulfilled" && warmRes.value.statusCode === 200) {
+      pythonWarmStatus = JSON.parse(await warmRes.value.body.text()) as Record<string, unknown>;
+    } else if (warmRes.status === "fulfilled") {
+      await warmRes.value.body.dump();
+    }
+
+    await pool.close();
+  } catch {
+    pythonHealth = { reachable: false };
+  }
+
+  const modelLoaded       = pythonHealth["model_loaded"] === true;
+  const warmStartState    = (pythonHealth["warm_start"] as Record<string, unknown> | undefined)?.["state"] ?? "unknown";
+  const keepaliveOk       = (keepalive["summary"] as Record<string, number> | undefined)?.["fail"] === 0;
+  const kaDeepWarm        = keepalive["deepWarm"] as Record<string, unknown> | undefined;
+
+  // A deep-warm counts as done if EITHER the keepalive's own POST /api/warm
+  // succeeded, OR Python's internal _deep_warm_status shows a completed pass
+  // (which includes the one triggered by python-server.ts after model load).
+  const pyDeepWarmState   = (pythonWarmStatus["deep_warm"] as Record<string, unknown> | undefined)?.["state"] ?? "pending";
+  const deepWarmDone      =
+    kaDeepWarm?.["lastDeepWarmOk"] === true ||
+    pyDeepWarmState === "warm" ||
+    pyDeepWarmState === "partial";
+
+  const ready =
+    pythonReachable &&
+    modelLoaded &&
+    warmStartState !== "pending" &&
+    keepaliveOk &&
+    deepWarmDone;
+
+  res.status(ready ? 200 : 503).json({
+    ready,
+    node: { workers: "up", keepalive_running: keepalive["running"] ?? false },
+    python: {
+      reachable: pythonReachable,
+      model_loaded: modelLoaded,
+      uptime_seconds: pythonHealth["uptime_seconds"] ?? null,
+      warm_start_state: warmStartState,
+      deep_warm_state: pyDeepWarmState,
+    },
+    keepalive: {
+      cycle_count:       keepalive["cycleCount"] ?? 0,
+      last_cycle_at:     keepalive["lastCycleAt"] ?? null,
+      summary:           keepalive["summary"] ?? {},
+      all_endpoints_ok:  keepaliveOk,
+    },
+    deep_warm: {
+      done:          deepWarmDone,
+      python_state:  pyDeepWarmState,
+      last_warm_at:  kaDeepWarm?.["lastDeepWarmAt"] ?? (pythonWarmStatus["deep_warm"] as Record<string, unknown> | undefined)?.["last_warm_at"] ?? null,
+      next_warm_at:  kaDeepWarm?.["nextDeepWarmAt"] ?? null,
+    },
+  });
+});
+
 // ─── Stay-awake / Keepalive status ──────────────────────────────────────────
 // Native Node.js endpoint — NOT proxied to Python.  Returns the last keepalive
 // cycle result written by the primary cluster process so MaxBooster clients
