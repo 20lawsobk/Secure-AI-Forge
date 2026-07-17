@@ -1,4 +1,5 @@
 import os from "os";
+import fs from "fs";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { Agent, request as undiciRequest } from "undici";
 import {
@@ -501,6 +502,11 @@ router.get("/health", async (req, res) => {
   await proxyRequest(req, res, "/health");
 });
 
+// Detailed model + Digital GPU health (Python /api/health)
+router.get("/api/health", async (req, res) => {
+  await proxyRequest(req, res, "/api/health");
+});
+
 router.get("/api-keys", async (req, res) => {
   await proxyRequest(req, res, "/api-keys");
 });
@@ -908,7 +914,7 @@ router.post("/audio/analyze", async (req, res) => {
   await proxyRequest(req, res, "/api/audio/analyze");
 });
 
-// ─── RTA / Concurrency / Awareness stats ────────────────────────────────────
+// ─── RTA / Concurrency / Awareness / Digital GPU stats ──────────────────────
 
 router.get("/rta/status", async (req, res) => {
   await proxyRequest(req, res, "/api/rta/status");
@@ -920,6 +926,28 @@ router.get("/concurrency/stats", async (req, res) => {
 
 router.get("/awareness/quality/status", async (req, res) => {
   await proxyRequest(req, res, "/api/awareness/quality/status");
+});
+
+// Pocket accelerator — Digital GPU GEMM dedup cache stats
+router.get("/maxcore/pocket-accelerator/stats", async (req, res) => {
+  await proxyRequest(req, res, "/api/maxcore/pocket-accelerator/stats");
+});
+
+// ─── Stay-awake / Keepalive status ──────────────────────────────────────────
+// Native Node.js endpoint — NOT proxied to Python.  Returns the last keepalive
+// cycle result written by the primary cluster process so MaxBooster clients
+// can verify all Digital GPU + platform endpoints are being kept warm.
+
+router.get("/keepalive/status", (_req, res) => {
+  try {
+    const raw = fs.readFileSync("/tmp/maxcore-keepalive.json", "utf8");
+    res.json(JSON.parse(raw));
+  } catch {
+    res.status(503).json({
+      running: false,
+      message: "keepalive status not yet available — first cycle pending",
+    });
+  }
 });
 
 // ─── Watchdog ──────────────────────────────────────────────────────────────
