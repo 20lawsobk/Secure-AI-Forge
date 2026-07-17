@@ -7994,8 +7994,8 @@ def _render_audio_clip(job_id: str, bpm: float, key: str,
                                dtype=np.float64)          # [4×1]
         weights_row = np.array([0.55, 0.25, 0.12, 0.08],
                                dtype=np.float64).reshape(1, 4)  # [1×4]
-        _mix_scalar = float(_gpu_dot(weights_row, np.array([1.0, 0.5, 0.25, 0.5],
-                                                            dtype=np.float64).reshape(4, 1)))
+        _mix_scalar = float(np.asarray(_gpu_dot(weights_row, np.array([1.0, 0.5, 0.25, 0.5],
+                                                            dtype=np.float64).reshape(4, 1))).ravel()[0])
         tone = (
             np.sin(2 * np.pi * freq        * t_note) * 0.55 +
             np.sin(2 * np.pi * freq * 2.0  * t_note) * (0.25 * _mix_scalar) +
@@ -8187,206 +8187,117 @@ def _extract_awareness_moods(awareness: str) -> list:
 def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
                                duration_sec: float,
                                opts: Optional[dict] = None) -> dict:
-    """Render an audio clip from REAL dataset samples stored in pdim.
+    """Render an awareness-primary audio clip, applying full producer controls.
 
-    Selects the stored real-music sample whose key/tempo best matches the
-    requested ``(key, bpm)``, then applies the requested producer controls:
+    The live ContentAwarenessService music-mode context (trending genres, moods,
+    BPM, key from RSS + chart signals) is ALWAYS the audio source.  When a
+    real-track dataset is available in storage, its metadata is consulted to
+    sharpen synthesis parameters (confirm genre affinity, refine BPM/key
+    targets) — but the dataset audio bytes are never used as the source.
 
-    * **Exact key & tempo** — pitch-shift + time-stretch the source so the clip
-      actually lands on ``target_key`` / ``target_bpm`` (rubberband), instead of
-      merely picking the nearest sample.
-    * **Loop / trim** to the requested duration with fades.
-    * **ARC spectral cleanup** (opt-in via env, unchanged).
-    * **Master & export** — optional EBU-R128 loudness target, and WAV/MP3 at a
+    This makes awareness the primary signal at all dataset sizes.  Industry
+    data from live charts is not a fallback; it's the generation engine.
+
+    Producer controls applied to every render regardless of dataset state:
+
+    * **Loop / trim** to the requested duration with musical fades.
+    * **Awareness-driven arrangement** — structured intro/verse/hook/outro
+      conditioned by live-trending genres (gated on the borrowed-knowledge
+      retirement contract); plain loop as the never-raise fallback.
+    * **ARC spectral cleanup** (opt-in via env).
+    * **Master & export** — optional EBU-R128 loudness target, WAV/MP3 at a
       chosen sample-rate / bit-depth.
     * **Stems** — optional drums/bass/melody split for remixing.
 
-    Raises explicitly if no real audio dataset is available so the job reports an
-    error rather than silently synthesizing a fallback.
-
     Returns a dict describing the produced asset(s): ``url``, applied
-    ``bpm``/``key``, ``format``, ``loudness_lufs``, and ``stems`` (url map).
+    ``bpm``/``key``, ``format``, ``loudness_lufs``, ``stems``, and
+    ``arrangement``.
     """
-    import base64 as _b64
     from storage_client import get_storage
     from ai_model.video.ffmpeg_util import run_ffmpeg
     from ai_model.audio import producer_tools as _pt
 
     opts = opts or {}
-    storage = get_storage()
-    meta = storage.get("mb:dataset:audio:meta")
-    if not meta or int(meta.get("num_chunks", 0)) <= 0:
-        # Before failing hard, check if the dataset is actively being seeded
-        # (e.g. during the 30–90 s startup auto-seed window).  If so, wait up
-        # to 45 s for the first chunk to appear so the job can complete
-        # normally rather than returning an error that confuses the caller.
-        from workers.seed_audio_dataset import is_seeding as _is_seeding_render
-        if _is_seeding_render():
-            _wait_deadline = time.time() + 45
-            print(
-                f"[audio_render] dataset empty but seeding in progress — "
-                f"waiting up to 45 s for first chunk (job={job_id[:8]})",
-                flush=True,
-            )
-            while time.time() < _wait_deadline:
-                time.sleep(3)
-                meta = storage.get("mb:dataset:audio:meta")
-                if meta and int(meta.get("num_chunks", 0)) > 0:
-                    print(
-                        f"[audio_render] first chunk available after "
-                        f"{45 - max(0, _wait_deadline - time.time()):.0f}s "
-                        f"wait (job={job_id[:8]}) — proceeding",
-                        flush=True,
-                    )
-                    break
-        if not meta or int(meta.get("num_chunks", 0)) <= 0:
-            # ── Awareness-driven synthesis fallback ───────────────────────
-            # Dataset not yet seeded — drive generation from the live
-            # ContentAwarenessService music-mode context (trending genres,
-            # moods, BPM, key) via the digital GPU synthesis path so the
-            # job returns a real, listenable track even before real samples
-            # are available.  This is the "awareness as primary source"
-            # path: industry signals replace dataset retrieval until the
-            # dataset catches up.
-            _fb_bpm    = float(opts.get("target_bpm") or bpm or 120.0)
-            _fb_key    = str(opts.get("target_key") or key or "C major")
-            _fb_genres = opts.get("preferred_genres") or []
-            _fb_genre  = _fb_genres[0] if _fb_genres else ""
-            _fb_mood   = str(opts.get("preferred_mood") or "")
-            print(
-                f"[audio_awareness_synth] dataset empty — synthesizing from "
-                f"awareness signals: genre={_fb_genre!r} mood={_fb_mood!r} "
-                f"bpm={_fb_bpm} key={_fb_key!r} job={job_id[:8]}",
-                flush=True,
-            )
-            _synth_url = _render_audio_clip(
-                job_id, _fb_bpm, _fb_key,
-                duration_sec=max(4.0, min(float(duration_sec or 30.0), 180.0)),
-                genre=_fb_genre,
-                mood=_fb_mood,
-            )
-            _fmt = str(opts.get("format") or "mp3").lower()
-            return {
-                "url":          _synth_url,
-                "bpm":          _fb_bpm,
-                "key":          _fb_key,
-                "format":       _fmt,
-                "sample_rate":  int(opts.get("sample_rate") or 44100),
-                "bit_depth":    int(opts.get("bit_depth") or 16),
-                "loudness_lufs": None,
-                "stems":        {},
-                "source":       "awareness_synthesis",
-                "awareness_genre": _fb_genre,
-                "awareness_mood":  _fb_mood,
-                "note": (
-                    "Generated from live awareness signals (dataset building). "
-                    "Seed the audio dataset for real-sample rendering."
-                ),
-            }
 
-    index = meta.get("index") or [
-        {"idx": i} for i in range(int(meta["num_chunks"]))
-    ]
+    # ── Producer targets ───────────────────────────────────────────────────────
+    target_bpm = float(opts.get("target_bpm") or bpm or 120.0)
+    target_key = str(opts.get("target_key") or key or "C major")
 
-    # ── Producer targets: exact key/BPM the output must LAND on ───────────────
-    target_bpm = float(opts.get("target_bpm") or bpm or 0.0)
-    target_key = opts.get("target_key") or key
-
-    # ── Awareness-driven genre/mood preferences ────────────────────────────
-    # preferred_genres comes from the caller's opts dict (populated by the
-    # /api/generate/audio handler from brief.genre + live trending genres
-    # extracted from the ContentAwarenessService music-mode context string).
-    # Tracks whose stored genre metadata overlaps get a scoring bonus so the
-    # dataset render reflects live chart signals, not just key/BPM proximity.
+    # ── Awareness signals (primary generation inputs) ──────────────────────────
     _preferred_genres = [
         g.lower().strip()
         for g in (opts.get("preferred_genres") or [])
         if g and str(g).strip()
     ]
-
-    # ── Select best match: genre affinity first, then key, then tempo ──────
-    # Pure-function selector lives in ai_model/audio/track_selector.py so it
-    # can be unit-tested independently of the server and ffmpeg pipeline.
-    from ai_model.audio.track_selector import select_audio_sample as _select
-    want_key = str(target_key or "").strip().lower()
-    want_bpm = float(target_bpm or 0.0)
     _preferred_mood = str(opts.get("preferred_mood") or "").strip()
-    best, _key_matched = _select(index, want_key, want_bpm,
-                                 _preferred_genres, _preferred_mood)
-    best_idx = int(best.get("idx", 0))
-    src_bpm = float(best.get("bpm") or 0.0)
-    src_key = best.get("key")
-    _matched_genres = best.get("genres") or []
-
-    # Surface the key-match fallback as an explicit warning so producers know
-    # their requested key was not found in the current dataset.  Rubberband
-    # will still pitch-shift to the target key, but the warning tells them
-    # the dataset would benefit from more variety.
-    _selection_warning: "str | None" = None
-    if not _key_matched and want_key:
-        _selection_warning = (
-            f"no dataset track matched key '{target_key}' — "
-            f"selected idx={best_idx} (key={src_key!r}, bpm={src_bpm}) "
-            f"as nearest BPM match; rubberband will pitch-shift to the target key"
-        )
-        print(
-            f"[audio_select] WARNING key fallback: want_key={want_key!r} "
-            f"not in index — using idx={best_idx} key={src_key!r}",
-            flush=True,
-        )
-    print(
-        f"[audio_select] job={job_id[:8]} preferred={_preferred_genres} "
-        f"matched_genres={_matched_genres} idx={best_idx} "
-        f"bpm={src_bpm} key={src_key} key_matched={_key_matched}",
-        flush=True,
+    _synth_genre = _preferred_genres[0] if _preferred_genres else (
+        str(opts.get("genre") or "").lower().strip()
     )
 
-    # Fetch the chunk with a hard wall-clock deadline.
-    # urllib3's read= timeout is *per-socket-chunk* (not total response time),
-    # so a large b64 audio payload arriving byte-by-byte under memory pressure
-    # can block the thread for minutes even with an 8 s socket timeout.  A
-    # concurrent.futures deadline enforces an absolute ceiling regardless of
-    # how the storage client is configured.
-    import concurrent.futures as _cfs
-    print(f"[audio_render] fetching chunk idx={best_idx} for job={job_id[:8]}",
-          flush=True)
-    # NOTE: no `with` block — ThreadPoolExecutor.__exit__ calls
-    # shutdown(wait=True), which would block on the hung worker and defeat
-    # the deadline.  shutdown(wait=False) lets the daemon-ish worker linger
-    # while the render thread proceeds to raise immediately.
-    _chunk_pool = _cfs.ThreadPoolExecutor(
-        max_workers=1, thread_name_prefix=f"AudioChunkFetch-{job_id[:8]}"
-    )
-    _chunk_fut = _chunk_pool.submit(
-        storage.get, f"mb:dataset:audio:chunk:{best_idx}"
-    )
+    # ── Dataset metadata reference (optional parameter refinement) ─────────────
+    # When a real-track dataset exists, run the selector purely for metadata:
+    # the matched sample's genre tags and BPM range are used to cross-check /
+    # confirm the synthesis targets.  No audio bytes are fetched.
+    # Never raises — dataset absence is not an error condition.
+    _ref_sample: "dict | None" = None
     try:
-        sample = _chunk_fut.result(timeout=30)
-    except _cfs.TimeoutError:
-        _chunk_fut.cancel()
-        _chunk_pool.shutdown(wait=False)
-        raise RuntimeError(
-            f"storage read of audio chunk {best_idx} timed out after 30 s "
-            f"(server likely under memory pressure — job={job_id[:8]})"
-        )
-    else:
-        _chunk_pool.shutdown(wait=False)
-    if not sample or not sample.get("b64"):
-        raise RuntimeError(
-            f"real audio sample {best_idx} missing data in storage"
-        )
+        storage = get_storage()
+        meta = storage.get("mb:dataset:audio:meta")
+        if meta and int(meta.get("num_chunks", 0)) > 0:
+            index = meta.get("index") or [
+                {"idx": i} for i in range(int(meta["num_chunks"]))
+            ]
+            from ai_model.audio.track_selector import select_audio_sample as _select
+            _best, _key_matched = _select(
+                index,
+                str(target_key or "").strip().lower(),
+                float(target_bpm or 0.0),
+                _preferred_genres,
+                _preferred_mood,
+            )
+            _ref_sample = _best
+            _ref_genres = _best.get("genres") or []
+            # Fold dataset genre affinity into the synthesis genre when the
+            # dataset confirms a genre signal the awareness layer also sees.
+            if not _synth_genre and _ref_genres:
+                _synth_genre = str(_ref_genres[0]).lower()
+            # Use dataset BPM as a tiebreaker when target_bpm is not explicit.
+            if not target_bpm and float(_best.get("bpm") or 0.0) > 0:
+                target_bpm = float(_best.get("bpm"))
+            print(
+                f"[audio_ref] dataset reference: idx={_best.get('idx')} "
+                f"bpm={_best.get('bpm')} key={_best.get('key')} "
+                f"genres={_ref_genres} — used as metadata reference only; "
+                f"audio synthesized from awareness signals (job={job_id[:8]})",
+                flush=True,
+            )
+    except Exception as _ref_err:
+        print(f"[audio_ref] dataset metadata lookup skipped: {_ref_err}",
+              flush=True)
+
+    # ── Awareness synthesis — always primary ───────────────────────────────────
+    # _render_audio_clip synthesizes genre/mood-aware audio from live industry
+    # signals via the digital GPU engine.  Writes audio_src_<job>.mp3 so the
+    # producer pipeline below can treat it identically to any source file.
     print(
-        f"[audio_render] chunk fetched ({len(sample.get('b64', '')) // 1024} KB b64)"
-        f" for job={job_id[:8]}",
+        f"[audio_awareness_synth] synthesizing from live awareness signals: "
+        f"genre={_synth_genre!r} mood={_preferred_mood!r} "
+        f"bpm={target_bpm} key={target_key!r} job={job_id[:8]}",
         flush=True,
     )
+    _synth_duration = max(4.0, min(float(duration_sec or 30.0), 180.0))
+    # Write to audio_src_<job_id>.mp3 so the producer pipeline below picks it
+    # up as src_path without any file-name conflict with the final output.
+    _render_audio_clip(
+        f"src_{job_id}", target_bpm, target_key,
+        duration_sec=_synth_duration,
+        genre=_synth_genre,
+        mood=_preferred_mood,
+    )
 
-    raw = _b64.b64decode(sample["b64"])
     src_path = _UPLOADS_PATH / f"audio_src_{job_id}.mp3"
     src_wav = _UPLOADS_PATH / f"audio_srcwav_{job_id}.wav"
-    tuned_wav = _UPLOADS_PATH / f"audio_tuned_{job_id}.wav"
     looped_wav = _UPLOADS_PATH / f"audio_loop_{job_id}.wav"
-    src_path.write_bytes(raw)
 
     # Export target format (default MP3 for quick sharing; WAV for the studio).
     fmt = (opts.get("format") or "mp3").lower()
@@ -8400,12 +8311,13 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
     out_ext = "wav" if fmt == "wav" else "mp3"
     out_path = _UPLOADS_PATH / f"audio_{job_id}.{out_ext}"
 
-    applied_bpm = float(target_bpm or src_bpm or 0.0)
-    applied_key = target_key or src_key
-    _tmp = [src_path, src_wav, tuned_wav, looped_wav]
+    # Synthesis always lands at the requested targets — no pitch/tempo
+    # correction needed (unlike the old clip-repurposing path).
+    applied_bpm = float(target_bpm or 120.0)
+    applied_key = str(target_key or "C major")
+    _tmp = [src_path, src_wav, looped_wav]
     try:
-        # 1) Decode source → stereo WAV. Dataset samples may be mono; -ac 2
-        #    upmixes so the delivered master is always true stereo.
+        # 1) Decode synthesized source → stereo WAV.
         r0 = run_ffmpeg(["ffmpeg", "-y", "-i", str(src_path), "-ac", "2",
                          "-ar", str(sample_rate), str(src_wav)], timeout=60)
         if r0.returncode != 0 or not src_wav.exists():
@@ -8414,34 +8326,11 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
                 f"{(r0.stderr or '')[-300:]}"
             )
 
-        # 2) Retune + retime so the clip HITS the requested key & BPM.
         stage_in = src_wav
-        semis = _pt.nearest_semitones(src_key, target_key)
-        tempo_ratio = (target_bpm / src_bpm) if (src_bpm > 0 and target_bpm > 0) else 1.0
-        try:
-            if _pt.retune_retime(src_wav, tuned_wav, semitones=semis,
-                                 tempo_ratio=tempo_ratio):
-                stage_in = tuned_wav
-                # Report the level we actually landed on after clamping.
-                _clamped = max(0.5, min(2.0, tempo_ratio))
-                if src_bpm > 0:
-                    applied_bpm = round(src_bpm * _clamped, 1)
-                print(f"[Producer] retune/retime audio_{job_id}: "
-                      f"{semis:+d} semitones, tempo x{_clamped:.3f} "
-                      f"({src_key}@{src_bpm}→{applied_key}@{applied_bpm})",
-                      flush=True)
-        except Exception as _rr_err:
-            # Honest fallback: keep the untransformed source and report the
-            # source's own key/BPM rather than a level we did not achieve.
-            applied_bpm, applied_key = src_bpm, src_key
-            print(f"[Producer] retune/retime skipped (serving source key/bpm): "
-                  f"{_rr_err}", flush=True)
 
-        # 3) Assemble to the requested duration. Awareness-driven ARRANGEMENT
-        #    first (structured intro/verse/hook/outro via stem automation,
-        #    conditioned by the live-industry awareness genres and gated on
-        #    the borrowed-knowledge retirement contract); plain loop as the
-        #    never-raise fallback. Both paths end with musical fades.
+        # 2) Assemble to the requested duration. Awareness-driven ARRANGEMENT
+        #    first (structured intro/verse/hook/outro conditioned by live-
+        #    industry trending genres); plain loop as the never-raise fallback.
         arrangement_plan = None
         arranged_wav = _UPLOADS_PATH / f"audio_arr_{job_id}.wav"
         _tmp.append(arranged_wav)
@@ -8451,10 +8340,10 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
             try:
                 from ai_model.audio import arrangement as _arr
                 _plan = _arr.build_plan(
-                    float(duration_sec), float(applied_bpm or src_bpm or 120),
-                    genre=(opts.get("genre") or None),
-                    mood=(opts.get("preferred_mood") or None),
-                    trending_genres=opts.get("preferred_genres") or [],
+                    float(duration_sec), float(applied_bpm or 120),
+                    genre=(opts.get("genre") or _synth_genre or None),
+                    mood=(_preferred_mood or None),
+                    trending_genres=_preferred_genres or [],
                     seed=opts.get("seed"),
                 )
                 if _arr.realize(stage_in, arranged_wav, _plan,
@@ -8474,7 +8363,6 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
         _fade_af = (f"afade=t=in:st=0:d=0.05,"
                     f"afade=t=out:st={fade_out_start:.2f}:d={fade_len:.2f}")
         if arrangement_plan:
-            # Arranged track is already full-length — just apply edge fades.
             r1 = run_ffmpeg(
                 ["ffmpeg", "-y", "-i", str(arranged_wav),
                  "-t", f"{float(duration_sec):.2f}", "-af", _fade_af,
@@ -8482,7 +8370,6 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
                 timeout=max(90, int(float(duration_sec) * 1.2) + 30),
             )
             if r1.returncode != 0 or not looped_wav.exists():
-                # Honest fallback: drop the arrangement claim and loop plain.
                 arrangement_plan = None
         if not arrangement_plan:
             r1 = run_ffmpeg(
@@ -8497,18 +8384,17 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
                     f"{r1.stderr[-300:]}"
                 )
 
-        # 4) RTA-1 ARC spectral restoration (opt-in, env-gated) ───────────────
+        # 3) RTA-1 ARC spectral restoration (opt-in, env-gated) ───────────────
         if os.environ.get("RTA_AUDIO_SPECTRAL") == "1":
             try:
                 _arc_spectral_clean_file(looped_wav)
                 print(f"[RTA] ARC spectral clean applied to audio_{job_id}",
                       flush=True)
             except Exception as _arc_err:
-                print(f"[RTA] ARC spectral clean skipped (serving base clip): "
-                      f"{_arc_err}", flush=True)
+                print(f"[RTA] ARC spectral clean skipped: {_arc_err}",
+                      flush=True)
 
-        # 5) Optional stems (drums / bass / melody) BEFORE mastering, so each
-        #    stem is a clean isolation of the produced clip.
+        # 4) Optional stems (drums / bass / melody) BEFORE mastering.
         stem_urls: dict = {}
         if opts.get("stems"):
             try:
@@ -8522,9 +8408,7 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
             except Exception as _st_err:
                 print(f"[Producer] stems skipped: {_st_err}", flush=True)
 
-        # 6) Master (optional LUFS) + export to the requested format.
-        #    Degrade gracefully: a mastering failure must not kill the render —
-        #    fall back to a plain encode of the assembled clip.
+        # 5) Master (optional LUFS) + export to the requested format.
         try:
             _pt.master_export(looped_wav, out_path, fmt=fmt,
                               sample_rate=sample_rate, bit_depth=bit_depth,
@@ -8532,7 +8416,7 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
         except Exception as _mx_err:
             print(f"[Producer] master_export failed — plain encode fallback: "
                   f"{_mx_err}", flush=True)
-            loudness_lufs = None  # honest: no loudness normalization applied
+            loudness_lufs = None
             codec = (["-codec:a", "pcm_s24le"] if fmt == "wav"
                      else ["-codec:a", "libmp3lame", "-b:a", "320k"])
             r2 = run_ffmpeg(["ffmpeg", "-y", "-i", str(looped_wav),
@@ -8560,14 +8444,16 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
         "bit_depth": bit_depth if fmt == "wav" else None,
         "loudness_lufs": loudness_lufs,
         "stems": stem_urls,
-        # Section plan actually rendered (None = plain loop). Additive field —
-        # flows through the api-server proxy and job poll untouched.
         "arrangement": arrangement_plan,
-        "source_sample": {"idx": best_idx, "bpm": src_bpm, "key": src_key},
-        # None when an exact key match was found; non-None string when the
-        # selector fell back to the full index because no track matched the
-        # requested key.  Propagated into the job record and poll response.
-        "selection_warning": _selection_warning,
+        # Provenance: which dataset sample informed the synthesis parameters
+        # (metadata-reference only — no audio was fetched from storage).
+        "source_sample": (
+            {"idx": _ref_sample.get("idx"), "bpm": _ref_sample.get("bpm"),
+             "key": _ref_sample.get("key"), "role": "metadata_reference"}
+            if _ref_sample else None
+        ),
+        # No selection_warning: synthesis always lands at target key/BPM.
+        "selection_warning": None,
     }
 
 
