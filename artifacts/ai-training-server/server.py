@@ -385,6 +385,30 @@ def _digest_str(fields: dict) -> str:
     return hashlib.blake2b(payload, digest_size=16).hexdigest()
 
 
+# ─── Storage health tracking ─────────────────────────────────────────────────
+# Updated by _init_storage() at boot and polled lazily by _get_storage_mode().
+# Three states:
+#   "live"           — pdim is reachable and serving requests
+#   "local_fallback" — pdim offline; disk-backed SQLite store is active
+#   "offline"        — neither pdim nor the disk store is available
+_storage_mode: str = "unknown"
+
+
+def _get_storage_mode() -> str:
+    """Return the current storage health as a string constant.
+
+    Reads the live StorageClient state (never raises) so the caller always
+    gets a concrete value to surface in health probes and generation responses."""
+    try:
+        from storage_client import get_storage
+        s = get_storage()
+        if s.is_available:
+            return "live"
+        return "local_fallback" if s.disk_store_available else "offline"
+    except Exception:
+        return "unknown"
+
+
 # ─── PDIM orchestrator: dedup + single-flight (default for content gen) ────────
 _pdim_orchestrator = None
 _pdim_orch_lock = threading.Lock()
@@ -1544,11 +1568,14 @@ def _init_storage():
     from storage_client import get_storage
     storage = get_storage()
     ok = storage.ping()
+    global _storage_mode
     if ok:
+        _storage_mode = "live"
         print("[Storage] Connected to MaxBooster storage server")
         _load_checkpoint_from_storage()
     else:
-        print("[Storage] Storage server offline — using in-process fallback")
+        _storage_mode = "local_fallback" if storage.disk_store_available else "offline"
+        print(f"[Storage] Storage server offline — using in-process fallback (mode={_storage_mode})")
 
     # ── Audio manifest reconciliation (runs on every boot, cheap when healthy)
     _reconcile_audio_manifest(storage)
@@ -1879,6 +1906,7 @@ async def health():
         "uptime_seconds": time.time() - _start_time,
         "version": "1.0.0",
         "warm_start": _warm_status,
+        "storage_mode": _get_storage_mode(),
     }
 
 _start_time = time.time()
@@ -3559,9 +3587,20 @@ class CheckpointSave(BaseModel):
 async def storage_status(_key = Depends(verify_api_key)):
     from storage_client import get_storage, get_checkpoint_client
     storage = get_storage()
+    st = storage.status()
+    # Derive canonical storage_mode so callers never have to re-implement the logic.
+    if st.get("available"):
+        _mode = "live"
+    elif st.get("disk_store_available"):
+        _mode = "local_fallback"
+    else:
+        _mode = "offline"
     checkpoints = get_checkpoint_client().list_checkpoints()
     return {
-        **storage.status(),
+        **st,
+        "storage_mode": _mode,
+        # Alias: some older dashboard code checks `connected`
+        "connected": st.get("available", False),
         "recent_checkpoints": checkpoints[:5],
     }
 
@@ -6671,11 +6710,18 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
         _by_platform = {p: _build(_platform=p) for p in dict.fromkeys(_plats)}
         if _by_platform:
             first = next(iter(_by_platform.values()))
-            return {
+            _xplat_out: dict = {
                 **first,
                 "platform_variants": _by_platform,
                 "processing_time_ms": round((time.time() - start) * 1000, 1),
             }
+            _sm = _get_storage_mode()
+            if _sm != "live":
+                _xplat_out["storage_warning"] = (
+                    "pdim storage is offline — quality awareness and retrieval index are "
+                    f"running in {_sm.replace('_', ' ')} mode; output quality may be reduced"
+                )
+            return _xplat_out
         # `platforms` was present but contained no usable entries (e.g. [""])
         # — fall through to the normal single-platform path below instead of
         # crashing on an empty dict.
@@ -6714,6 +6760,12 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
             result["cached"] = True
     else:
         result = _build()
+    _sm = _get_storage_mode()
+    if _sm != "live":
+        result["storage_warning"] = (
+            "pdim storage is offline — quality awareness and retrieval index are "
+            f"running in {_sm.replace('_', ' ')} mode; output quality may be reduced"
+        )
     result["processing_time_ms"] = round((time.time() - start) * 1000, 1)
     return result
 
@@ -7128,6 +7180,12 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
             result["cached"] = True
     else:
         result = _build()
+    _sm = _get_storage_mode()
+    if _sm != "live":
+        result["storage_warning"] = (
+            "pdim storage is offline — quality awareness and retrieval index are "
+            f"running in {_sm.replace('_', ' ')} mode; output quality may be reduced"
+        )
     result["processing_time_ms"] = round((time.time() - start) * 1000, 1)
     return result
 
@@ -9692,6 +9750,7 @@ async def api_health():
         "model_loaded": _model_ready,
         "uptime_seconds": time.time() - _start_time,
         "version": "1.0.0",
+        "storage_mode": _get_storage_mode(),
     }
 
 

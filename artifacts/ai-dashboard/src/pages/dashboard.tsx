@@ -120,7 +120,20 @@ export default function Dashboard() {
   };
 
   const uptimeFormatted = formatUptime(health?.uptime_seconds);
-  const storageOnline = storageStatus?.connected === true;
+  // storage_mode is the canonical field added in the /storage/status response.
+  // Fall back to deriving from `available` so old responses still work.
+  const storageMode: "live" | "local_fallback" | "offline" | "unknown" =
+    storageStatus?.storage_mode ??
+    (storageStatus?.available === true
+      ? "live"
+      : storageStatus?.disk_store_available
+        ? "local_fallback"
+        : storageStatus
+          ? "offline"
+          : "unknown");
+  const storageOnline = storageMode === "live";
+  const storageDegraded = storageMode === "local_fallback";
+  const storageOffline = storageMode === "offline";
   const watchdogAlerts: string[] = watchdog?.active_alerts ?? [];
 
   if (statsLoading || healthLoading) {
@@ -190,6 +203,23 @@ export default function Dashboard() {
           </div>
         </div>
       </div>
+
+      {/* Storage degraded / offline banner */}
+      {(storageDegraded || storageOffline) && (
+        <div className={`glass-panel p-4 rounded-xl flex items-start gap-3 ${storageOffline ? "border border-red-500/30 bg-red-500/5" : "border border-amber-500/30 bg-amber-500/5"}`}>
+          <AlertTriangle className={`w-5 h-5 mt-0.5 shrink-0 ${storageOffline ? "text-red-400" : "text-amber-400"}`} />
+          <div className="space-y-1">
+            <p className={`text-sm font-medium ${storageOffline ? "text-red-300" : "text-amber-300"}`}>
+              pdim Storage {storageOffline ? "Offline" : "Degraded — Local Fallback Active"}
+            </p>
+            <p className={`text-xs ${storageOffline ? "text-red-400/80" : "text-amber-400/80"}`}>
+              {storageOffline
+                ? "Neither pdim nor the local disk store is reachable. Content generation quality is significantly reduced."
+                : "pdim is unreachable. The system is using the local disk-backed store. Quality awareness and retrieval index are running in fallback mode — output quality may be reduced."}
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Watchdog alerts banner */}
       {watchdogAlerts.length > 0 && (
@@ -325,31 +355,63 @@ export default function Dashboard() {
                 className={
                   storageOnline
                     ? "border-green-500/50 text-green-400"
-                    : "border-amber-500/50 text-amber-400"
+                    : storageDegraded
+                      ? "border-amber-500/50 text-amber-400"
+                      : storageOffline
+                        ? "border-red-500/50 text-red-400"
+                        : "border-white/20 text-muted-foreground"
                 }
               >
                 {storageOnline
                   ? "Online"
-                  : storageStatus
-                    ? "Offline"
-                    : "Checking…"}
+                  : storageDegraded
+                    ? "Degraded"
+                    : storageOffline
+                      ? "Offline"
+                      : storageStatus
+                        ? "Unknown"
+                        : "Checking…"}
               </Badge>
             </div>
-            {storageStatus?.instance_id && (
+            {storageStatus && (
               <div className="flex justify-between items-center p-3 bg-black/20 rounded-xl border border-white/5">
-                <span className="text-sm text-muted-foreground">Instance</span>
-                <span className="text-xs font-mono text-white truncate max-w-[120px]">
-                  {storageStatus.instance_id}
+                <span className="text-sm text-muted-foreground">Mode</span>
+                <span
+                  className={`text-xs font-mono ${
+                    storageOnline
+                      ? "text-green-400"
+                      : storageDegraded
+                        ? "text-amber-400"
+                        : storageOffline
+                          ? "text-red-400"
+                          : "text-muted-foreground"
+                  }`}
+                >
+                  {storageMode === "live"
+                    ? "live"
+                    : storageMode === "local_fallback"
+                      ? "local fallback"
+                      : storageMode === "offline"
+                        ? "offline"
+                        : "unknown"}
                 </span>
               </div>
             )}
-            {storageStatus?.keys_count != null && (
+            {(storageStatus?.instance_id ?? storageStatus?.instance) && (
+              <div className="flex justify-between items-center p-3 bg-black/20 rounded-xl border border-white/5">
+                <span className="text-sm text-muted-foreground">Instance</span>
+                <span className="text-xs font-mono text-white truncate max-w-[120px]">
+                  {storageStatus.instance_id ?? storageStatus.instance}
+                </span>
+              </div>
+            )}
+            {(storageStatus?.keys_count ?? storageStatus?.fallback_keys) != null && (
               <div className="flex justify-between items-center p-3 bg-black/20 rounded-xl border border-white/5">
                 <span className="text-sm text-muted-foreground">
-                  Keys stored
+                  {storageOnline ? "Keys stored" : "Fallback keys"}
                 </span>
                 <span className="text-sm font-mono text-white">
-                  {storageStatus.keys_count}
+                  {storageStatus.keys_count ?? storageStatus.fallback_keys}
                 </span>
               </div>
             )}
