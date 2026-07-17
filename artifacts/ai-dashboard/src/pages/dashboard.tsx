@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   useGetDashboardStats,
@@ -87,6 +88,26 @@ export default function Dashboard() {
     refetchInterval: 30_000,
     retry: false,
   });
+
+  const [seeding, setSeeding] = useState(false);
+
+  const handleSeedAudio = async () => {
+    if (seeding || audioStatus?.seeding_now) return;
+    setSeeding(true);
+    try {
+      await fetch(`${BASE}/storage/datasets/audio/seed`, {
+        method: "POST",
+        headers: authHdr,
+      });
+      // Poll for status update
+      setTimeout(() => refetchAudio(), 2_000);
+      setTimeout(() => refetchAudio(), 8_000);
+    } catch (_) {
+      // non-fatal — status panel will reflect actual state
+    } finally {
+      setSeeding(false);
+    }
+  };
 
   const handleRefreshAll = () => {
     refetchStats();
@@ -439,20 +460,33 @@ export default function Dashboard() {
             </Badge>
           )}
           {!audioStatus?.seeding_now && audioStatus && (
-            <Badge
-              variant="outline"
-              className={
-                (audioStatus.dataset?.num_chunks ?? 0) >=
+            <>
+              <Badge
+                variant="outline"
+                className={
+                  (audioStatus.dataset?.num_chunks ?? 0) >=
+                  (audioStatus.auto_growth?.threshold ?? 20)
+                    ? "ml-auto border-green-500/40 text-green-400"
+                    : "ml-auto border-amber-500/40 text-amber-400"
+                }
+              >
+                {(audioStatus.dataset?.num_chunks ?? 0) >=
                 (audioStatus.auto_growth?.threshold ?? 20)
-                  ? "ml-auto border-green-500/40 text-green-400"
-                  : "ml-auto border-amber-500/40 text-amber-400"
-              }
-            >
-              {(audioStatus.dataset?.num_chunks ?? 0) >=
-              (audioStatus.auto_growth?.threshold ?? 20)
-                ? "Healthy"
-                : "Growing"}
-            </Badge>
+                  ? "Healthy"
+                  : "Growing"}
+              </Badge>
+              {(audioStatus.dataset?.num_chunks ?? 0) === 0 && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="border-primary/40 text-primary hover:bg-primary/10 ml-2"
+                  disabled={seeding}
+                  onClick={handleSeedAudio}
+                >
+                  {seeding ? "Seeding…" : "Seed Now"}
+                </Button>
+              )}
+            </>
           )}
         </div>
 
