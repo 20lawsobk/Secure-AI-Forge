@@ -287,7 +287,13 @@ class StorageClient:
                         self._flush_fallback_to_storage()
             except Exception:
                 self._available = False
-            time.sleep(30)
+            # Probe frequently while offline: pdim has its own stay-alive and
+            # recovers quickly, so we want to detect and reconnect within one
+            # probe window (~10 s) rather than waiting the full 30 s.
+            # When live the flywheels generate constant traffic, so any failure
+            # surfaces immediately via _exec returning None; the thread can back
+            # off to 60 s without missing a real outage.
+            time.sleep(10 if not self._available else 60)
 
     def _flush_fallback_to_storage(self) -> None:
         """Re-sync in-memory and disk fallback data to pdim after reconnect."""
