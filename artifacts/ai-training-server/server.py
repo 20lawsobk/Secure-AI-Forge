@@ -8739,18 +8739,55 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
     if _model_ready and _script_agent:
         try:
             from ai_model.agents.script_agent import ScriptRequest
-            _mood_hint = req.intent or "energetic"
-            # Keep `idea` clean (templated raw into hook/body text); do NOT
-            # feed `brief.directives` in as awareness — those are internal
-            # prompt-engineering instructions, not real-world context, and
-            # the script agent's awareness parser treats any bulleted line
-            # as a quotable signal (see the matching comment in
-            # /api/generate/content above).
-            idea_text  = f"{genre_hint} audio track ({brief.tempo} tempo)"
+
+            # ── Concept awareness string — built from audio-specific signals ──
+            # _merged_awareness_for() may return thin results for audio requests
+            # (no `description` field → intent layer finds nothing).  Instead
+            # build the awareness string directly from what we already have:
+            # the live awareness buffer, plus the request's genre/mood/key/BPM
+            # so _awareness_compose() has real industry signals to work with.
+            _concept_aw_parts: list[str] = []
+            if _aw_str_handler:
+                _concept_aw_parts.append(_aw_str_handler)
+            if _preferred_genres_handler:
+                _concept_aw_parts.append(
+                    f"Trending genres: {', '.join(_preferred_genres_handler)}"
+                )
+            if _preferred_mood_handler:
+                _concept_aw_parts.append(
+                    f"Trending moods: {_preferred_mood_handler}"
+                )
+            # Fold the prompt/brief mood and any explicit mood request in too
+            _explicit_mood = (getattr(req, "mood", None) or "").strip()
+            if _explicit_mood and _explicit_mood not in _concept_aw_parts[-1:]:
+                _concept_aw_parts.append(f"Trending moods: {_explicit_mood}")
+            _prompt_text = (getattr(req, "prompt", None) or "").strip()
+            if _prompt_text:
+                # Surface the raw prompt as a HIGH-priority signal so the hook
+                # and body reflect the actual creative brief (dark, cinematic…)
+                _concept_aw_parts.append(f"[HIGH] {_prompt_text}")
+            _concept_awareness = "\n".join(_concept_aw_parts).strip()
+
+            # ── Idea text: include mood, key, BPM so hooks carry energy context ─
+            _mood_label = (
+                _explicit_mood or _preferred_mood_handler or brief.mood or brief.tone or "energetic"
+            )
+            _key_label  = (getattr(req, "key", None) or getattr(req, "target_key", None) or "").strip()
+            _bpm_label  = (getattr(req, "bpm", None) or getattr(req, "target_bpm", None))
+            idea_text   = genre_hint
+            if _mood_label:
+                idea_text = f"{_mood_label} {idea_text}"
+            if _key_label and _bpm_label:
+                idea_text = f"{idea_text} ({brief.tempo} tempo, {_bpm_label} BPM, {_key_label})"
+            elif _bpm_label:
+                idea_text = f"{idea_text} ({brief.tempo} tempo, {_bpm_label} BPM)"
+            else:
+                idea_text = f"{idea_text} ({brief.tempo} tempo)"
+
             sr = await _in_thread(lambda: _script_agent.run(ScriptRequest(
                 idea=idea_text, platform="general",
                 goal="creative production", tone=brief.tone,
-                awareness=_merged_awareness_for(req),
+                awareness=_concept_awareness,
             )))
             if sr:
                 audio_concept = sr.body
