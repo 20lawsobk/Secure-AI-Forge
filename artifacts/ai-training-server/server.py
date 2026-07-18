@@ -6352,8 +6352,11 @@ class ApiGenerateAudioRequest(_AwarenessMixin):
     # ── Producer-grade controls (what real artists/producers ask for) ─────────
     # Exact musical targets: when set, the rendered clip is pitch-shifted /
     # time-stretched to actually HIT these, not just pick the nearest sample.
+    # Both forms accepted: target_bpm/target_key (internal) and bpm/key (alias).
     target_bpm: Optional[float] = None
     target_key: Optional[str] = None
+    bpm: Optional[float] = None        # alias → target_bpm
+    key: Optional[str] = None          # alias → target_key
     # Reproducibility: same seed + same request → same result (fixes the
     # "great result I can't reproduce" complaint).
     seed: Optional[int] = None
@@ -8841,17 +8844,20 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         # Real-asset sonic technique (opt-in) grounds tempo/key when the caller
         # gave neither a style fingerprint nor an explicit target.
         if _audio_tech is not None:
-            if not (fp and len(fp) >= 4) and req.target_bpm is None and _audio_tech.tempo:
+            if not (fp and len(fp) >= 4) and (req.target_bpm is None and req.bpm is None) and _audio_tech.tempo:
                 bpm = round(float(_audio_tech.tempo), 1)
-            if not (fp and len(fp) >= 8) and req.target_key is None and _audio_tech.key:
+            if not (fp and len(fp) >= 8) and (req.target_key is None and req.key is None) and _audio_tech.key:
                 key = _audio_tech.key
         # Producer targets override the derived values (exact key/BPM the output
         # must LAND on, via pitch-shift + time-stretch in the render).
-        target_bpm = float(req.target_bpm) if req.target_bpm else bpm
+        # Accept both target_bpm/target_key (internal) and bpm/key (alias).
+        _req_bpm = req.target_bpm or req.bpm
+        _req_key = req.target_key or req.key
+        target_bpm = float(_req_bpm) if _req_bpm else bpm
         # Clamp to a musically sane range so bad input can't produce misleading
         # metadata or an avoidable ffmpeg failure (retune ratio is clamped too).
         target_bpm = max(40.0, min(300.0, float(target_bpm)))
-        target_key = req.target_key or key
+        target_key = _req_key or key
         # Validate export params against what ffmpeg/PCM actually support; fall
         # back to safe studio defaults rather than failing the whole render.
         _fmt = (req.format or "mp3").lower()
