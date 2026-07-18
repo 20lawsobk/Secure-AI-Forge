@@ -4694,6 +4694,7 @@ async def maxcore_generate_text(req: MaxcoreTextRequest, _key = Depends(require_
                 full_script = f"{hook_line}\n{body_line}\n{cta_line}".strip()
                 dist = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
                     script=full_script, platform=platform, goal=intent,
+                    awareness=_merged_awareness_for(req),
                 )))
                 text = dist.caption
                 posting_time = getattr(dist, "posting_time", "") or ""
@@ -5218,35 +5219,83 @@ async def _generate_ad_creative(
             base_cta  = cta_pool[variant_idx % len(cta_pool)]
             source    = "template"
 
-    # ── AI model enhancement ─────────────────────────────────────────────────
+    # ── Awareness composition (primary) ──────────────────────────────────────
+    # When awareness context is present (normal production path), the
+    # awareness-composed script IS the ad copy — hook, body, and CTA all come
+    # from live industry signals via ScriptAgent._awareness_compose.  The
+    # static template pools above only serve peak-formula replication or the
+    # no-awareness edge case.
     hook     = base_hook
     body     = ""
     headline = ""
-    if _model_ready and _script_agent:
-        try:
-            import asyncio as _asyncio
-            from ai_model.agents.script_agent import ScriptRequest
+    try:
+        import asyncio as _asyncio
+        from ai_model.agents.script_agent import ScriptAgent as _SA, ScriptRequest
+        _sreq = ScriptRequest(
+            # Natural theme only — never instruction-style text ("video
+            # ad for X"), which leaks verbatim into user-facing copy.
+            idea=f"{product} by {artist}",
+            genre=genre or "",
+            platform=platform,
+            goal=goal,
+            tone=type_spec["copy_tone"],
+            awareness=awareness or "",
+            variant_idx=variant_idx,
+        )
+        script = None
+        if awareness:
+            # Awareness composition is deterministic pure-Python (no model
+            # call) — run it regardless of model readiness so ad copy is
+            # NEVER templated while awareness signals exist.
+            _agent = _script_agent if _script_agent is not None else _SA.__new__(_SA)
             script = await _asyncio.wait_for(
-                _in_thread(lambda: _script_agent.run(ScriptRequest(
-                    idea=f"{product} — {genre or 'music'} {sub} ad for {artist}",
-                    platform=platform,
-                    goal=goal,
-                    tone=type_spec["copy_tone"],
-                    awareness=awareness or "",
-                ))),
-                timeout=12.0,
+                _in_thread(lambda: _agent._awareness_compose(_sreq)), timeout=12.0,
             )
-            # Only accept the model hook when it scores HIGHER than the pool
-            # hook — prevents regression to weaker phrases while still
-            # benefiting from awareness conditioning.
-            if script.hook and len(script.hook) > 5:
+        elif _model_ready and _script_agent:
+            script = await _asyncio.wait_for(
+                _in_thread(lambda: _script_agent.run(_sreq)), timeout=12.0,
+            )
+        if script is not None:
+            _script_source = getattr(script, "source", "")
+            if _script_source == "awareness" and script.hook and len(script.hook) > 5:
+                # Awareness-composed copy is authoritative — no score gate.
+                # Peak-formula hooks are the one exception: they replicate a
+                # proven top performer from THIS account's own ad history,
+                # which outranks a fresh composition.
+                if source != "peak_replicated":
+                    hook   = script.hook
+                    source = "awareness"
+                body     = script.body
+                headline = script.cta[:50] if script.cta else base_cta
+                if script.cta:
+                    # Awareness CTA is authoritative too. Button-style slots
+                    # (cta_button) have hard platform char limits, so only a
+                    # short awareness CTA replaces the pool button label.
+                    if len(script.cta) <= 30:
+                        base_cta = script.cta
+                    elif source != "peak_replicated":
+                        base_cta = script.cta[:60]
+            elif script.hook and len(script.hook) > 5:
+                # Model-generated (awareness was absent): keep the score gate
+                # so weak model phrasing can't regress below the pool hook.
                 if _ad_hook_score(script.hook) > _ad_hook_score(base_hook):
                     hook   = script.hook
                     source = "model_enhanced"
-            body     = script.body
-            headline = script.cta[:50] if script.cta else base_cta
-        except Exception:
-            pass
+                body     = script.body
+                headline = script.cta[:50] if script.cta else base_cta
+    except Exception:
+        # Last resort with awareness present: derive copy from the raw
+        # awareness signals themselves rather than shipping pool templates.
+        if awareness:
+            _sig = next(
+                (ln.replace("[HIGH]", "").strip(" •-") .strip()
+                 for ln in awareness.splitlines() if ln.strip()),
+                "",
+            )
+            if _sig:
+                hook   = f"{_sig[:80]} — {product} by {artist}"
+                body   = f"{product} by {artist} is live now.{genre_tag}"
+                source = "awareness"
 
     # ── Subtype-specific copy defaults ───────────────────────────────────────
     if not body:
@@ -5409,7 +5458,10 @@ async def ads_generate(req: AdGenerateRequest, _key = Depends(require_scope("gen
         _resolved_cycle = [ad_type]
         _selection_mode = "fixed"
 
-    _merged_aw = _merged_awareness_for(req)
+    # Guarantee non-empty awareness: caller/request signals lead, live platform
+    # buffer always appended — so ScriptAgent's awareness composition (never
+    # templates) is the path every ad creative takes.
+    _merged_aw = _effective_awareness(plat, _merged_awareness_for(req))
 
     # Generate N creatives — each slot picks its subtype from the resolved cycle
     creatives = []
@@ -5563,6 +5615,7 @@ async def ads_autopilot(req: AdAutopilotRequest, _key = Depends(require_scope("g
                 script = await asyncio.wait_for(
                     _in_thread(lambda p=plat, a=ad_idea: _script_agent.run(ScriptRequest(
                         idea=a, platform=p, goal=req.goal, tone="direct",
+                        awareness=_effective_awareness(p, _merged_awareness_for(req)),
                     ))),
                     timeout=12.0,
                 )
@@ -5803,6 +5856,7 @@ async def ads_optimize(
                 s = await _in_thread(lambda ph=product_hint: _script_agent.run(ScriptRequest(
                     idea=f"new angle for {ph} ad",
                     platform=platform, goal="conversions", tone="direct",
+                    awareness=_effective_awareness(platform, ""),
                 )))
                 new_hook = s.hook
             except Exception:
@@ -7227,6 +7281,7 @@ async def api_content_score(req: ApiContentScoreRequest, _key=Depends(require_sc
             sr = await _in_thread(lambda: _script_agent.run(ScriptRequest(
                 idea=req.text[:200], platform=normalize_platform(req.platform),
                 goal="engagement", tone="authentic",
+                awareness=_effective_awareness(normalize_platform(req.platform), ""),
             )))
             if sr:
                 hook_len    = len(sr.hook or "")
@@ -7284,7 +7339,11 @@ async def api_analyze(req: ApiAnalyzeRequest, _key=Depends(require_scope("genera
     if _model_ready and _script_agent:
         try:
             from ai_model.agents.script_agent import ScriptRequest
-            result = await _in_thread(lambda: _script_agent.run(ScriptRequest(idea=content_hint, platform=normalize_platform(first_platform), goal=intent_hint, tone="authentic")))
+            result = await _in_thread(lambda: _script_agent.run(ScriptRequest(
+                idea=content_hint, platform=normalize_platform(first_platform),
+                goal=intent_hint, tone="authentic",
+                awareness=_effective_awareness(normalize_platform(first_platform), ""),
+            )))
             normalised["semantic"]["hook"]         = result.hook
             normalised["semantic"]["core_message"] = result.body
             normalised["source"] = getattr(result, "source", "model")
@@ -7322,6 +7381,7 @@ async def api_analyze_sentiment(req: ApiSentimentRequest, _key=Depends(require_s
             sr = await _in_thread(lambda: _script_agent.run(ScriptRequest(
                 idea=req.text[:180], platform="general",
                 goal="sentiment_analysis", tone="authentic",
+                awareness=_effective_awareness("general", ""),
             )))
             if sr:
                 model_summary = sr.hook
@@ -7412,6 +7472,7 @@ async def api_optimize_ad(req: ApiOptimizeAdRequest, _key=Depends(require_scope(
                 sr   = await _in_thread(lambda: _script_agent.run(ScriptRequest(
                     idea=str(c.get("name", "ad campaign")),
                     platform=plat, goal=c.get("objective", "conversions"), tone="direct",
+                    awareness=_effective_awareness(plat, ""),
                 )))
                 if sr:
                     model_score = min(100.0, 40.0 + len(sr.hook or "") * 0.35 + len(sr.body or "") * 0.2)
@@ -7438,6 +7499,8 @@ async def api_optimize_ad(req: ApiOptimizeAdRequest, _key=Depends(require_scope(
                         idea=str(_c.get("name", "campaign")),
                         platform=normalize_platform(_c.get("platform", "instagram")),
                         goal=_c.get("objective", "conversions"), tone="direct",
+                        awareness=_effective_awareness(
+                            normalize_platform(_c.get("platform", "instagram")), ""),
                     )))
                     if sr:
                         s = round(s * 0.4 + min(100.0, 40 + len(sr.hook or "") * 0.35) * 0.6, 1)
@@ -7461,6 +7524,7 @@ async def api_optimize_ad(req: ApiOptimizeAdRequest, _key=Depends(require_scope(
                 sr = await _in_thread(lambda: _script_agent.run(ScriptRequest(
                     idea=content[:150] or "ad creative",
                     platform="instagram", goal="conversions", tone="direct",
+                    awareness=_effective_awareness("instagram", ""),
                 )))
                 if sr:
                     hook_quality     = min(1.0, len(sr.hook or "") / 80)
@@ -7482,6 +7546,7 @@ async def api_optimize_ad(req: ApiOptimizeAdRequest, _key=Depends(require_scope(
                 sr = await _in_thread(lambda: _script_agent.run(ScriptRequest(
                     idea=f"ROI forecast for: {context[:100]}",
                     platform="general", goal="revenue", tone="professional",
+                    awareness=_effective_awareness("general", ""),
                 )))
                 if sr:
                     hook_quality    = min(1.0, len(sr.hook or "") / 80)
@@ -7514,6 +7579,7 @@ async def api_predict_engagement(req: ApiPredictEngagementRequest, _key=Depends(
                 dr = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
                     script=str(req.content or f"content on {platform}"),
                     platform=normalize_platform(platform), goal="engagement",
+                    awareness=_effective_awareness(normalize_platform(platform), ""),
                 )))
                 raw_time = getattr(dr, "posting_time", "") or ""
                 # posting_time is like "T18:00:00Z" — extract HH:MM
@@ -7577,6 +7643,7 @@ async def api_predict_engagement(req: ApiPredictEngagementRequest, _key=Depends(
                 dr = await _in_thread(lambda: _distribution_agent.run(DistributionRequest(
                     script=str(req.content or f"{platform} posting schedule"),
                     platform=normalize_platform(platform), goal="engagement",
+                    awareness=_effective_awareness(normalize_platform(platform), ""),
                 )))
                 raw_time = getattr(dr, "posting_time", "") or ""
                 if "T" in raw_time and ":" in raw_time:
