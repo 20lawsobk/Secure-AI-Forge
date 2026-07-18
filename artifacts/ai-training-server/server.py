@@ -6386,7 +6386,10 @@ class ApiGenerateVideoRequest(_AwarenessMixin):
     idea: str
     platform: str = "tiktok"
     genre: Optional[str] = None
-    tone: str = "energetic"
+    # None = caller gave no explicit tone → prompt-derived moods may drive it.
+    # (Was a hard "energetic" default, which made explicit-tone precedence
+    # always win and silently suppressed prompt creative direction.)
+    tone: Optional[str] = None
     goal: str = "growth"
     duration: Optional[int] = None
     artist_name: Optional[str] = None
@@ -6717,22 +6720,18 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
         quality  = composed["caption_score"]
         score    = _api_heuristic_score(caption, _plat)
         # ── Awareness provenance — same source formatting as /api/generate/audio
-        # so producers see one contract across beat, caption, and ad copy. ──
-        _aw_genres = _extract_awareness_genres(_merged_awareness)
-        _prov_genres = list(dict.fromkeys(filter(None, [
-            (req.genre or "").lower().strip(), *_aw_genres,
-        ])))
-        _prov_mood = (
-            (req.mood or "").strip()
-            or (_pmoods[0] if _pmoods else "")
-            or ((_extract_awareness_moods(_merged_awareness) or [""])[0])
-        ) or None
+        # so producers see one contract across beat, caption, and ad copy.
+        # Reports only THIS request's signals (genre/prompt/caller awareness),
+        # never the merged live trending buffer. ──
         return {
-            "source":           "awareness" if _merged_awareness else "heuristic",
-            "awareness_genres": _prov_genres,
-            "awareness_mood":   _prov_mood,
-            "awareness_source": "trending+intent" if _aw_genres else (
-                                "intent" if (req.genre or _pmoods) else "none"),
+            **_awareness_provenance(
+                genre=req.genre, mood=req.mood, pmoods=_pmoods,
+                caller_awareness=str(req.awareness or ""),
+                prompt_text=" ".join(filter(None, [
+                    req.instruction, req.extra_context, topic, req.title,
+                ])),
+                composed_from_awareness=bool(_merged_awareness),
+            ),
             "caption":    caption,
             "char_count": len(caption),
             "variants":   variant_objs,
@@ -7217,20 +7216,18 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
             "score":   max(quality, _api_heuristic_score(content, platform)),
         }]
         # ── Awareness provenance — same source formatting as /api/generate/audio
-        # and /api/generate/content so all three routes share one contract. ──
-        _aw_genres = _extract_awareness_genres(_text_awareness)
-        _prov_mood = (
-            (req.tone or "").strip()
-            or (_pmoods[0] if _pmoods else "")
-            or ((_extract_awareness_moods(_text_awareness) or [""])[0])
-        ) or None
+        # and /api/generate/content so all routes share one contract. Reports
+        # only THIS request's signals, never the merged live trending buffer. ──
         # Top-level aliases the MaxBooster client reads (text/content/script/caption)
         return {
-            "source":           "awareness" if _text_awareness else "heuristic",
-            "awareness_genres": _aw_genres,
-            "awareness_mood":   _prov_mood,
-            "awareness_source": "trending+intent" if _aw_genres else (
-                                "intent" if _pmoods else "none"),
+            **_awareness_provenance(
+                mood=req.tone, pmoods=_pmoods,
+                caller_awareness=str(getattr(req, "awareness", "") or ""),
+                prompt_text=" ".join(filter(None, [
+                    req.prompt or "", req.topic or "", str(inputs) if inputs else "",
+                ])),
+                composed_from_awareness=bool(_text_awareness),
+            ),
             "outputs":            outputs,
             "text":               content,
             "content":            content,
@@ -7736,6 +7733,12 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
     # request's own direction fields) → drives the VisualSpecAgent's layout /
     # colour / prompt, which the PIL render then consumes.
     _img_awareness = _merged_awareness_for(req)
+    # Prompt-derived moods — same extractor + precedence as audio/content/text
+    # so a "dark phonk" cover art request renders in the same register.
+    _pmoods = _extract_prompt_moods(
+        req.prompt, " ".join(str(s) for s in (style_tags or [])))
+    if _pmoods and not req.mood:
+        _img_awareness = _override_awareness_moods(_img_awareness, _pmoods)
 
     outputs = []
     brief = None  # last-built brief, surfaced at top level for back-compat
@@ -7933,7 +7936,15 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
 
     # Top-level aliases the MaxBooster client reads (url / image_url / path)
     first_url = next((o.get("url") for o in outputs if o.get("url")), None)
+    # ── Awareness provenance — same source formatting as audio/content/text.
+    # Reports only THIS request's signals, never the live trending buffer. ──
     return {
+        **_awareness_provenance(
+            genre=req.genre, mood=req.mood, pmoods=_pmoods,
+            caller_awareness=str(getattr(req, "awareness", "") or ""),
+            prompt_text=str(req.prompt or ""),
+            composed_from_awareness=bool(_img_awareness),
+        ),
         "outputs": outputs,
         "url":       first_url,
         "image_url": first_url,
@@ -8285,6 +8296,42 @@ def _override_awareness_moods(awareness: str, moods: list) -> str:
         ]))
     except Exception:
         return awareness or ""
+
+
+def _awareness_provenance(*, genre=None, mood=None, pmoods=None,
+                          caller_awareness: str = "", prompt_text: str = "",
+                          composed_from_awareness: bool = True) -> dict:
+    """Provenance block shared by the non-audio routes, matching the audio
+    route's semantics exactly: `awareness_genres`/`awareness_mood` report ONLY
+    the signals that actually conditioned THIS output — the request's genre,
+    genres/moods detected in the caller's own prompt text, and the
+    caller-supplied awareness payload. The merged LIVE trending buffer is
+    deliberately excluded: those genres shape tone at composition time but are
+    not this request's creative direction, and surfacing them here misreads as
+    "your phonk request was conditioned on reggaeton". Never raises.
+    """
+    try:
+        from ai_model.url_parser.extractors import _GENRE_KEYWORDS
+        _pg = [label for pat, label in _GENRE_KEYWORDS
+               if prompt_text and pat.search(prompt_text)]
+    except Exception:
+        _pg = []
+    _aw_genres = _extract_awareness_genres(caller_awareness)
+    genres = list(dict.fromkeys(filter(None, [
+        (genre or "").lower().strip(), *_pg, *_aw_genres,
+    ])))
+    _mood = (
+        (mood or "").strip()
+        or ((pmoods or [""])[0] if pmoods else "")
+        or ((_extract_awareness_moods(caller_awareness) or [""])[0])
+    ) or None
+    return {
+        "source":           "awareness" if composed_from_awareness else "heuristic",
+        "awareness_genres": genres,
+        "awareness_mood":   _mood,
+        "awareness_source": "trending+intent" if _aw_genres else (
+                            "intent" if (genres or pmoods) else "none"),
+    }
 
 
 def _extract_awareness_moods(awareness: str) -> list:
@@ -9156,6 +9203,12 @@ def _start_video_job(req: ApiGenerateVideoRequest, platform: str) -> tuple[str, 
     """
     # ── Request intelligence: analyse intent & cinematic strategy up front ─
     from ai_model import request_intelligence as ri
+    # Prompt-derived moods — same extractor + precedence as the other routes so
+    # a "dark phonk" visualizer request plans scenes in the same register.
+    _vid_awareness = _merged_awareness_for(req)
+    _pmoods = _extract_prompt_moods(req.idea, req.topic, req.hook, req.body)
+    if _pmoods and not (req.mood or req.tone):
+        _vid_awareness = _override_awareness_moods(_vid_awareness, _pmoods)
     brief = ri.build_brief(
         modality="video", platform=normalize_platform(platform),
         topic=_resolve_topic_from_url(req.topic or req.idea), goal=req.goal, tone=req.tone, genre=req.genre,
@@ -9163,7 +9216,7 @@ def _start_video_job(req: ApiGenerateVideoRequest, platform: str) -> tuple[str, 
         extra=" ".join(filter(None, [req.hook, req.body, req.cta])),
         mood=req.mood, bpm=req.bpm, key=req.key,
         artist_profile_id=req.artistProfileId,
-        awareness=_merged_awareness_for(req),
+        awareness=_vid_awareness,
         # ── Veo-parity controls into the intelligence brief ──────────────
         negative_prompt=req.negative_prompt or "",
         enhance_prompt=req.enhance_prompt if req.enhance_prompt is not None else True,
@@ -9190,6 +9243,19 @@ def _start_video_job(req: ApiGenerateVideoRequest, platform: str) -> tuple[str, 
         "error":           None,
         "intelligence":    brief.to_dict(),
         "ai_disclosure":   brief.ai_disclosure,
+        # ── Awareness provenance — same source formatting as audio/content/
+        # text/image; reports only THIS request's signals, never the live
+        # trending buffer. `source` starts as the awareness flag and is later
+        # replaced by the pipeline's actual composition source (same
+        # semantics as the audio route's model_source).
+        **_awareness_provenance(
+            genre=req.genre, mood=(req.mood or req.tone), pmoods=_pmoods,
+            caller_awareness=str(getattr(req, "awareness", "") or ""),
+            prompt_text=" ".join(filter(None, [
+                req.idea or "", req.topic or "", req.hook or "", req.body or "",
+            ])),
+            composed_from_awareness=bool(_vid_awareness),
+        ),
     })
 
     def _plan_and_render():
@@ -9211,12 +9277,17 @@ def _start_video_job(req: ApiGenerateVideoRequest, platform: str) -> tuple[str, 
                 idea=req.idea or brief.augmented_idea,
                 platform=platform,
                 goal=req.goal,
-                tone=req.tone or brief.tone,
+                # Tone precedence mirrors audio/content/text: explicit caller
+                # tone → prompt creative-brief mood → brief-derived tone.
+                tone=req.tone or (_pmoods[0] if _pmoods else "") or brief.tone,
                 genre=req.genre or "",
                 artist_name=req.artist_name or "",
                 duration=float(req.duration or 0),
                 artist_context={"audio_path": req.user_audio_path} if req.user_audio_path else {},
-                awareness=_merged_awareness_for(req),
+                # Reuse the handler-scope awareness (with the prompt-mood
+                # override applied) — also avoids calling
+                # _merged_awareness_for() from inside a background thread.
+                awareness=_vid_awareness,
                 # ── Veo-parity controls forwarded into the render pipeline ─
                 camera_motion=req.camera_motion or "",
                 negative_prompt=req.negative_prompt or "",
@@ -9890,6 +9961,10 @@ async def api_poll_video_job(job_id: str, _key=Depends(require_scope("read"))):
             "render_ms":       job.get("render_ms"),
             "technique":       job.get("technique"),
             "voiceover":       bool(job.get("voiceover", False)),
+            # Awareness provenance — same source formatting as the audio route.
+            "awareness_genres": job.get("awareness_genres"),
+            "awareness_mood":   job.get("awareness_mood"),
+            "awareness_source": job.get("awareness_source"),
         }
     if job["status"] == "error":
         return {"status": "error", "error": job.get("error", "Unknown error")}
