@@ -6346,6 +6346,9 @@ class ApiGenerateAudioRequest(_AwarenessMixin):
     # selection via the mood→genre affinity map.
     mood: Optional[str] = None
     # Freeform creative direction for THIS request (parity with content route).
+    # `prompt` is the user-facing alias (matches what the dashboard / API clients
+    # send); `instruction` is the legacy internal name — both are accepted.
+    prompt: Optional[str] = None
     instruction: Optional[str] = None
     extra_context: Optional[str] = None
     content_themes: Optional[List[str]] = None
@@ -8704,12 +8707,36 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
                + _aw_genres_handler
         )
     ))
-    # Mood precedence: explicit caller mood → awareness brief mood → first
-    # trending mood from the live awareness buffer.  Caller leads.
+
+    # Prompt-derived mood: extract creative-brief mood keywords from the raw
+    # prompt text so requests like "dark phonk, cinematic, drill energy" surface
+    # the right mood even when the live awareness buffer has no mood signals and
+    # the caller didn't set req.mood explicitly.  These slot in between the live
+    # buffer and brief.tone in the precedence chain so they don't override an
+    # intentional caller mood but always win over the generic brief fallback.
+    _PROMPT_MOOD_KEYWORDS = [
+        "dark", "cinematic", "drill", "heavy", "aggressive", "hard",
+        "melancholic", "sad", "hype", "energetic", "euphoric", "chill",
+        "lo-fi", "lofí", "vibrant", "moody", "atmospheric", "epic",
+        "intense", "raw", "gritty", "smooth", "emotional", "ethereal",
+    ]
+    _prompt_raw = (
+        (getattr(req, "prompt", None) or "")
+        or (getattr(req, "instruction", None) or "")
+    ).lower()
+    _prompt_moods = [kw for kw in _PROMPT_MOOD_KEYWORDS if kw in _prompt_raw]
+
+    # Mood precedence: explicit req.mood → prompt creative brief keywords →
+    # live awareness buffer → brief.mood (generic last resort).
+    # Prompt keywords rank above the live buffer because they represent the
+    # caller's explicit creative direction ("dark", "cinematic", "drill energy")
+    # which must not be overridden by a generic trending mood ("chill", "playful")
+    # that reflects broad industry trends rather than this specific brief.
     _preferred_mood_handler = (
         (getattr(req, "mood", None) or "").strip()
-        or (brief.mood or "").strip()
+        or (_prompt_moods[0] if _prompt_moods else "")
         or (_aw_moods_handler[0].strip() if _aw_moods_handler else "")
+        or (brief.mood or "").strip()
     )
     if _preferred_genres_handler or _preferred_mood_handler:
         print(
@@ -8753,14 +8780,17 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
                 _concept_aw_parts.append(
                     f"Trending genres: {', '.join(_preferred_genres_handler)}"
                 )
-            if _preferred_mood_handler:
+            # Moods: prefer resolved _preferred_mood_handler (which already
+            # folds prompt keywords), then extend with all prompt moods for
+            # richer _build_awareness_body signal variety.
+            _all_concept_moods = list(dict.fromkeys(filter(None, [
+                _preferred_mood_handler,
+                *_prompt_moods,
+            ])))
+            if _all_concept_moods:
                 _concept_aw_parts.append(
-                    f"Trending moods: {_preferred_mood_handler}"
+                    f"Trending moods: {', '.join(_all_concept_moods)}"
                 )
-            # Fold the prompt/brief mood and any explicit mood request in too
-            _explicit_mood = (getattr(req, "mood", None) or "").strip()
-            if _explicit_mood and _explicit_mood not in _concept_aw_parts[-1:]:
-                _concept_aw_parts.append(f"Trending moods: {_explicit_mood}")
             _prompt_text = (getattr(req, "prompt", None) or "").strip()
             if _prompt_text:
                 # Surface the raw prompt as a HIGH-priority signal so the hook
@@ -8769,8 +8799,11 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
             _concept_awareness = "\n".join(_concept_aw_parts).strip()
 
             # ── Idea text: include mood, key, BPM so hooks carry energy context ─
+            # Use _preferred_mood_handler which now resolves prompt keywords
+            # before brief.tone, so "dark" beats "playful" on a dark phonk brief.
+            _explicit_mood = (getattr(req, "mood", None) or "").strip()
             _mood_label = (
-                _explicit_mood or _preferred_mood_handler or brief.mood or brief.tone or "energetic"
+                _explicit_mood or _preferred_mood_handler or brief.mood or "energetic"
             )
             _key_label  = (getattr(req, "key", None) or getattr(req, "target_key", None) or "").strip()
             _bpm_label  = (getattr(req, "bpm", None) or getattr(req, "target_bpm", None))
