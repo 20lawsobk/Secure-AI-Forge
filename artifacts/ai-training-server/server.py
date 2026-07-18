@@ -6578,6 +6578,12 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
         _narrative = " ".join(
             filter(None, [req.instruction, req.extra_context, req.artist_bio])
         )
+        # Prompt-derived moods: same extractor as the audio route so a caption
+        # request for a "dark phonk" drop composes in the same register as the
+        # beat itself.  Explicit req.mood/req.tone always outrank these.
+        _pmoods = _extract_prompt_moods(req.instruction, req.extra_context,
+                                        topic, req.title)
+        _mood_eff = req.mood or (_pmoods[0] if _pmoods else None)
         # Unified orchestrator: brief + merged awareness in one call. Technique
         # extraction is skipped on the hot text path (no media rendered here).
         _ctx = build_context(
@@ -6588,7 +6594,7 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
             narrative=_narrative,
             track=req.title or topic,
             themes=req.content_themes,
-            mood=req.mood, bpm=req.bpm, key=req.key,
+            mood=_mood_eff, bpm=req.bpm, key=req.key,
             artist_profile_id=req.artistProfileId,
         )
         brief = _ctx.brief
@@ -6618,6 +6624,12 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
         # `brief.directives` are deliberately excluded: they are internal
         # prompt-engineering instructions the parser would quote verbatim.
         _merged_awareness = _ctx.awareness
+        # Surface prompt-derived moods as a parseable awareness line (same
+        # "Trending moods:" format _extract_awareness_moods reads) so the
+        # awareness composer formats the caption in the brief's register
+        # ("dark", "cinematic"…) rather than a generic trending mood.
+        if _pmoods:
+            _merged_awareness = _override_awareness_moods(_merged_awareness, _pmoods)
 
         if _model_ready and _script_agent:
             from ai_model.agents.script_agent import ScriptRequest
@@ -6635,8 +6647,12 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
                 # the result is never used and adding it floods the batcher
                 # with extra submissions that degrade unique-request throughput.
                 # It is collected offline via the training pipeline instead.
+                # Tone precedence mirrors the audio route: explicit caller
+                # tone → prompt creative-brief mood → brief-derived tone.
+                _tone_eff = (req.tone or "").strip() \
+                    or (_pmoods[0] if _pmoods else "") or brief.tone
                 return _script_agent.run(ScriptRequest(
-                    idea=topic, platform=_plat, goal=goal, tone=brief.tone,
+                    idea=topic, platform=_plat, goal=goal, tone=_tone_eff,
                     awareness=_merged_awareness,
                 ))
 
@@ -6766,6 +6782,14 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
             "tone":     req.tone or "",
             "goal":     goal,
             "awareness": str(req.awareness or ""),
+            # Creative direction feeds prompt-derived mood extraction inside
+            # _build — it MUST be part of the dedup identity or two requests
+            # differing only in direction ("dark" vs "playful") would collapse
+            # onto one cached result in the wrong register.
+            "direction": " ".join(filter(None, [
+                req.instruction or "", req.extra_context or "", req.title or "",
+                req.mood or "",
+            ])),
         }
         async def _coalesced_content():
             # Leader spawns ONE GPU life from the pocket for this unique request.
@@ -7103,7 +7127,11 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
     # MaxBooster sends topic/prompt directly; resolve URLs via the Universal URL Parser
     idea     = _resolve_topic_from_url(req.topic or req.prompt or (str(inputs) if inputs else intent))
     platform = normalize_platform(req.platform) if req.platform else "general"
-    tone     = req.tone or "authentic"
+    # Prompt-derived moods — same extractor as the audio + content routes, so
+    # ad/text copy for a "dark phonk" drop lands in the same register.
+    # Explicit req.tone always wins over the extracted creative direction.
+    _pmoods  = _extract_prompt_moods(req.prompt, req.topic, str(inputs) if inputs else None)
+    tone     = req.tone or (_pmoods[0] if _pmoods else None) or "authentic"
 
     def _build(_request=None):
         # ── Request intelligence: analyse intent, audience & strategy up front ──
@@ -7116,6 +7144,11 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
             extra=getattr(req, "brand_voice", None),
         )
         brief = _ctx.brief
+        # Same parseable "Trending moods:" line as the content route so the
+        # awareness composer picks up the caller's explicit creative direction.
+        _text_awareness = _ctx.awareness
+        if _pmoods:
+            _text_awareness = _override_awareness_moods(_text_awareness, _pmoods)
 
         fallback = f"Generated content for intent '{intent}'."
         candidates: List[str] = []
@@ -7130,9 +7163,13 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
                 # context, and the script agent's awareness parser treats
                 # any bulleted line as a quotable signal (see the matching
                 # comment in /api/generate/content above).
+                # Tone precedence mirrors audio/content: explicit caller tone →
+                # prompt creative-brief mood → brief-derived tone.
+                _tone_eff = (req.tone or "").strip() \
+                    or (_pmoods[0] if _pmoods else "") or brief.tone
                 return _script_agent.run(ScriptRequest(
-                    idea=idea, platform=platform, goal=intent, tone=brief.tone,
-                    awareness=_ctx.awareness,
+                    idea=idea, platform=platform, goal=intent, tone=_tone_eff,
+                    awareness=_text_awareness,
                 ))
 
             try:
@@ -7186,6 +7223,10 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
             "tone":     getattr(req, "tone", "") or "",
             "goal":     getattr(req, "goal", "") or "",
             "awareness": str(getattr(req, "awareness", "") or ""),
+            # Raw prompt/intent feed prompt-derived mood extraction — part of
+            # dedup identity so different creative direction never coalesces.
+            "prompt":   getattr(req, "prompt", "") or "",
+            "intent":   getattr(req, "intent", "") or "",
         }
         async def _coalesced_social():
             # Leader spawns ONE GPU life from the pocket for this unique request.
@@ -8173,6 +8214,50 @@ def _extract_awareness_genres(awareness: str) -> list:
         return []
 
 
+#: Creative-brief mood keywords recognised in raw prompt/instruction text.
+#: Shared by audio, social-content, and ad/text generation so every route
+#: resolves the same explicit creative direction ("dark", "cinematic", …).
+_PROMPT_MOOD_KEYWORDS = [
+    "dark", "cinematic", "drill", "heavy", "aggressive", "hard",
+    "melancholic", "sad", "hype", "energetic", "euphoric", "chill",
+    "lo-fi", "lofí", "vibrant", "moody", "atmospheric", "epic",
+    "intense", "raw", "gritty", "smooth", "emotional", "ethereal",
+]
+
+
+def _extract_prompt_moods(*texts) -> list:
+    """Extract creative-brief mood keywords from raw prompt/instruction text.
+
+    Accepts any number of optional strings (prompt, instruction, extra
+    context, topic…), joins them, and returns matching mood keywords in
+    keyword-list order. These represent the caller's EXPLICIT creative
+    direction, so all routes rank them above generic trending signals.
+    Never raises.
+    """
+    try:
+        raw = " ".join(str(t) for t in texts if t).lower()
+        return [kw for kw in _PROMPT_MOOD_KEYWORDS if kw in raw]
+    except Exception:
+        return []
+
+
+def _override_awareness_moods(awareness: str, moods: list) -> str:
+    """Make `moods` the single authoritative 'Trending moods:' line.
+
+    Any pre-existing 'Trending moods:' lines (from the live trend buffer) are
+    removed first so a first-match parser deterministically sees the caller's
+    explicit creative direction, never a generic trending mood. Never raises.
+    """
+    import re as _re
+    try:
+        base = _re.sub(r"(?im)^\s*Trending moods?:[^\n]*\n?", "", awareness or "")
+        return "\n".join(filter(None, [
+            base.strip(), f"Trending moods: {', '.join(moods)}",
+        ]))
+    except Exception:
+        return awareness or ""
+
+
 def _extract_awareness_moods(awareness: str) -> list:
     """Parse trending mood tokens out of the awareness context string.
 
@@ -8618,9 +8703,15 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         "type":       "audio",
         "genre":      req.genre or "",
         "intent":     req.intent or "",
-        "target_bpm": req.target_bpm,
-        "target_key": req.target_key or "",
+        "target_bpm": req.target_bpm or req.bpm,
+        "target_key": (req.target_key or req.key) or "",
         "duration":   req.duration,
+        # Creative direction feeds prompt-mood extraction + the concept text —
+        # it must be part of the job identity or two briefs differing only in
+        # direction ("dark phonk" vs "chill lofi") would coalesce onto one job.
+        "prompt":     (getattr(req, "prompt", None) or getattr(req, "instruction", None) or ""),
+        "mood":       getattr(req, "mood", None) or "",
+        "seed":       req.seed,
     })
     with _active_jobs_lock:
         _existing_id = _active_jobs.get(_adigest)
@@ -8714,17 +8805,9 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
     # the caller didn't set req.mood explicitly.  These slot in between the live
     # buffer and brief.tone in the precedence chain so they don't override an
     # intentional caller mood but always win over the generic brief fallback.
-    _PROMPT_MOOD_KEYWORDS = [
-        "dark", "cinematic", "drill", "heavy", "aggressive", "hard",
-        "melancholic", "sad", "hype", "energetic", "euphoric", "chill",
-        "lo-fi", "lofí", "vibrant", "moody", "atmospheric", "epic",
-        "intense", "raw", "gritty", "smooth", "emotional", "ethereal",
-    ]
-    _prompt_raw = (
-        (getattr(req, "prompt", None) or "")
-        or (getattr(req, "instruction", None) or "")
-    ).lower()
-    _prompt_moods = [kw for kw in _PROMPT_MOOD_KEYWORDS if kw in _prompt_raw]
+    _prompt_moods = _extract_prompt_moods(
+        getattr(req, "prompt", None) or getattr(req, "instruction", None)
+    )
 
     # Mood precedence: explicit req.mood → prompt creative brief keywords →
     # live awareness buffer → brief.mood (generic last resort).
