@@ -6716,7 +6716,23 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
             hashtag_cap = 0
         quality  = composed["caption_score"]
         score    = _api_heuristic_score(caption, _plat)
+        # ── Awareness provenance — same source formatting as /api/generate/audio
+        # so producers see one contract across beat, caption, and ad copy. ──
+        _aw_genres = _extract_awareness_genres(_merged_awareness)
+        _prov_genres = list(dict.fromkeys(filter(None, [
+            (req.genre or "").lower().strip(), *_aw_genres,
+        ])))
+        _prov_mood = (
+            (req.mood or "").strip()
+            or (_pmoods[0] if _pmoods else "")
+            or ((_extract_awareness_moods(_merged_awareness) or [""])[0])
+        ) or None
         return {
+            "source":           "awareness" if _merged_awareness else "heuristic",
+            "awareness_genres": _prov_genres,
+            "awareness_mood":   _prov_mood,
+            "awareness_source": "trending+intent" if _aw_genres else (
+                                "intent" if (req.genre or _pmoods) else "none"),
             "caption":    caption,
             "char_count": len(caption),
             "variants":   variant_objs,
@@ -7200,8 +7216,21 @@ async def api_generate_text(req: ApiGenerateTextRequest, _key=Depends(require_sc
             "slot":    req.slots,
             "score":   max(quality, _api_heuristic_score(content, platform)),
         }]
+        # ── Awareness provenance — same source formatting as /api/generate/audio
+        # and /api/generate/content so all three routes share one contract. ──
+        _aw_genres = _extract_awareness_genres(_text_awareness)
+        _prov_mood = (
+            (req.tone or "").strip()
+            or (_pmoods[0] if _pmoods else "")
+            or ((_extract_awareness_moods(_text_awareness) or [""])[0])
+        ) or None
         # Top-level aliases the MaxBooster client reads (text/content/script/caption)
         return {
+            "source":           "awareness" if _text_awareness else "heuristic",
+            "awareness_genres": _aw_genres,
+            "awareness_mood":   _prov_mood,
+            "awareness_source": "trending+intent" if _aw_genres else (
+                                "intent" if _pmoods else "none"),
             "outputs":            outputs,
             "text":               content,
             "content":            content,
