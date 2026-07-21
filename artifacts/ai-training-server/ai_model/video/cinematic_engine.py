@@ -76,7 +76,7 @@ def render_cinematic_open(
         # The Digital GPU is independent of the host environment, so no
         # niceness penalty is applied — heavy compute (diffusion, VRC grading,
         # GEMM) runs on the GPU engine, not on host CPUs.
-        with RENDER_GATE.slot(timeout=300):
+        with RENDER_GATE.slot(timeout=30):
             path = render_scene(scene, width, height, sid)
         return idx, path
 

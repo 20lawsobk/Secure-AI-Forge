@@ -47,11 +47,8 @@ import threading
 import time
 from typing import Callable
 
-try:  # memory-aware batch cap (best-effort; never required)
-    from .adaptive_concurrency import available_memory_bytes
-except Exception:  # pragma: no cover - defensive
-    def available_memory_bytes() -> int:
-        return 2 * 1024 ** 3
+# available_memory_bytes import removed: the Digital GPU backend is independent
+# of Replit's host environment — host RAM is not a valid batch-size signal.
 
 
 def is_enabled() -> bool:
@@ -78,12 +75,12 @@ def _env_float(name: str, default: float) -> float:
 
 
 def _default_max_batch() -> int:
-    """Derive a sensible batch cap from available cores.
+    """Max batch size for the Digital GPU coalescer.
 
-    Larger batches amortise the forward-pass overhead more aggressively.
-    Capped at 64 to keep latency predictable even on big boxes."""
-    cpu = os.cpu_count() or 4
-    return min(64, max(16, cpu * 4))
+    The Digital GPU backend is independent of Replit's host environment —
+    host CPU count is not the right sizing signal. Use the full capacity
+    ceiling; the GPU engine absorbs the load regardless of host vCPUs."""
+    return 64
 
 
 class _Pending:
@@ -185,14 +182,12 @@ class GenerateCoalescer:
     # ── collector thread ──────────────────────────────────────────────────────
 
     def _effective_max_batch(self) -> int:
-        """Shrink the batch cap if the box is low on memory (best-effort)."""
-        try:
-            avail_gb = available_memory_bytes() / (1024 ** 3)
-        except Exception:
-            return self.max_batch
-        # ~0.15 GB/slot headroom for KV-cache + activations at typical lengths.
-        by_mem = int(avail_gb / 0.15)
-        return max(1, min(self.max_batch, by_mem))
+        """Return the configured batch cap.
+
+        The Digital GPU backend manages its own memory independently of
+        Replit's host RAM — host available_memory_bytes() is not a valid
+        proxy for GPU-side capacity and must not throttle batch sizes."""
+        return self.max_batch
 
     def _collect_batch(self) -> list[_Pending]:
         with self._cv:

@@ -205,14 +205,17 @@ class _GateSlot:
 
 
 # ── Global gates ────────────────────────────────────────────────────────────
-# Model inference (captions/hooks/CTAs/scripts): compute-bound on the Digital GPU
-# engine, shares the loaded model so marginal memory per call is modest.
+# Both gates are gpu_independent=True: the Digital GPU (HyperGPU + pdim) is a
+# self-contained backend entirely outside Replit's host environment. Replit's
+# vCPU count and cgroup memory are irrelevant to its capacity — gates run at
+# max_capacity at all times.
+
+# Model inference (captions/hooks/CTAs/scripts): runs on the Digital GPU.
 INFERENCE_GATE = AdaptiveGate(
     name="inference",
-    mem_per_slot_gb=0.5,
-    cpu_per_slot=1.5,
-    min_capacity=1,
-    max_capacity=6,
+    min_capacity=4,
+    max_capacity=32,
+    gpu_independent=True,
 )
 
 # Video scene rendering: the Digital GPU (HyperGPU + pdim pocket engine) is 100%
