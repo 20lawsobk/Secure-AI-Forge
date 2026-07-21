@@ -248,17 +248,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ─── Progressive request timeouts ────────────────────────────────────────────
-# Every endpoint gets a latency-class budget with escalating stages:
-#   stage 1 (soft, 50% of budget): slow-request warning logged, request continues
-#   stage 2 (hard, 100% of budget): 504 returned with structured detail
-# Binary download routes are exempt (large files stream at client pace).
-# Job-submit endpoints respond fast; the in-render work is governed by the
-# job-level _RENDER_DEADLINE backstop, not by this middleware.
-#
-# NOTE: the Node.js proxy (model-proxy.ts) aborts non-streaming requests at
-# 45s — sync-generation budgets stay below that so callers get a structured
-# 504 from Python rather than an opaque proxy abort.
+# ─── Progressive latency observability (NO aborts) ──────────────────────────
+# Guaranteed-completion policy: requests are NEVER aborted by the server.
+# Every endpoint keeps a latency-class budget, but it is used purely for
+# observability — slow requests are logged at 50% and 100% of budget and then
+# allowed to run to completion.  The Node.js proxy and uvicorn keep-alives are
+# configured with no request timeouts, so the full chain waits for the work.
 
 _TIMEOUT_EXEMPT_SUFFIXES = ("/download", "/file", "/video", "/preview")
 
@@ -304,36 +299,26 @@ async def progressive_timeout_middleware(request, call_next):
     soft = budget * 0.5
     start = time.time()
 
+    # Observability-only: log at soft/full budget, but NEVER abort — the
+    # request always runs to completion (guaranteed-completion policy).
     task = asyncio.ensure_future(call_next(request))
     done, _ = await asyncio.wait({task}, timeout=soft)
     if not done:
-        print(f"[timeout] SLOW {request.method} {path}: exceeded soft deadline "
-              f"{soft:.0f}s (budget {budget:.0f}s) — still running", flush=True)
+        print(f"[latency] SLOW {request.method} {path}: exceeded soft mark "
+              f"{soft:.0f}s (class {budget:.0f}s) — still running", flush=True)
         done, _ = await asyncio.wait({task}, timeout=budget - soft)
+        if not done:
+            print(f"[latency] VERY SLOW {request.method} {path}: exceeded "
+                  f"{budget:.0f}s class budget — waiting to completion", flush=True)
+            await asyncio.wait({task})
 
-    if done:
-        response = task.result()
-        response.headers["X-Timeout-Budget"] = f"{budget:.0f}"
-        return response
-
-    # Hard deadline: abort the ASGI cycle, return a structured 504.
+    response = task.result()
+    response.headers["X-Latency-Class"] = f"{budget:.0f}"
     elapsed = time.time() - start
-    task.cancel()
-    task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
-    print(f"[timeout] HARD {request.method} {path}: aborted after {elapsed:.1f}s "
-          f"(budget {budget:.0f}s)", flush=True)
-    return JSONResponse(
-        status_code=504,
-        content={
-            "success": False,
-            "error": "timeout",
-            "stage": "hard",
-            "detail": f"Request exceeded its {budget:.0f}s budget",
-            "budget_seconds": budget,
-            "elapsed_seconds": round(elapsed, 1),
-            "path": path,
-        },
-    )
+    if elapsed > budget:
+        print(f"[latency] COMPLETED {request.method} {path} after {elapsed:.1f}s "
+              f"(class {budget:.0f}s)", flush=True)
+    return response
 
 
 # ─── Async helper: run blocking calls off the event loop ─────────────────────
@@ -347,14 +332,16 @@ async def _in_thread(fn):
 from ai_model.adaptive_concurrency import INFERENCE_GATE, RENDER_GATE, GateBusy  # noqa: E402
 
 
-async def _in_thread_gated(gate, fn, timeout):
+async def _in_thread_gated(gate, fn, timeout=None):
     """Run ``fn`` in a worker thread while holding an adaptive-concurrency slot.
 
-    The blocking slot acquisition happens inside the worker thread so the event
-    loop is never stalled. Raises ``GateBusy`` if no slot frees up within
-    ``timeout`` (the caller surfaces that as HTTP 503)."""
+    Guaranteed-completion policy: the slot acquisition waits INDEFINITELY
+    (timeout=None) — bursts queue up and drain in order instead of being
+    rejected with GateBusy/503.  The blocking wait happens inside the worker
+    thread so the event loop is never stalled.  The ``timeout`` parameter is
+    retained for signature compatibility and ignored."""
     def _run():
-        with gate.slot(timeout=timeout):
+        with gate.slot(timeout=None):
             return fn()
     return await _in_thread(_run)
 
@@ -386,40 +373,38 @@ def _get_gpu_pool():
 # raise 503 with a Retry-After header only if the subsystem truly never came up.
 
 async def _wait_for_model_ready(max_wait: float = 30.0) -> None:
-    """Wait until _model_ready is True, then return.  Raises HTTP 503 on timeout."""
+    """Wait until _model_ready is True, then return.
+
+    Guaranteed-completion policy: parks indefinitely (250 ms poll) until the
+    model finishes initialising — never raises 503.  Warm-up is watchdog-
+    supervised, so readiness always arrives.  ``max_wait`` is retained for
+    signature compatibility and used only as the slow-log threshold."""
     if _model_ready:
         return  # fast path — already ready
-    deadline = time.monotonic() + max_wait
-    while time.monotonic() < deadline:
-        if _model_ready:
-            return
+    _waited = 0.0
+    while not _model_ready:
         await asyncio.sleep(0.25)
-    raise HTTPException(
-        status_code=503,
-        detail="AI model is still initialising — it should be ready in a moment. Please retry.",
-        headers={"Retry-After": "5"},
-    )
+        _waited += 0.25
+        if _waited and _waited % max(max_wait, 30.0) < 0.25:
+            print(f"[readiness] still waiting for model init ({_waited:.0f}s)", flush=True)
 
 
 async def _wait_for_workers(max_wait: float = 20.0):
     """Return (continuous_trainer, data_puller) once both are initialised.
-    Raises HTTP 503 with Retry-After if workers remain None after max_wait seconds."""
-    deadline = time.monotonic() + max_wait
-    while time.monotonic() < deadline:
+
+    Guaranteed-completion policy: parks indefinitely (250 ms poll) until both
+    workers exist — never returns early.  ``max_wait`` retained only as the
+    slow-log threshold."""
+    _waited = 0.0
+    while True:
         with _workers_lock:
             ct, dp = _continuous_trainer, _data_puller
         if ct is not None and dp is not None:
             return ct, dp
         await asyncio.sleep(0.25)
-    with _workers_lock:
-        ct, dp = _continuous_trainer, _data_puller
-    if ct is None or dp is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Background workers are still starting up — please retry in a moment.",
-            headers={"Retry-After": "5"},
-        )
-    return ct, dp
+        _waited += 0.25
+        if _waited and _waited % max(max_wait, 30.0) < 0.25:
+            print(f"[readiness] still waiting for workers ({_waited:.0f}s)", flush=True)
 
 
 def _digest_str(fields: dict) -> str:
@@ -5248,13 +5233,11 @@ async def _generate_ad_creative(
             # call) — run it regardless of model readiness so ad copy is
             # NEVER templated while awareness signals exist.
             _agent = _script_agent if _script_agent is not None else _SA.__new__(_SA)
-            script = await _asyncio.wait_for(
-                _in_thread(lambda: _agent._awareness_compose(_sreq)), timeout=12.0,
-            )
+            # No timeout — guaranteed-completion policy: composition is
+            # deterministic pure-Python and always returns.
+            script = await _in_thread(lambda: _agent._awareness_compose(_sreq))
         elif _model_ready and _script_agent:
-            script = await _asyncio.wait_for(
-                _in_thread(lambda: _script_agent.run(_sreq)), timeout=12.0,
-            )
+            script = await _in_thread(lambda: _script_agent.run(_sreq))
         if script is not None:
             _script_source = getattr(script, "source", "")
             if _script_source == "awareness" and script.hook and len(script.hook) > 5:
@@ -5612,13 +5595,11 @@ async def ads_autopilot(req: AdAutopilotRequest, _key = Depends(require_scope("g
         if _model_ready and _script_agent:
             try:
                 from ai_model.agents.script_agent import ScriptRequest
-                script = await asyncio.wait_for(
-                    _in_thread(lambda p=plat, a=ad_idea: _script_agent.run(ScriptRequest(
-                        idea=a, platform=p, goal=req.goal, tone="direct",
-                        awareness=_effective_awareness(p, _merged_awareness_for(req)),
-                    ))),
-                    timeout=12.0,
-                )
+                # No timeout — guaranteed-completion policy.
+                script = await _in_thread(lambda p=plat, a=ad_idea: _script_agent.run(ScriptRequest(
+                    idea=a, platform=p, goal=req.goal, tone="direct",
+                    awareness=_effective_awareness(p, _merged_awareness_for(req)),
+                )))
                 hook = script.hook
             except Exception:
                 pass
@@ -8902,53 +8883,32 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         _t.sleep(2)
 
         # ── Job-level render deadline ──────────────────────────────────────
-        # If _render_audio_from_dataset hangs (e.g. slow storage chunk read
-        # under memory pressure, or a frozen ffmpeg posix_spawn), the job
-        # must still resolve rather than staying "pending" forever.
-        # 120 s gives the full pipeline (chunk fetch 30 s + ffmpeg decode +
-        # rubberband + loop + master) comfortable headroom.
-        # Scale the render deadline with the requested duration: long-form
-        # clips (up to 180 s) need proportionally more time in the loop/trim,
-        # rubberband, and mastering stages. Floor stays at 120 s.
+        # Guaranteed-completion policy: NO render deadline.  The job is never
+        # marked "error" by a timer — the render thread is the sole writer of
+        # terminal state, and it retries until it succeeds.  Internal ffmpeg
+        # hang-detection (subprocess-level, feeding never-raise retry paths)
+        # remains: it is what makes indefinite waiting safe, because a frozen
+        # subprocess is detected and re-attempted instead of blocking forever.
+        # A heartbeat keeps the job visibly alive for pollers on long renders.
         _req_dur = max(4.0, min(float(req.duration or 30), 180.0))
-        _RENDER_DEADLINE = max(120, int(_req_dur * 1.5) + 60)
-        # Terminal-state guard: exactly ONE writer (render thread or deadline
-        # timer) may set the job's terminal status.  Without this, a timer
-        # firing at ~120 s could be overwritten by a late "done" (or vice
-        # versa), making deadline semantics nondeterministic.
-        _terminal_lock = threading.Lock()
-        _terminal_claimed = [False]
+        _render_started = time.time()
+        _hb_stop = threading.Event()
 
-        def _claim_terminal() -> bool:
-            """Atomically claim the right to write the terminal status."""
-            with _terminal_lock:
-                if _terminal_claimed[0]:
-                    return False
-                _terminal_claimed[0] = True
-                return True
-
-        def _deadline_handler() -> None:
-            if _claim_terminal():
-                print(
-                    f"[audio_render] DEADLINE exceeded ({_RENDER_DEADLINE}s) "
-                    f"for job={job_id[:8]} — marking error",
-                    flush=True,
-                )
+        def _heartbeat() -> None:
+            while not _hb_stop.wait(30.0):
+                if _hb_stop.is_set():
+                    return  # terminal write in progress — never overwrite it
+                _elapsed = time.time() - _render_started
                 try:
-                    _job_update(job_id, {
-                        "status": "error",
-                        "error": (
-                            f"audio render timed out after {_RENDER_DEADLINE}s "
-                            "— server is likely under memory pressure; "
-                            "try again shortly"
-                        ),
-                    })
+                    _job_update(job_id, {"status": "rendering",
+                                         "elapsed_seconds": round(_elapsed, 1)})
                 except Exception:
-                    pass  # never raise from timer thread
+                    pass  # never raise from heartbeat thread
+                print(f"[audio_render] job={job_id[:8]} still rendering "
+                      f"({_elapsed:.0f}s)", flush=True)
 
-        _deadline_timer = threading.Timer(_RENDER_DEADLINE, _deadline_handler)
-        _deadline_timer.daemon = True
-        _deadline_timer.start()
+        _hb_thread = threading.Thread(target=_heartbeat, daemon=True)
+        _hb_thread.start()
 
         fp  = req.style_fingerprint
         # Reproducibility: an explicit seed makes BPM/key derivation (and thus
@@ -9038,28 +8998,55 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         }
         # Render an actual in-house clip (key/tempo-conditioned) and serve it;
         # only mark "done" once the file exists on disk.
-        # Honor long-form requests: leaseable beats run 2–3 minutes. Cap at
-        # 3 min to bound render time (loop/trim + mastering stay under the
-        # 120 s job deadline for the longest allowed clip).
+        # Honor long-form requests: leaseable beats run 2–3 minutes (180 s cap
+        # per the delivery contract — a content limit, not a timeout).
+        #
+        # Guaranteed-completion policy: retry until success.  The render is
+        # never-raise by design (it already synthesizes in-house via
+        # _render_audio_clip internally, with no hard storage dependency), so
+        # an exception here is exceptional — transient storage/memory
+        # pressure.  Instead of marking the job "error", back off and
+        # re-attempt until a real file exists on disk.
         duration_sec = max(4.0, min(float(req.duration or 30), 180.0))
-        try:
-            render = _render_audio_from_dataset(job_id, target_bpm, target_key,
-                                                duration_sec, opts)
-        except Exception as exc:  # explicit failure — never claim a missing file
-            _deadline_timer.cancel()
-            if not _claim_terminal():
-                return  # deadline timer already marked the job as error
-            _job_update(job_id, {
-                "status": "error",
-                "url":    None,
-                "bpm":    target_bpm,
-                "key":    target_key,
-                "error":  f"audio render failed: {exc}",
-            })
-            return
-        _deadline_timer.cancel()
-        if not _claim_terminal():
-            return  # deadline timer already marked the job as error
+        render = None
+        _attempt = 0
+        _last_err = ""
+        _same_err_count = 0
+        while render is None:
+            _attempt += 1
+            try:
+                render = _render_audio_from_dataset(job_id, target_bpm, target_key,
+                                                    duration_sec, opts)
+            except Exception as exc:
+                _err = f"{type(exc).__name__}: {exc}"
+                _same_err_count = _same_err_count + 1 if _err == _last_err else 1
+                _last_err = _err
+                print(f"[audio_render] job={job_id[:8]} attempt {_attempt} failed: "
+                      f"{_err} — retrying", flush=True)
+                if _same_err_count == 5:
+                    # Deterministic fault, not transient pressure: escalate to
+                    # the watchdog (which owns subsystem self-healing) instead
+                    # of silently spinning.  The loop keeps waiting — the job
+                    # completes once the watchdog restores the subsystem.
+                    print(f"[audio_render] job={job_id[:8]} ESCALATION: same "
+                          f"error 5x — requesting watchdog attention: {_err}",
+                          flush=True)
+                    try:
+                        from ai_model.watchdog import request_attention  # type: ignore
+                        request_attention("audio_render", _err)
+                    except Exception:
+                        pass  # watchdog hook optional — escalation is best-effort
+                try:
+                    _job_update(job_id, {"status": "rendering",
+                                         "retry_attempt": _attempt,
+                                         "last_error": _err[:200]})
+                except Exception:
+                    pass
+                time.sleep(min(60.0, 2.0 * _attempt))
+        # Terminal-state handoff: stop the heartbeat and JOIN it before the
+        # final write so "done" can never be overwritten by a late heartbeat.
+        _hb_stop.set()
+        _hb_thread.join(timeout=5.0)
         _job_update(job_id, {
             "status":           "done",
             "url":              render["url"],

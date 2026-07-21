@@ -89,15 +89,22 @@ function _cbRecordFailure(): void {
 // Polling at 300 ms means held requests drain within 300 ms of Python becoming
 // ready — imperceptible latency cost vs. an outright failure.
 
-const REQUEST_HOLD_MS = 90_000; // covers worst-case restart (30 s backoff + 45 s startup)
+// Guaranteed-completion policy: requests are held indefinitely while Python
+// restarts — never 503'd on a timer. The watchdog supervises Python recovery,
+// so readiness always arrives; held requests drain within 300 ms of it.
+// REQUEST_HOLD_MS is retained only as the slow-log interval.
+const REQUEST_HOLD_MS = 90_000;
 
 async function waitForRecovery(): Promise<boolean> {
-  const deadline = Date.now() + REQUEST_HOLD_MS;
-  while (Date.now() < deadline) {
+  const start = Date.now();
+  for (;;) {
     if (!_cbIsOpen() && !isPythonRestarting()) return true;
+    const waited = Date.now() - start;
+    if (waited > 0 && waited % REQUEST_HOLD_MS < 300) {
+      console.log(`[Proxy] still holding request for Python recovery (${Math.round(waited / 1000)}s)`);
+    }
     await new Promise<void>((r) => setTimeout(r, 300));
   }
-  return false; // timed out — caller will 503
 }
 
 // ─── TTL Cache for hot read-only endpoints ─────────────────────────────────
@@ -277,10 +284,8 @@ async function _upstreamRequest(
     if (_isTransientConnErr(err)) {
       _cbRecordFailure(); // open CB if threshold reached
       console.log(`[Proxy] Connection error on first attempt — waiting for recovery then retrying ${url}`);
-      const recovered = await waitForRecovery();
-      if (recovered) {
-        return await undiciRequest(url, options); // retry once
-      }
+      await waitForRecovery(); // holds indefinitely — resolves once Python recovers
+      return await undiciRequest(url, options); // retry once
     }
     throw err; // re-throw for handleProxyNetworkError
   }
@@ -309,17 +314,10 @@ async function proxyRequest(
   // Hold the request while Python is restarting rather than immediately 503-ing.
   // waitForRecovery polls every 300 ms until both the circuit breaker is closed
   // and the pythonRestarting flag is clear (set by python-server.ts after the
-  // warm-up pass completes).  On timeout (90 s) the request gets a 503.
+  // warm-up pass completes).  Guaranteed-completion: the hold is indefinite.
   if (_cbIsOpen() || isPythonRestarting()) {
     console.log(`[Proxy] Python unavailable — holding ${req.method} ${path} (up to ${REQUEST_HOLD_MS / 1000}s)`);
-    const recovered = await waitForRecovery();
-    if (!recovered) {
-      res.status(503).json({
-        error: "AI model server unavailable",
-        detail: "Python did not recover within the 90 s hold window. Please retry.",
-      });
-      return;
-    }
+    await waitForRecovery(); // holds indefinitely — resolves once Python recovers
   }
 
   try {
@@ -384,14 +382,7 @@ async function proxyBinary(
 ): Promise<void> {
   if (_cbIsOpen() || isPythonRestarting()) {
     console.log(`[Proxy] Python unavailable — holding ${req.method} ${path} (up to ${REQUEST_HOLD_MS / 1000}s)`);
-    const recovered = await waitForRecovery();
-    if (!recovered) {
-      res.status(503).json({
-        error: "AI model server unavailable",
-        detail: "Python did not recover within the 90 s hold window. Please retry.",
-      });
-      return;
-    }
+    await waitForRecovery(); // holds indefinitely — resolves once Python recovers
   }
 
   try {
@@ -457,14 +448,7 @@ async function proxyBinaryStream(
 ): Promise<void> {
   if (_cbIsOpen() || isPythonRestarting()) {
     console.log(`[Proxy] Python unavailable — holding ${req.method} ${path} (up to ${REQUEST_HOLD_MS / 1000}s)`);
-    const recovered = await waitForRecovery();
-    if (!recovered) {
-      res.status(503).json({
-        error: "AI model server unavailable",
-        detail: "Python did not recover within the 90 s hold window. Please retry.",
-      });
-      return;
-    }
+    await waitForRecovery(); // holds indefinitely — resolves once Python recovers
   }
 
   try {

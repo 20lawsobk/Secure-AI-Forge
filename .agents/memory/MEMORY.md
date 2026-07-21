@@ -47,5 +47,6 @@
 - [Veo-parity video controls](veo-parity-video.md) — init_frame_b64→SDEdit prior is real image conditioning; bound b64 pre-decode; sample_count needs derived seeds; extension=last-frame+concat+one soundtrack
 - [Voice-over speech synthesis](voiceover-speech-synthesis.md) — narration = local eSpeak NG, explicit -ar 44100 everywhere (birdcall bug class); job poll fields are a whitelist
 - [CTA leak guards](cta-leak-guards.md) — awareness→CTA must skip coaching/[HIGH] lines (strip Action:/• markers first) and format `{idea}` pool placeholders
+- [Guaranteed-completion policy](guaranteed-completion-policy.md) — no caller-visible timeouts anywhere; jobs retry-until-success + heartbeat; KEEP subprocess/watchdog hang-sensors
 - [Awareness-only social/ad content](awareness-only-content.md) — every ScriptRequest needs guaranteed non-empty awareness; compose path needs no model; awareness copy authoritative incl. CTA
 - [Intent ↔ awareness sync](intent-awareness-sync.md) — tiers blend (65/35 energy, anchor+flavor) not override; caller awareness leads platform buffer; [INTENT] kv lines must never reach caption text
