@@ -77,16 +77,24 @@ class GateBusy(Exception):
 
 
 class AdaptiveGate:
-    """A concurrency limiter whose capacity auto-sizes to available resources."""
+    """A concurrency limiter whose capacity auto-sizes to available resources.
+
+    When ``gpu_independent=True`` the gate bypasses all host CPU/memory
+    checks and runs at ``max_capacity`` at all times.  Use this for work
+    whose heavy compute runs on the Digital GPU (HyperGPU + pdim pocket
+    engine) rather than on Replit's host vCPUs — the host resource budget
+    is irrelevant for those workloads and should not throttle them.
+    """
 
     def __init__(
         self,
         name: str,
-        mem_per_slot_gb: float,
+        mem_per_slot_gb: float = 0.5,
         cpu_per_slot: float = 1.0,
         min_capacity: int = 1,
         max_capacity: int = 8,
         refresh_interval: float = 3.0,
+        gpu_independent: bool = False,
     ) -> None:
         self.name = name
         self.mem_per_slot_gb = float(mem_per_slot_gb)
@@ -94,6 +102,7 @@ class AdaptiveGate:
         self.min_capacity = int(min_capacity)
         self.max_capacity = int(max_capacity)
         self.refresh_interval = float(refresh_interval)
+        self.gpu_independent = bool(gpu_independent)
 
         self._cond = threading.Condition()
         self._active = 0
@@ -104,6 +113,12 @@ class AdaptiveGate:
             self._refresh(force=True)
 
     def _compute_capacity(self) -> int:
+        # GPU-independent gates: the Digital GPU has its own compute resources
+        # entirely separate from Replit's host CPUs/memory. Don't let the
+        # container's vCPU count or cgroup memory limit artificially cap
+        # parallelism that the GPU engine can absorb.
+        if self.gpu_independent:
+            return self.max_capacity
         cpu = usable_cpu_count()
         mem_gb = available_memory_bytes() / (1024 ** 3)
         by_cpu = cpu / self.cpu_per_slot
@@ -200,14 +215,14 @@ INFERENCE_GATE = AdaptiveGate(
     max_capacity=6,
 )
 
-# Video scene rendering: each scene spawns an ffmpeg encode that is itself
-# multi-threaded and compute-intensive, so budget ~2 cores per concurrent render
-# to avoid oversubscribing the engine (which slows every encode and trips timeouts).
-# Dev (4 vCPU) -> 2 concurrent; production Reserved VM (8 vCPU) -> 4 concurrent.
+# Video scene rendering: the Digital GPU (HyperGPU + pdim pocket engine) is 100%
+# independent of Replit's host environment. All heavy compute (diffusion, VRC
+# grading, GEMM batches) runs on the GPU engine — the host CPU/memory budget is
+# irrelevant. gpu_independent=True fixes capacity at max_capacity so every scene
+# in a job dispatches in a single parallel wave with no host-resource throttling.
 RENDER_GATE = AdaptiveGate(
     name="render",
-    mem_per_slot_gb=0.5,
-    cpu_per_slot=2.0,
-    min_capacity=1,
-    max_capacity=6,
+    min_capacity=4,
+    max_capacity=32,
+    gpu_independent=True,
 )

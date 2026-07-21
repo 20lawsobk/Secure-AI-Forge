@@ -9236,6 +9236,24 @@ def _start_video_job(req: ApiGenerateVideoRequest, platform: str) -> tuple[str, 
             except Exception:
                 _tech, _tech_dna = None, None
 
+            # ── Soundtrack: start in background immediately — it only needs
+            # `production` (already known) and is independent of scene building.
+            # This overlaps soundtrack I/O with extract_technique + build_open_scenes,
+            # saving 3–8 s of sequential wait before render can start.
+            import concurrent.futures as _cf
+            _audio_path = req.user_audio_path
+            _soundtrack_future = None
+            _snd_pool = None
+            if not _audio_path and getattr(req, "generate_audio", True):
+                _snd_pool = _cf.ThreadPoolExecutor(max_workers=1,
+                                                   thread_name_prefix="Soundtrack")
+                _soundtrack_future = _snd_pool.submit(
+                    _auto_soundtrack_path,
+                    job_id, production.total_duration,
+                    bpm=req.bpm, key=req.key,
+                    genre=production.genre_detected or (req.genre or ""),
+                )
+
             scene_configs = agent.build_open_scenes(
                 agent_req, production, width, height, technique_dna=_tech_dna)
             if _tech is not None:
@@ -9243,16 +9261,16 @@ def _start_video_job(req: ApiGenerateVideoRequest, platform: str) -> tuple[str, 
             dna        = ai_scene_builder.build_dna(agent_req.idea, production.genre_detected, production.tone_used)
             transition = "fadeblack" if dna.darkness > 0.70 else "dissolve" if dna.energy < 0.50 else "fade"
 
-            # Native-audio parity: when the caller supplied no track, render a
-            # genre/BPM-matched soundtrack from the real-audio dataset so the
-            # video ships with sound by default. Never-raise → silent render.
-            _audio_path = req.user_audio_path
-            if not _audio_path and getattr(req, "generate_audio", True):
-                _audio_path = _auto_soundtrack_path(
-                    job_id, production.total_duration,
-                    bpm=req.bpm, key=req.key,
-                    genre=production.genre_detected or (req.genre or ""),
-                )
+            # Collect soundtrack result (thread was running during scene build).
+            if _soundtrack_future is not None:
+                try:
+                    _audio_path = _soundtrack_future.result(timeout=25)
+                except Exception as _snd_exc:
+                    print(f"[VideoJob] auto-soundtrack thread error ({_snd_exc}); rendering silent", flush=True)
+                    _audio_path = None
+                finally:
+                    if _snd_pool is not None:
+                        _snd_pool.shutdown(wait=False)
 
             # Voice-over: synthesize REAL spoken narration (eSpeak NG) from the
             # script and duck the soundtrack under it. Previously this flag was

@@ -72,17 +72,11 @@ def render_cinematic_open(
     def _render_one(idx_scene):
         idx, scene = idx_scene
         sid = f"{uuid.uuid4().hex[:6]}_{idx}"
-        # Hold a global render slot so concurrent scenes (across all jobs) stay
-        # bounded to what the container's CPU/memory can handle right now.
+        # Hold a render slot to bound total simultaneous encodes.
+        # The Digital GPU is independent of the host environment, so no
+        # niceness penalty is applied — heavy compute (diffusion, VRC grading,
+        # GEMM) runs on the GPU engine, not on host CPUs.
         with RENDER_GATE.slot(timeout=300):
-            # Deprioritize this render thread (Linux: setpriority on the native
-            # thread id affects only this thread) so heavy in-process work
-            # (diffusion, grading) can't CPU-starve short interactive requests
-            # like audio encodes. Never-raise: priority is an optimization.
-            try:
-                os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 10)
-            except (OSError, AttributeError):
-                pass
             path = render_scene(scene, width, height, sid)
         return idx, path
 

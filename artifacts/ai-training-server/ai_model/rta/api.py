@@ -9,6 +9,7 @@ Importing this module registers every domain node executor (IRC/VRC/ARC).
 """
 from __future__ import annotations
 
+import threading
 from typing import Optional
 
 import numpy as np
@@ -29,6 +30,25 @@ __all__ = [
     "global_op_counts", "self_test",
 ]
 
+# ── Persistent shared RTACompute ───────────────────────────────────────────
+# RTACompute initialises the Digital GPU connection (pocket GEMM engine,
+# VRAM allocator) once. Creating a fresh instance per scene call wastes
+# ~50–200 ms of cold-start per render thread. The compute instance is
+# stateless between calls; UMRFScheduler is still created per-execution
+# (cheap — it holds only per-run state). Thread-safe double-checked init.
+_SHARED_COMPUTE: Optional[RTACompute] = None
+_COMPUTE_LOCK = threading.Lock()
+
+
+def _get_compute() -> RTACompute:
+    """Return the singleton RTACompute, initialising it on first call."""
+    global _SHARED_COMPUTE
+    if _SHARED_COMPUTE is None:
+        with _COMPUTE_LOCK:
+            if _SHARED_COMPUTE is None:
+                _SHARED_COMPUTE = RTACompute()
+    return _SHARED_COMPUTE
+
 
 # ── IMAGE (IRC) ────────────────────────────────────────────────────────────
 def render_image(color_scheme: str = "dark_neon", mood: str = "cinematic",
@@ -45,7 +65,7 @@ def render_image(color_scheme: str = "dark_neon", mood: str = "cinematic",
         Node(id="tone", type="IRC_TONEMAP", inputs=["trace"]),
     ])
     media = MediaState(id="img", type=MediaType.IMAGE, timeline=graph)
-    sched = UMRFScheduler(compute=RTACompute())
+    sched = UMRFScheduler(compute=_get_compute())
     out = sched.execute(media)
     frame = out.primary()
     if frame is None or frame.payload is None:
@@ -61,7 +81,7 @@ def grade_video_frame(frame: np.ndarray, grade: str = "cinematic") -> np.ndarray
         Node(id="grade", type="VRC_COLOR_GRADE", params={"grade": grade}),
     ])
     media = MediaState(id="vid", type=MediaType.VIDEO, frames=[fs], timeline=graph)
-    sched = UMRFScheduler(compute=RTACompute())
+    sched = UMRFScheduler(compute=_get_compute())
     out = sched.execute(media)
     return np.asarray(out.primary().payload, dtype=np.uint8)
 
@@ -77,7 +97,7 @@ def spectral_clean_audio(samples: np.ndarray, sample_rate: int,
              params={"sample_rate": sample_rate, "reduction_db": reduction_db}),
     ])
     media = MediaState(id="aud", type=MediaType.AUDIO, frames=[fs], timeline=graph)
-    sched = UMRFScheduler(compute=RTACompute())
+    sched = UMRFScheduler(compute=_get_compute())
     out = sched.execute(media)
     return np.asarray(out.primary().payload, dtype=np.float32)
 
