@@ -1749,7 +1749,7 @@ def _init_storage():
 
         def _probe_image():
             try:
-                ok = _image_engine is not None and hasattr(_image_engine, "render_background")
+                ok = _image_engine is not None and hasattr(_image_engine, "render")
                 return "image_engine", ok
             except Exception:
                 return "image_engine", False
