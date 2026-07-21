@@ -6,8 +6,8 @@ A production-grade AI content generation and training platform for music artists
 
 ## Run & Operate
 
-- **Main workflow**: `Start application` — starts both the API server (port 8080) and the Vite dev dashboard (port 5000)
-- **AI Training Server**: separate workflow running the Python FastAPI server on port 9878
+- **Main workflow**: `Start application` — starts everything: Vite dashboard (port 5000), Express API server (port 8080), and the Python AI engine (port 9878, child-spawned automatically by the API server). This is the only workflow you need.
+- **Artifact workflows** (`artifacts/api-server`, `artifacts/ai-dashboard`, `artifacts/mockup-sandbox`): keep these **stopped** — they conflict with `Start application` and cannot be deleted (platform-managed).
 - **DB migration**: `pnpm --filter @workspace/db push` (interactive) or `push-force`
 - **Build for production**: `pnpm run build:production`
 - **Production start**: `pnpm start` (serves built dashboard via API server)
