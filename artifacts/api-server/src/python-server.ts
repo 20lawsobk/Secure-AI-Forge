@@ -109,9 +109,14 @@ async function pollUntilOpen(port: number, maxMs = 6_000): Promise<boolean> {
 // ─── HTTP hang probe ─────────────────────────────────────────────────────────
 // Distinguishes three states:
 //   'down'    — TCP port not open (Python crashed or not yet started)
-//   'hung'    — TCP port open but HTTP /health does not respond within 10 s
+//   'hung'    — TCP port open but HTTP /health does not respond within 25 s
 //               (deadlock, OOM-frozen process, etc.)
 //   'healthy' — HTTP /health returned a non-5xx status
+//
+// 25 s timeout (was 10 s): the Python process runs at 87–90% memory in
+// production and frequently triggers GC runs (freeing 30–40k objects) that
+// block the event loop for 10–20 s.  A 10 s probe timeout fires during normal
+// GC and misclassifies a healthy-but-paused server as hung.
 //
 // This is the ONE intentional use of AbortController in the codebase: detecting
 // a genuinely hung OS process requires a real time-bound probe — there is no
@@ -123,7 +128,7 @@ async function probeHttpHealth(): Promise<"healthy" | "hung" | "down"> {
 
   // Port is bound — check if the HTTP layer is alive
   const controller = new AbortController();
-  const hangTimer = setTimeout(() => controller.abort(), 10_000);
+  const hangTimer = setTimeout(() => controller.abort(), 25_000);
   try {
     const { statusCode, body } = await undiciRequest(
       `http://localhost:${PYTHON_PORT}/health`,
@@ -321,13 +326,20 @@ function startHealthMonitor() {
 
     if (status === "hung") {
       console.warn("[Python] Health monitor: server is HUNG (port open, HTTP unresponsive) — force-killing…");
-      setPythonRestarting(true);
       if (pythonProcess) {
-        // SIGKILL bypasses the process's signal handlers so a deadlocked process
-        // is guaranteed to die.  The exit event fires → normal backoff restart.
+        // We own the process — SIGKILL so the exit event fires the normal
+        // backoff-restart path.  Hold requests while it restarts.
+        setPythonRestarting(true);
         pythonProcess.kill("SIGKILL");
       } else {
-        console.warn("[Python] Hung process not owned by us — cannot force-kill; requests will be held until it recovers");
+        // We don't own the process (api-server restarted and found Python already
+        // running — "monitoring only" mode).  We cannot kill it, and calling
+        // setPythonRestarting(true) here would hold ALL requests indefinitely
+        // because there is no restart cycle to call setPythonRestarting(false).
+        // Instead, pass requests through and let the circuit-breaker surface
+        // individual errors.  If Python truly crashes, the next "down" probe
+        // will spawn a new one via the normal path.
+        console.warn("[Python] Hung process not owned by us — not holding requests; circuit breaker will handle per-request errors until Python recovers");
       }
     }
     // 'healthy' — nothing to do
