@@ -668,6 +668,154 @@ def veo_dna(platform: str = "") -> str:
     return "\n".join(lines)
 
 
+def audio_seeding_targets() -> List[Dict[str, Any]]:
+    """Genre + BPM targets for awareness-guided audio dataset seeding.
+
+    Returns a list of ``{genre, bpm, bpm_range, energy}`` dicts sourced from
+    the live Deezer chart beacon — one entry per trending genre the beacon has
+    measured.  The seeder uses these to filter FMA/librosa samples so that the
+    seeded audio dataset reflects what is actually charting right now, not a
+    random slice of FMA.
+
+    Returns an empty list when the own corpus has retired the buffer (admin
+    output is self-sufficient) so the seeder knows to stop pulling external
+    content and rely entirely on the admin flywheel.
+
+    NOTE: deliberately NOT gated on a local TTL — this is called only by the
+    audio seeding watchdog (30 min cadence), so the cost of a get_doc() call
+    is fine.  Never-raise.
+    """
+    try:
+        suff = self_sufficiency()
+        if suff["retired"]:
+            return []  # admin corpus matches or exceeds signal volume — retire
+        doc = get_doc()
+        if not doc:
+            return []
+        feats: Dict[str, Any] = doc.get("music_features") or {}
+        targets: List[Dict[str, Any]] = []
+        for genre, entry in feats.items():
+            if genre == "global" or not isinstance(entry, dict):
+                continue
+            if not entry.get("bpm_median"):
+                continue
+            bpm_range = entry.get("bpm_range") or []
+            targets.append({
+                "genre": genre,
+                "bpm": float(entry["bpm_median"]),
+                "bpm_range": [float(v) for v in bpm_range[:2]] if len(bpm_range) >= 2 else [],
+                "energy": float(entry.get("energy_mean") or 0.5),
+                "source_previews": int(entry.get("measured_previews") or 0),
+            })
+        # Sort by measured evidence descending — more previews = better data.
+        targets.sort(key=lambda t: t["source_previews"], reverse=True)
+        return targets
+    except Exception:  # noqa: BLE001
+        return []
+
+
+_audio_watchdog_started = False
+_audio_watchdog_lock = threading.Lock()
+
+
+def start_audio_seeding_watchdog() -> bool:
+    """Start a background daemon that awareness-seeds the audio dataset while
+    the admin corpus is not yet self-sufficient.
+
+    Cadence: every ``MB_AUDIO_SEED_INTERVAL_MIN`` minutes (default 30).
+    Each tick:
+      1. Reads ``buffer_weight`` — if 0 the corpus is retired and seeding stops.
+      2. Reads the current audio dataset chunk count from storage.
+      3. If chunks < ``MB_AUDIO_TARGET_CHUNKS`` (default 24), calls the seeder
+         with genre/BPM targets from the live awareness beacon.
+
+    Once the admin flywheel grows the own corpus past the retirement threshold
+    the watchdog issues one final log and then idles — no more external seeds,
+    audio generation draws entirely from the admin-built dataset.
+
+    Idempotent (safe to call multiple times), never-raise, daemon thread.
+    """
+    global _audio_watchdog_started
+    with _audio_watchdog_lock:
+        if _audio_watchdog_started:
+            return False
+        _audio_watchdog_started = True
+
+    interval_s = max(
+        120.0,
+        float(os.environ.get("MB_AUDIO_SEED_INTERVAL_MIN", "30")) * 60.0,
+    )
+    target_chunks = max(4, int(os.environ.get("MB_AUDIO_TARGET_CHUNKS", "24")))
+
+    def _loop() -> None:
+        import time as _t
+        # Stagger first tick so startup is not overloaded.
+        _t.sleep(min(120.0, interval_s * 0.1))
+        retired_logged = False
+        while True:
+            try:
+                suff = self_sufficiency()
+                if suff["retired"]:
+                    if not retired_logged:
+                        logger.info(
+                            "[audio-watchdog] own corpus retired (weight=0) — "
+                            "audio dataset now grows from admin flywheel only; "
+                            "external seeding stopped"
+                        )
+                        retired_logged = True
+                else:
+                    retired_logged = False
+                    store = _store()
+                    current_chunks = 0
+                    if store is not None:
+                        try:
+                            meta = store.get("mb:dataset:audio:meta") or {}
+                            current_chunks = int(meta.get("num_chunks") or 0)
+                        except Exception:
+                            pass
+                    if current_chunks < target_chunks:
+                        need = target_chunks - current_chunks
+                        targets = audio_seeding_targets()
+                        logger.info(
+                            "[audio-watchdog] dataset sparse (%d/%d chunks, "
+                            "buffer_weight=%.3f) — seeding %d more from awareness "
+                            "(%d genre targets)",
+                            current_chunks, target_chunks,
+                            suff["buffer_weight"], need, len(targets),
+                        )
+                        try:
+                            from workers import seed_audio_dataset as _sad  # noqa: PLC0415
+                            if store is not None:
+                                _sad.seed(
+                                    store,
+                                    count=need,
+                                    genre_targets=targets,
+                                )
+                        except _sad.AlreadySeedingError:
+                            pass  # another caller already seeding — skip tick
+                        except Exception as exc:
+                            logger.warning(
+                                "[audio-watchdog] seed tick failed: %s", exc
+                            )
+                    else:
+                        logger.debug(
+                            "[audio-watchdog] dataset adequate (%d/%d chunks, "
+                            "buffer_weight=%.3f) — no action",
+                            current_chunks, target_chunks, suff["buffer_weight"],
+                        )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[audio-watchdog] tick error: %s", exc)
+            _t.sleep(interval_s)
+
+    threading.Thread(target=_loop, name="audio-seeding-watchdog",
+                     daemon=True).start()
+    logger.info(
+        "[audio-watchdog] started (interval=%.0fmin, target=%d chunks)",
+        interval_s / 60.0, target_chunks,
+    )
+    return True
+
+
 def status() -> Dict[str, Any]:
     """Full status for the API endpoint."""
     suff = self_sufficiency()

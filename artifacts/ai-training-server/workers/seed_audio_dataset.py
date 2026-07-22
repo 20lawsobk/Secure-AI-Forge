@@ -240,6 +240,7 @@ def seed(
     *,
     replace: bool = False,
     force_source: Optional[str] = None,
+    genre_targets: Optional[list] = None,
 ) -> dict[str, Any]:
     """Download ``count`` real tracks and store them under ``mb:dataset:audio``.
 
@@ -252,6 +253,14 @@ def seed(
       - ``"hf"``      — always attempt HF first (still falls back to librosa on error)
       - ``"librosa"`` — skip HF entirely, use librosa bundled examples
       - ``None``      — auto-detect (default: probe HF, fall back to librosa)
+
+    ``genre_targets`` is an optional list of ``{genre, bpm, bpm_range, energy}``
+    dicts sourced from the live awareness beacon (quality_awareness.audio_seeding_targets()).
+    When provided, FMA rows and librosa examples are filtered/prioritised to
+    match the trending genres and BPM ranges so the seeded dataset reflects
+    what is charting right now rather than a random FMA slice. Samples are
+    tagged ``seeded_by_awareness=True`` when selected via this filter.
+    Pass ``None`` (the default) for the original unfiltered behaviour.
 
     Requires a live storage backend; raises if storage is unavailable so the
     caller fails explicitly instead of writing to the non-persistent in-process
@@ -266,9 +275,71 @@ def seed(
             "audio dataset seeding already in progress — skipping this call"
         )
     try:
-        return _seed_locked(storage, count=count, replace=replace, force_source=force_source)
+        return _seed_locked(storage, count=count, replace=replace,
+                            force_source=force_source, genre_targets=genre_targets)
     finally:
         _SEED_LOCK.release()
+
+
+def _genre_match_score(sample_genres: list, targets: list) -> float:
+    """Return a match score [0, 1] between a sample's genres and awareness targets.
+
+    A score of 1.0 means the sample's genre is listed in the targets.
+    Partial credit for sub-string matches (e.g. "hip-hop" ∈ "hip hop").
+    0.0 means no overlap.  The highest score across all target genres is returned.
+    """
+    if not targets or not sample_genres:
+        return 0.5  # no targets = no preference, treat all as neutral
+    norm = [g.lower().strip().replace("-", " ").replace("_", " ")
+            for g in sample_genres]
+    best = 0.0
+    for t in targets:
+        tg = t.get("genre", "").lower().strip().replace("-", " ").replace("_", " ")
+        if not tg:
+            continue
+        for sg in norm:
+            if tg == sg or tg in sg or sg in tg:
+                best = 1.0
+                break
+            # word overlap
+            t_words = set(tg.split())
+            s_words = set(sg.split())
+            if t_words & s_words:
+                score = len(t_words & s_words) / max(len(t_words), len(s_words))
+                best = max(best, score * 0.8)
+        if best == 1.0:
+            break
+    return best
+
+
+def _bpm_match_score(bpm: float, targets: list) -> float:
+    """Return a BPM proximity score [0, 1] against any awareness target."""
+    if not targets or bpm <= 0:
+        return 0.5
+    best = 0.0
+    for t in targets:
+        target_bpm = float(t.get("bpm") or 0)
+        bpm_range = t.get("bpm_range") or []
+        if len(bpm_range) >= 2:
+            lo, hi = float(bpm_range[0]), float(bpm_range[1])
+            if lo <= bpm <= hi:
+                best = 1.0
+                break
+            margin = max(hi - lo, 10.0)
+            dist = min(abs(bpm - lo), abs(bpm - hi))
+            best = max(best, max(0.0, 1.0 - dist / margin))
+        elif target_bpm > 0:
+            dist = abs(bpm - target_bpm)
+            best = max(best, max(0.0, 1.0 - dist / 40.0))
+    return best
+
+
+def _is_awareness_match(sample_genres: list, bpm: float,
+                        targets: list, threshold: float = 0.4) -> bool:
+    """True when a sample is a good enough match for the awareness targets."""
+    g = _genre_match_score(sample_genres, targets)
+    b = _bpm_match_score(bpm, targets)
+    return (g * 0.7 + b * 0.3) >= threshold
 
 
 def _seed_locked(
@@ -277,6 +348,7 @@ def _seed_locked(
     *,
     replace: bool = False,
     force_source: Optional[str] = None,
+    genre_targets: Optional[list] = None,
 ) -> dict[str, Any]:
     """Internal implementation — must only be called while _SEED_LOCK is held."""
     pdim_up = getattr(storage, "is_available", False)
@@ -313,14 +385,25 @@ def _seed_locked(
         active_source = _SOURCE_LIBROSA
 
     stored = 0
+    # When awareness targets are provided, increase the attempt budget so we
+    # can afford to skip non-matching rows before finding genre/BPM matches.
+    _aw_guided = bool(genre_targets)
+    if _aw_guided:
+        logger.info(
+            "[seed_audio] awareness-guided seeding: %d genre targets (%s)",
+            len(genre_targets),
+            ", ".join(t.get("genre", "?") for t in (genre_targets or [])[:5]),
+        )
 
     if use_hf:
         # ----------------------------------------------------------------
-        # Primary path: stream rows from the HF datasets-server
+        # Primary path: stream rows from the HF datasets-server.
+        # Awareness-guided: when genre_targets is provided, rows that don't
+        # match any target genre/BPM are skipped (with a higher attempt cap).
         # ----------------------------------------------------------------
         offset = start_idx
         attempts = 0
-        max_attempts = max(count * 4, 8)
+        max_attempts = max(count * 4, 8) if not _aw_guided else max(count * 10, 20)
         while stored < count and attempts < max_attempts:
             try:
                 batch = _fetch_hf_rows(offset, min(5, count - stored))
@@ -339,24 +422,40 @@ def _seed_locked(
                 src = _audio_src(row)
                 if not src:
                     continue
+                # ── Cheap genre pre-filter (before download) ─────────────
+                # Normalise genre labels now so the awareness matcher can
+                # compare them.  HF/FMA rows carry numeric IDs; normalisation
+                # converts them to readable names the matcher understands.
+                from ai_model.audio.track_selector import normalize_genres
+                raw_genres = row.get("genres")
+                norm_genres = normalize_genres(raw_genres if isinstance(raw_genres, list) else [])
+                if _aw_guided and norm_genres:
+                    if _genre_match_score(norm_genres, genre_targets) < 0.3:
+                        logger.debug(
+                            "[seed_audio] skip row (genre mismatch: %s)", norm_genres
+                        )
+                        continue
                 try:
                     mp3 = _transcode(_http_get(src, timeout=60))
                 except Exception as exc:
                     logger.warning("[seed_audio] skip HF row: %s", exc)
                     continue
                 bpm, key = _estimate_bpm_key(mp3)
+                # ── BPM post-filter (BPM is only known after transcode) ───
+                if _aw_guided and bpm > 0:
+                    if not _is_awareness_match(norm_genres, bpm, genre_targets):
+                        logger.debug(
+                            "[seed_audio] skip row (awareness mismatch: "
+                            "bpm=%.1f genres=%s)", bpm, norm_genres
+                        )
+                        continue
                 idx = start_idx + stored
-                # Normalise genre labels to names at seed time — HF/FMA rows
-                # carry numeric genre IDs which the awareness layer's genre
-                # names can never match.  (The selector also normalises at
-                # read time, so previously-seeded chunks keep working.)
-                from ai_model.audio.track_selector import normalize_genres
-                genres = row.get("genres")
+                aw_extra: dict = {"seeded_by_awareness": True} if _aw_guided else {}
                 sample = {
                     "idx": idx,
                     "title": str(row.get("title") or f"track_{idx}"),
                     "artist": str(row.get("artist") or ""),
-                    "genres": normalize_genres(genres if isinstance(genres, list) else []),
+                    "genres": norm_genres,
                     "license": str(row.get("license") or ""),
                     "instrumental": bool(row.get("instrumental")),
                     "source": active_source,
@@ -366,24 +465,34 @@ def _seed_locked(
                     "sample_rate": _SAMPLE_RATE,
                     "format": "mp3",
                     "b64": base64.b64encode(mp3).decode("ascii"),
+                    **aw_extra,
                 }
                 storage.set(f"mb:dataset:{DATASET_NAME}:chunk:{idx}", sample)
-                index.append(
-                    {"idx": idx, "bpm": bpm, "key": key, "genres": sample["genres"]}
-                )
+                index.append({
+                    "idx": idx, "bpm": bpm, "key": key,
+                    "genres": sample["genres"], **aw_extra,
+                })
                 stored += 1
                 logger.info(
-                    "[seed_audio] stored sample %d (%s, bpm=%s key=%s)",
+                    "[seed_audio] stored sample %d (%s, bpm=%s key=%s%s)",
                     idx, sample["title"], bpm, key,
+                    " [awareness-guided]" if _aw_guided else "",
                 )
 
     if not use_hf:
         # ----------------------------------------------------------------
-        # Fallback path: librosa CC-licensed bundled examples
+        # Fallback path: librosa CC-licensed bundled examples.
+        # Awareness-guided: sort examples by genre match score so the
+        # best-matching tracks are seeded first.
         # ----------------------------------------------------------------
-        # Cycle through examples (repeat if count > len) starting from
-        # start_idx so that incremental seeding picks up distinct examples.
-        examples = _LIBROSA_EXAMPLES
+        examples = list(_LIBROSA_EXAMPLES)
+        if _aw_guided and genre_targets:
+            examples.sort(
+                key=lambda e: _genre_match_score(
+                    list(e.get("genres") or []), genre_targets
+                ),
+                reverse=True,
+            )
         ex_offset = start_idx % len(examples)
         attempts = 0
         max_attempts = count * 2
@@ -398,6 +507,7 @@ def _seed_locked(
                 continue
             bpm, key = _estimate_bpm_key(mp3)
             idx = start_idx + stored
+            aw_extra = {"seeded_by_awareness": True} if _aw_guided else {}
             sample = {
                 "idx": idx,
                 "title": str(ex.get("title") or f"track_{idx}"),
@@ -412,15 +522,18 @@ def _seed_locked(
                 "sample_rate": _SAMPLE_RATE,
                 "format": "mp3",
                 "b64": base64.b64encode(mp3).decode("ascii"),
+                **aw_extra,
             }
             storage.set(f"mb:dataset:{DATASET_NAME}:chunk:{idx}", sample)
-            index.append(
-                {"idx": idx, "bpm": bpm, "key": key, "genres": sample["genres"]}
-            )
+            index.append({
+                "idx": idx, "bpm": bpm, "key": key,
+                "genres": sample["genres"], **aw_extra,
+            })
             stored += 1
             logger.info(
-                "[seed_audio] stored librosa sample %d (%s, bpm=%s key=%s)",
+                "[seed_audio] stored librosa sample %d (%s, bpm=%s key=%s%s)",
                 idx, sample["title"], bpm, key,
+                " [awareness-guided]" if _aw_guided else "",
             )
 
     num_chunks = start_idx + stored
@@ -428,16 +541,23 @@ def _seed_locked(
         "name": DATASET_NAME,
         "seeded_at": time.time(),
         "description": (
-            "Real music samples from the Free Music Archive (FMA-small)" if active_source == _SOURCE
+            "Real music samples from the Free Music Archive (FMA-small)"
+            + (" — awareness-guided genre/BPM filter" if _aw_guided else "")
+            if active_source == _SOURCE
             else "Real CC-licensed music samples (librosa bundled examples)"
+            + (" — awareness-guided genre sort" if _aw_guided else "")
         ),
         "content_type": "audio",
         "num_chunks": num_chunks,
         "source": active_source,
+        "awareness_guided": _aw_guided,
         "index": index,
     }
     storage.set(f"mb:dataset:{DATASET_NAME}:meta", meta)
-    summary = {"stored": stored, "total": num_chunks, "source": active_source}
+    summary = {
+        "stored": stored, "total": num_chunks,
+        "source": active_source, "awareness_guided": _aw_guided,
+    }
     logger.info("[seed_audio] done: %s", summary)
     return summary
 

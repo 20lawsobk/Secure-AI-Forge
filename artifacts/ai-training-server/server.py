@@ -1337,6 +1337,16 @@ async def on_startup():
         _aw_sched()
     except Exception as _aw_exc:  # noqa: BLE001
         print(f"[Server] awareness scheduler not started: {_aw_exc}")
+    # Audio seeding watchdog — keeps the audio dataset seeded from live
+    # awareness signals (trending genres + Deezer BPM targets) while the
+    # admin's own flywheel corpus is not yet self-sufficient.  Once the own
+    # corpus retires the buffer (buffer_weight → 0), the watchdog stops
+    # external seeding and audio generation draws from admin-built tracks only.
+    try:
+        from ai_model.quality_awareness import start_audio_seeding_watchdog as _aw_dog
+        _aw_dog()
+    except Exception as _aw_dog_exc:  # noqa: BLE001
+        print(f"[Server] audio seeding watchdog not started: {_aw_dog_exc}")
     warm_thread = threading.Thread(target=_warm_content_cache, daemon=True)
     warm_thread.start()
     subsys_thread = threading.Thread(target=_warm_start_subsystems, daemon=True)
