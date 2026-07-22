@@ -22,6 +22,22 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# ── Digital GPU backend singleton ─────────────────────────────────────────────
+_GPU_BACKEND = None
+_GPU_BACKEND_LOCK = threading.Lock()
+
+def _get_gpu():
+    global _GPU_BACKEND
+    if _GPU_BACKEND is None:
+        with _GPU_BACKEND_LOCK:
+            if _GPU_BACKEND is None:
+                try:
+                    from ai_model.gpu.torch_backend import DigitalGPUBackend
+                    _GPU_BACKEND = DigitalGPUBackend()
+                except Exception:
+                    pass
+    return _GPU_BACKEND
+
 _ANALYSIS_SR = 22050
 _MAX_ANALYSIS_SEC = 300.0
 _DEFAULT_BPM = 120.0
@@ -136,6 +152,15 @@ def _even_sections(duration: float, k: int) -> list[Section]:
 def _corr(a: np.ndarray, b: np.ndarray) -> float:
     a = a - np.mean(a)
     b = b - np.mean(b)
+    gpu = _get_gpu()
+    if gpu is not None:
+        a32 = np.ascontiguousarray(a, dtype=np.float32)
+        b32 = np.ascontiguousarray(b, dtype=np.float32)
+        da = float(np.sqrt(abs(gpu.gemm(a32.reshape(1, -1), a32.reshape(-1, 1)).ravel()[0])))
+        db = float(np.sqrt(abs(gpu.gemm(b32.reshape(1, -1), b32.reshape(-1, 1)).ravel()[0])))
+        if da == 0.0 or db == 0.0:
+            return 0.0
+        return float(gpu.gemm(a32.reshape(1, -1), b32.reshape(-1, 1)).ravel()[0]) / (da * db)
     da = float(np.linalg.norm(a))
     db = float(np.linalg.norm(b))
     if da == 0.0 or db == 0.0:

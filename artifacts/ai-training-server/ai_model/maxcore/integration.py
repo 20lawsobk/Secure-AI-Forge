@@ -10,9 +10,27 @@ IR (mean-pool → embedding GEMM → MLP), compiled and run through the stack.
 """
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 
 from .ir.nodes import MaxCoreGraph
+
+# ── Digital GPU backend singleton ─────────────────────────────────────────────
+_GPU_BACKEND = None
+_GPU_BACKEND_LOCK = threading.Lock()
+
+def _get_gpu():
+    global _GPU_BACKEND
+    if _GPU_BACKEND is None:
+        with _GPU_BACKEND_LOCK:
+            if _GPU_BACKEND is None:
+                try:
+                    from ai_model.gpu.torch_backend import DigitalGPUBackend
+                    _GPU_BACKEND = DigitalGPUBackend()
+                except Exception:
+                    pass
+    return _GPU_BACKEND
 
 
 def attention_graph(dg, causal: bool = False) -> MaxCoreGraph:
@@ -78,6 +96,15 @@ def ref_text_mlp(onehot, embed, w1, b1, w2, b2, activation="relu"):
 
 
 def ref_attention(q, k, v, causal=False):
+    gpu = _get_gpu()
+    if gpu is not None:
+        return gpu.attention(
+            np.ascontiguousarray(np.asarray(q, dtype=np.float32)),
+            np.ascontiguousarray(np.asarray(k, dtype=np.float32)),
+            np.ascontiguousarray(np.asarray(v, dtype=np.float32)),
+            causal,
+        )
+    # numpy fallback (no-backend environments / unit tests)
     q = np.asarray(q, dtype=np.float32)
     k = np.asarray(k, dtype=np.float32)
     v = np.asarray(v, dtype=np.float32)

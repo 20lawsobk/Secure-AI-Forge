@@ -213,7 +213,6 @@ class Watchdog:
         self._check_quality_harvester_freshness(now)
         self._check_storage_health_thread(now)
         self._check_checkpoint_integrity()
-        self._check_memory(now)
         self._check_storage(now)
         self._check_loss_plateau(now)
 

@@ -30,21 +30,15 @@ from urllib.parse import urlparse
 import html as _html
 import urllib.request as _urllib_request
 
-# ── Size BLAS/OpenMP thread pools to the real host BEFORE numpy is imported ───
-# Derived from os.cpu_count() at runtime — 2 on the dev box, 16 on the prod
-# Reserved VM — never hardcoded. setdefault() means an explicit operator override
-# always wins. With multiple uvicorn worker *processes* each must be capped to
-# cpus // workers to prevent thread explosion (N workers × N threads = N² BLAS
-# threads all competing on the same cores). UVICORN_WORKERS env var must be set
-# before the process starts so the cap is correct from the first numpy call.
-_cpus = os.cpu_count() or 1
-_uvicorn_workers = max(1, int(os.environ.get("UVICORN_WORKERS", "1")))
-_blas_threads_per_worker = max(1, _cpus // _uvicorn_workers)
+# ── BLAS/OpenMP thread pools — minimal on the host ───────────────────────────
+# The Digital GPU backend handles all heavy compute. The Python process is an
+# API surface; its numpy usage is bookkeeping only. One BLAS thread is correct —
+# we do not want host CPU thread pools competing with the GPU engine.
 for _blas_var in (
     "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
     "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
 ):
-    os.environ.setdefault(_blas_var, str(_blas_threads_per_worker))
+    os.environ.setdefault(_blas_var, "1")
 
 import psycopg2
 import psycopg2.pool
@@ -1299,16 +1293,14 @@ class ContentRequest(_AwarenessMixin):
 
 @app.on_event("startup")
 async def on_startup():
-    # ── Thread pool: sized for 90 000 000 unique-request scale ───────────────
-    # At 90M unique req/day each arriving as a distinct forward pass, the
-    # thread pool must be deep enough that the batcher's pending queue never
-    # starves waiting for a worker.  cpu×32 (floor 512) keeps hundreds of
-    # concurrent inflight requests from queuing behind the pool limit.
+    # ── Thread pool: 512 workers for async I/O routing ───────────────────────
+    # This pool dispatches HTTP handlers and waits on GPU-backend results — it
+    # is I/O-bound, not CPU-bound. 512 workers keeps hundreds of concurrent
+    # in-flight requests from queuing. Host CPU count is irrelevant here.
     import concurrent.futures as _cf
-    _cpu_n = os.cpu_count() or 4
     asyncio.get_event_loop().set_default_executor(
         _cf.ThreadPoolExecutor(
-            max_workers=max(512, _cpu_n * 32),
+            max_workers=512,
             thread_name_prefix="req-worker",
         )
     )

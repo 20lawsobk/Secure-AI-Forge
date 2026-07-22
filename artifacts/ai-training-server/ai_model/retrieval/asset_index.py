@@ -28,6 +28,22 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+# ── Digital GPU backend singleton ─────────────────────────────────────────────
+_GPU_BACKEND = None
+_GPU_BACKEND_LOCK = threading.Lock()
+
+def _get_gpu():
+    global _GPU_BACKEND
+    if _GPU_BACKEND is None:
+        with _GPU_BACKEND_LOCK:
+            if _GPU_BACKEND is None:
+                try:
+                    from ai_model.gpu.torch_backend import DigitalGPUBackend
+                    _GPU_BACKEND = DigitalGPUBackend()
+                except Exception:
+                    pass
+    return _GPU_BACKEND
+
 # Cosine-distance (1 - cosine_similarity) cutoffs. Range is [0, 2].
 NEAREST_RADIUS = 0.35          # within this → a confident "nearest" hit
 BRAND_RADIUS = 0.55            # within this → an acceptable brand-prior hit
@@ -101,7 +117,12 @@ class AssetIndex:
                 v = np.pad(v, (0, self.dim - v.shape[0]))
         if not np.all(np.isfinite(v)):
             v = np.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)
-        norm = float(np.linalg.norm(v))
+        gpu = _get_gpu()
+        if gpu is not None:
+            v32 = np.ascontiguousarray(v, dtype=np.float32)
+            norm = float(np.sqrt(abs(gpu.gemm(v32.reshape(1, -1), v32.reshape(-1, 1)).ravel()[0])))
+        else:
+            norm = float(np.linalg.norm(v))
         if norm <= 1e-12:
             return None
         return (v / norm).astype(np.float32)
@@ -248,6 +269,21 @@ class AssetIndex:
         """Argmin cosine distance over candidate_idxs (deterministic tie-break by id)."""
         if not candidate_idxs:
             return None
+        gpu = _get_gpu()
+        if gpu is not None:
+            # Batch all dot products as a single GEMM: [N, dim] @ [dim, 1] → [N, 1]
+            candidates = np.ascontiguousarray(
+                np.stack([self._vecs[i] for i in candidate_idxs]), dtype=np.float32
+            )
+            sims = gpu.gemm(candidates, np.ascontiguousarray(q, dtype=np.float32).reshape(-1, 1)).ravel()
+            best_local = int(np.argmax(sims))
+            best_sim = float(sims[best_local])
+            best_idx = candidate_idxs[best_local]
+            # deterministic tie-break by id
+            for j, ci in enumerate(candidate_idxs):
+                if abs(float(sims[j]) - best_sim) < 1e-9 and self._ids[ci] < self._ids[best_idx]:
+                    best_idx = ci
+            return best_idx, max(0.0, 1.0 - best_sim)
         best_idx = -1
         best_dist = float("inf")
         for i in candidate_idxs:

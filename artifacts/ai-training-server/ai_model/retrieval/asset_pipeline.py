@@ -36,6 +36,22 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+# ── Digital GPU backend singleton ─────────────────────────────────────────────
+_GPU_BACKEND = None
+_GPU_BACKEND_LOCK = threading.Lock()
+
+def _get_gpu():
+    global _GPU_BACKEND
+    if _GPU_BACKEND is None:
+        with _GPU_BACKEND_LOCK:
+            if _GPU_BACKEND is None:
+                try:
+                    from ai_model.gpu.torch_backend import DigitalGPUBackend
+                    _GPU_BACKEND = DigitalGPUBackend()
+                except Exception:
+                    pass
+    return _GPU_BACKEND
+
 from ai_model.image.image_engine import (
     COLOR_SCHEMES,
     _UPLOADS_DIR,
@@ -137,6 +153,15 @@ def _scheme_palette_sig(scheme: str) -> Optional[np.ndarray]:
 
 
 def _cos(a: np.ndarray, b: np.ndarray) -> float:
+    gpu = _get_gpu()
+    if gpu is not None:
+        a32 = np.ascontiguousarray(a, dtype=np.float32)
+        b32 = np.ascontiguousarray(b, dtype=np.float32)
+        na = float(np.sqrt(abs(gpu.gemm(a32.reshape(1, -1), a32.reshape(-1, 1)).ravel()[0])))
+        nb = float(np.sqrt(abs(gpu.gemm(b32.reshape(1, -1), b32.reshape(-1, 1)).ravel()[0])))
+        if na <= 1e-12 or nb <= 1e-12:
+            return -1.0
+        return float(gpu.gemm(a32.reshape(1, -1), b32.reshape(-1, 1)).ravel()[0]) / (na * nb)
     na = float(np.linalg.norm(a))
     nb = float(np.linalg.norm(b))
     if na <= 1e-12 or nb <= 1e-12:

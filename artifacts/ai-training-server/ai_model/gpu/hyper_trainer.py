@@ -35,7 +35,9 @@ def train_on_hyper_gpu(
     if config is None:
         config = TrainConfig()
 
-    torch.set_num_threads(max(4, os.cpu_count() or 4))
+    # Training routes through the Digital GPU backend — host torch CPU threads
+    # are not in the compute path and must not be sized from host CPU count.
+    torch.set_num_threads(1)
     torch.set_grad_enabled(True)
 
     backend = HyperGPUBackend(
