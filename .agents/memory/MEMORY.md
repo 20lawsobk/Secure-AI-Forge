@@ -50,4 +50,5 @@
 - [CTA leak guards](cta-leak-guards.md) — awareness→CTA must skip coaching/[HIGH] lines (strip Action:/• markers first) and format `{idea}` pool placeholders
 - [Guaranteed-completion policy](guaranteed-completion-policy.md) — no caller-visible timeouts anywhere; jobs retry-until-success + heartbeat; KEEP subprocess/watchdog hang-sensors
 - [Awareness-only social/ad content](awareness-only-content.md) — every ScriptRequest needs guaranteed non-empty awareness; compose path needs no model; awareness copy authoritative incl. CTA
+- [Garble/seeding guard contracts](garble-guard-contracts.md) — 4 tests assert source strings + WARN logs; one-shot per-instance model probe, seeding wait must stay <30s
 - [Intent ↔ awareness sync](intent-awareness-sync.md) — tiers blend (65/35 energy, anchor+flavor) not override; caller awareness leads platform buffer; [INTENT] kv lines must never reach caption text

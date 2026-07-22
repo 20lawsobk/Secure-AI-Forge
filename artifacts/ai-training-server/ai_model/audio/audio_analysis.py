@@ -154,13 +154,15 @@ def _corr(a: np.ndarray, b: np.ndarray) -> float:
     b = b - np.mean(b)
     gpu = _get_gpu()
     if gpu is not None:
+        # Use the underlying DigitalGPU numpy kernel directly (not the torch wrapper)
+        engine = gpu.gpu
         a32 = np.ascontiguousarray(a, dtype=np.float32)
         b32 = np.ascontiguousarray(b, dtype=np.float32)
-        da = float(np.sqrt(abs(gpu.gemm(a32.reshape(1, -1), a32.reshape(-1, 1)).ravel()[0])))
-        db = float(np.sqrt(abs(gpu.gemm(b32.reshape(1, -1), b32.reshape(-1, 1)).ravel()[0])))
+        da = float(np.sqrt(abs(engine.gemm(a32.reshape(1, -1), a32.reshape(-1, 1)).ravel()[0])))
+        db = float(np.sqrt(abs(engine.gemm(b32.reshape(1, -1), b32.reshape(-1, 1)).ravel()[0])))
         if da == 0.0 or db == 0.0:
             return 0.0
-        return float(gpu.gemm(a32.reshape(1, -1), b32.reshape(-1, 1)).ravel()[0]) / (da * db)
+        return float(engine.gemm(a32.reshape(1, -1), b32.reshape(-1, 1)).ravel()[0]) / (da * db)
     da = float(np.linalg.norm(a))
     db = float(np.linalg.norm(b))
     if da == 0.0 or db == 0.0:

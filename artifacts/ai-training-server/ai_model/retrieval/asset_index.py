@@ -120,7 +120,7 @@ class AssetIndex:
         gpu = _get_gpu()
         if gpu is not None:
             v32 = np.ascontiguousarray(v, dtype=np.float32)
-            norm = float(np.sqrt(abs(gpu.gemm(v32.reshape(1, -1), v32.reshape(-1, 1)).ravel()[0])))
+            norm = float(np.sqrt(abs(gpu.gpu.gemm(v32.reshape(1, -1), v32.reshape(-1, 1)).ravel()[0])))
         else:
             norm = float(np.linalg.norm(v))
         if norm <= 1e-12:
@@ -275,7 +275,7 @@ class AssetIndex:
             candidates = np.ascontiguousarray(
                 np.stack([self._vecs[i] for i in candidate_idxs]), dtype=np.float32
             )
-            sims = gpu.gemm(candidates, np.ascontiguousarray(q, dtype=np.float32).reshape(-1, 1)).ravel()
+            sims = gpu.gpu.gemm(candidates, np.ascontiguousarray(q, dtype=np.float32).reshape(-1, 1)).ravel()
             best_local = int(np.argmax(sims))
             best_sim = float(sims[best_local])
             best_idx = candidate_idxs[best_local]

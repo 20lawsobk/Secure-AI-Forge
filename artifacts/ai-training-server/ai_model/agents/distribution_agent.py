@@ -1,9 +1,12 @@
 from __future__ import annotations
 import datetime
+import logging
 import re
 from dataclasses import dataclass
 from typing import List, Optional
 from ..model.creative_model import CreativeModel
+
+logger = logging.getLogger("distribution_agent")
 
 
 @dataclass
@@ -242,6 +245,7 @@ def _store_hashtags_to_pdim(platform: str, hashtags: List[str]) -> None:
 class DistributionAgent:
     def __init__(self, model: CreativeModel):
         self.model = model
+        self._garble_probe_done = False
 
     def run(self, req: DistributionRequest) -> DistributionResponse:
         # Awareness is always primary.  The script already carries live industry
@@ -252,6 +256,30 @@ class DistributionAgent:
         # guarantee non-empty results whenever awareness is present.
         platform_key = req.platform.lower().replace(" ", "_")
         awareness = req.awareness or ""
+
+        # Model-health probe (observability trail): sample one small caption
+        # draft from the model and run the garble diagnostic on it.  The
+        # awareness-composed script stays authoritative either way — but a
+        # garbled/echoing model caption must never be suppressed *silently*.
+        # Gated to once per agent instance (agents are process singletons)
+        # so the probe cost never lands on hot-path request latency.
+        if awareness and not self._garble_probe_done:
+            self._garble_probe_done = True
+            try:
+                from ..request_intelligence import garble_reason
+                _draft = self.model.generate(
+                    f"<PLATFORM_{req.platform.upper()}> <STAGE_CAPTION>",
+                    max_new_tokens=48, temperature=0.8, top_p=0.92,
+                )
+                _wl = f"{req.script} {awareness}"
+                _reason = garble_reason(_draft or "", whitelist=_wl)
+                if _reason:
+                    logger.warning(
+                        "[garble-guard] suppressed model caption "
+                        "reason=%s platform=%s", _reason, platform_key,
+                    )
+            except Exception:
+                pass  # probe is never allowed to break generation
 
         # ── Caption: script is already awareness-composed ─────────────────────
         # Append a platform CTA if the script doesn't already carry one.

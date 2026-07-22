@@ -155,13 +155,14 @@ def _scheme_palette_sig(scheme: str) -> Optional[np.ndarray]:
 def _cos(a: np.ndarray, b: np.ndarray) -> float:
     gpu = _get_gpu()
     if gpu is not None:
+        engine = gpu.gpu
         a32 = np.ascontiguousarray(a, dtype=np.float32)
         b32 = np.ascontiguousarray(b, dtype=np.float32)
-        na = float(np.sqrt(abs(gpu.gemm(a32.reshape(1, -1), a32.reshape(-1, 1)).ravel()[0])))
-        nb = float(np.sqrt(abs(gpu.gemm(b32.reshape(1, -1), b32.reshape(-1, 1)).ravel()[0])))
+        na = float(np.sqrt(abs(engine.gemm(a32.reshape(1, -1), a32.reshape(-1, 1)).ravel()[0])))
+        nb = float(np.sqrt(abs(engine.gemm(b32.reshape(1, -1), b32.reshape(-1, 1)).ravel()[0])))
         if na <= 1e-12 or nb <= 1e-12:
             return -1.0
-        return float(gpu.gemm(a32.reshape(1, -1), b32.reshape(-1, 1)).ravel()[0]) / (na * nb)
+        return float(engine.gemm(a32.reshape(1, -1), b32.reshape(-1, 1)).ravel()[0]) / (na * nb)
     na = float(np.linalg.norm(a))
     nb = float(np.linalg.norm(b))
     if na <= 1e-12 or nb <= 1e-12:

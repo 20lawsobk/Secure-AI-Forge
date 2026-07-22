@@ -8289,6 +8289,21 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
     try:
         storage = get_storage()
         meta = storage.get("mb:dataset:audio:meta")
+
+        # If the dataset is empty but the background seeder is actively
+        # running, wait briefly for the first chunk so this render can
+        # benefit from real-track metadata refinement.  Bounded to 12 s
+        # (well inside the <30 s job budget — this renderer is also used by
+        # the video auto-soundtrack path which has no early-exit guard) and
+        # never-raise: on timeout we simply proceed awareness-only.
+        if not (meta and int(meta.get("num_chunks", 0)) > 0):
+            from workers.seed_audio_dataset import is_seeding as _is_seeding_render
+            _wait_deadline = time.time() + 12.0
+            while _is_seeding_render() and time.time() < _wait_deadline:
+                time.sleep(1.5)
+                meta = storage.get("mb:dataset:audio:meta")
+                if meta and int(meta.get("num_chunks", 0)) > 0:
+                    break  # first chunk landed — metadata refinement available
         if meta and int(meta.get("num_chunks", 0)) > 0:
             index = meta.get("index") or [
                 {"idx": i} for i in range(int(meta["num_chunks"]))
@@ -8693,6 +8708,7 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
                 status_code=202,
                 headers={"Retry-After": "30"},
                 content={
+                    "error":              "seeding_in_progress",
                     "seeding_now":        True,
                     "message": (
                         "The audio library is still being built in the background "

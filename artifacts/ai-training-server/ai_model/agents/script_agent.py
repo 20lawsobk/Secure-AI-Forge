@@ -1,8 +1,11 @@
 from __future__ import annotations
+import logging
 import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 from ..model.creative_model import CreativeModel
+
+logger = logging.getLogger("script_agent")
 
 # ── Static platform defaults — dead code in normal operation ─────────────────
 # Kept as absolute last resort when both model and awareness are absent.
@@ -670,6 +673,7 @@ def _build_awareness_body(
 class ScriptAgent:
     def __init__(self, model: CreativeModel):
         self.model = model
+        self._garble_probe_done = False
 
     def run(self, req: ScriptRequest) -> ScriptResponse:
         # Awareness is always primary — live industry signals drive content
@@ -678,6 +682,29 @@ class ScriptAgent:
         # them as a hint to model.generate().  The model path is reserved for
         # the edge case where no awareness data is available.
         if req.awareness:
+            # Model-health probe (observability trail): sample one small draft
+            # from the model and run the garble diagnostic on it.  Awareness
+            # copy stays authoritative either way — but a garbled/echoing
+            # model must never be suppressed *silently*, so we log the reason.
+            # Gated to once per agent instance (agents are process singletons)
+            # so the probe cost never lands on hot-path request latency.
+            if req.variant_idx == 0 and not self._garble_probe_done:
+                self._garble_probe_done = True
+                try:
+                    from ..request_intelligence import garble_reason
+                    _draft = self.model.generate(
+                        f"<PLATFORM_{req.platform.upper()}> <STAGE_HOOK>",
+                        max_new_tokens=48, temperature=0.8, top_p=0.92,
+                    )
+                    _wl = f"{req.idea} {req.awareness or ''}"
+                    _reason = garble_reason(_draft or "", whitelist=_wl)
+                    if _reason:
+                        logger.warning(
+                            "[garble-guard] suppressed model draft "
+                            "reason=%s platform=%s", _reason, req.platform,
+                        )
+                except Exception:
+                    pass  # probe is never allowed to break generation
             return self._awareness_compose(req)
 
         # No awareness context: model.generate() with template last-resort.

@@ -98,7 +98,9 @@ def ref_text_mlp(onehot, embed, w1, b1, w2, b2, activation="relu"):
 def ref_attention(q, k, v, causal=False):
     gpu = _get_gpu()
     if gpu is not None:
-        return gpu.attention(
+        # DigitalGPUBackend.attention(dim, n_heads) is a layer factory;
+        # the compute kernel lives on the underlying DigitalGPU instance.
+        return gpu.gpu.attention(
             np.ascontiguousarray(np.asarray(q, dtype=np.float32)),
             np.ascontiguousarray(np.asarray(k, dtype=np.float32)),
             np.ascontiguousarray(np.asarray(v, dtype=np.float32)),
