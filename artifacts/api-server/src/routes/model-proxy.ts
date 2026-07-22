@@ -941,6 +941,33 @@ router.get("/awareness/quality/status", async (req, res) => {
   await proxyRequest(req, res, "/api/awareness/quality/status");
 });
 
+// ─── Content Awareness Status ─────────────────────────────────────────────────
+// Returns live signal counts + source breakdown so the dashboard can show
+// how many Tavily / Exa / RSS signals are currently enriching generation.
+
+router.get("/awareness/status", async (_req, res) => {
+  try {
+    const ctx = await contentAwarenessService.getContextForMode("content");
+    const tavilyEnabled = !!process.env.TAVILY_API_KEY;
+    const exaEnabled = !!process.env.EXA_API_KEY;
+    res.json({
+      signalCount: ctx.signalCount,
+      confidence: ctx.confidence,
+      freshness: ctx.freshness,
+      sources: {
+        tavily: tavilyEnabled,
+        exa: exaEnabled,
+        rss: true,
+      },
+      trendingGenres: ctx.trendingGenres.slice(0, 5),
+      trendingTopics: ctx.trendingTopics.slice(0, 5),
+      platformSignals: ctx.platformSignals.slice(0, 5),
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Awareness status unavailable", detail: String(err) });
+  }
+});
+
 // Pocket accelerator — Digital GPU GEMM dedup cache stats
 router.get("/maxcore/pocket-accelerator/stats", async (req, res) => {
   await proxyRequest(req, res, "/api/maxcore/pocket-accelerator/stats");
