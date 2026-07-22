@@ -1329,6 +1329,14 @@ async def on_startup():
     thread.start()
     storage_thread = threading.Thread(target=_init_storage, daemon=True)
     storage_thread.start()
+    # Proactive awareness refresh: keep the live industry beacon fresh on a
+    # fixed cadence (default 6 h) instead of only when a request notices the
+    # 24 h staleness cliff. Never-raise, idempotent daemon.
+    try:
+        from ai_model.quality_awareness import start_scheduler as _aw_sched
+        _aw_sched()
+    except Exception as _aw_exc:  # noqa: BLE001
+        print(f"[Server] awareness scheduler not started: {_aw_exc}")
     warm_thread = threading.Thread(target=_warm_content_cache, daemon=True)
     warm_thread.start()
     subsys_thread = threading.Thread(target=_warm_start_subsystems, daemon=True)
@@ -8266,7 +8274,7 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
     opts = opts or {}
 
     # ── Producer targets ───────────────────────────────────────────────────────
-    target_bpm = float(opts.get("target_bpm") or bpm or 120.0)
+    _explicit_bpm = float(opts.get("target_bpm") or bpm or 0.0)
     target_key = str(opts.get("target_key") or key or "C major")
 
     # ── Awareness signals (primary generation inputs) ──────────────────────────
@@ -8279,6 +8287,29 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
     _synth_genre = _preferred_genres[0] if _preferred_genres else (
         str(opts.get("genre") or "").lower().strip()
     )
+
+    # No explicit BPM → take the MEASURED chart target for this genre from the
+    # live industry beacon (Deezer per-genre charts, previews analyzed with the
+    # in-house beat tracker). 120 stays only as the final fallback when the
+    # beacon has no measured features yet. Never raises.
+    target_bpm = _explicit_bpm
+    if not target_bpm:
+        try:
+            from ai_model.quality_awareness import music_targets as _mt
+            _chart = _mt(_synth_genre)
+            if _chart.get("bpm"):
+                target_bpm = float(_chart["bpm"])
+                print(
+                    f"[audio_chart] chart BPM target {target_bpm} "
+                    f"(genre={_chart.get('source_genre')!r}, "
+                    f"{_chart.get('measured_previews')} previews measured) "
+                    f"job={job_id[:8]}",
+                    flush=True,
+                )
+        except Exception:  # noqa: BLE001
+            pass
+    if not target_bpm:
+        target_bpm = 120.0
 
     # ── Dataset metadata reference (optional parameter refinement) ─────────────
     # When a real-track dataset exists, run the selector purely for metadata:
@@ -8936,6 +8967,26 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
                       "medium": (100.0, 116.0), "steady": (84.0, 98.0),
                       "slow": (76.0, 90.0)}
             _lo, _hi = _bands.get((brief.tempo or "").lower(), (96.0, 120.0))
+            # Live chart beacon: when the market's MEASURED tempo for this
+            # genre is known, center the seeded jitter on it (±6 BPM) instead
+            # of the generic band, clamped inside the intent band so tempo
+            # intent ("slow"/"fast") still leads. Never-raise.
+            try:
+                from ai_model.quality_awareness import music_targets as _mt_h
+                _chart_h = _mt_h(
+                    (_preferred_genres_handler[0] if _preferred_genres_handler
+                     else (req.genre or ""))
+                )
+                if _chart_h.get("bpm"):
+                    _cb = float(_chart_h["bpm"])
+                    _lo = max(_lo, min(_hi - 1.0, _cb - 6.0))
+                    _hi = min(_hi, max(_lo + 1.0, _cb + 6.0))
+                    print(f"[audio_chart] chart BPM anchor {_cb} → band "
+                          f"[{_lo:.1f},{_hi:.1f}] "
+                          f"(genre={_chart_h.get('source_genre')!r}) "
+                          f"job={job_id[:8]}", flush=True)
+            except Exception:  # noqa: BLE001
+                pass
             rng = _np2.random.default_rng(_seed_base)
             bpm = round(float(rng.uniform(_lo, _hi)), 1)
         # Key derived from fingerprint tail

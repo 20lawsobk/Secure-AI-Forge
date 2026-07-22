@@ -174,6 +174,117 @@ def _doc_age_seconds(doc: Dict[str, Any]) -> float:
         return float("inf")  # unreadable timestamp → treat as stale
 
 
+# ── proactive refresh scheduler ──────────────────────────────────────────────
+
+_scheduler_started = False
+
+
+def _refresh_interval_seconds() -> float:
+    """How often the scheduler harvests proactively (MB_AWARENESS_REFRESH_H,
+    default 6 h). Always well inside the 24 h staleness cliff so requests
+    never see a stale beacon."""
+    try:
+        return max(0.25, float(os.environ.get("MB_AWARENESS_REFRESH_H", "6"))) * 3600.0
+    except ValueError:
+        return 6 * 3600.0
+
+
+def start_scheduler() -> bool:
+    """Start the proactive harvest loop (idempotent, daemon, never-raise).
+
+    The lazy path in :func:`get_doc` only refreshes when a request happens to
+    notice the doc is >24 h old — a quiet period leaves the beacon stale.
+    This loop keeps the live signal fresh on a fixed cadence regardless of
+    traffic, harvesting whenever the stored doc is older than the refresh
+    interval. It respects retirement: once the own corpus outgrows the
+    buffer, the robots stop scanning (they only keep the doc from vanishing
+    entirely — veo_dna and music targets still read it).
+    """
+    global _scheduler_started
+    with _lock:
+        if _scheduler_started:
+            return False
+        _scheduler_started = True
+
+    def _loop() -> None:
+        while True:
+            try:
+                doc = get_doc(trigger_harvest=False)
+                needs = doc is None or _doc_age_seconds(doc) > _refresh_interval_seconds()
+                # Music targets are part of the beacon contract — an old doc
+                # from before the music-feature harvest gets refreshed too.
+                if not needs and doc is not None and "music_features" not in doc:
+                    needs = True
+                # Retirement contract: once the own corpus outgrows the buffer
+                # the robots stop recurring scans. Bootstrap (doc missing)
+                # is still allowed so music targets/veo_dna never read a void.
+                if needs and doc is not None and self_sufficiency()["retired"]:
+                    needs = False
+                if needs:
+                    _spawn_harvest(replace=doc is not None)
+            except Exception as exc:  # noqa: BLE001 — scheduler must never die
+                logger.warning("awareness scheduler tick failed: %s", exc)
+            time.sleep(max(300.0, _refresh_interval_seconds() / 12.0))
+
+    threading.Thread(target=_loop, name="quality-awareness-scheduler",
+                     daemon=True).start()
+    logger.info("quality-awareness proactive scheduler started (interval %.1fh)",
+                _refresh_interval_seconds() / 3600.0)
+    return True
+
+
+# ── music targets: what the charting sound measures right now ────────────────
+
+def music_targets(genre: str = "") -> Dict[str, Any]:
+    """Measured musical targets for a genre from the live chart beacon.
+
+    Returns ``{bpm, bpm_range, energy, duration_sec, source_genre,
+    measured_previews}`` — every value measured from tracks charting right
+    now (Deezer per-genre charts + in-house preview analysis). Falls back to
+    the global chart when the genre has no measured entry, and returns ``{}``
+    when the beacon has no measured features at all. Never raises.
+
+    NOTE: deliberately NOT gated on retirement — these are dataset-beacon
+    numbers for beat generation, and stay live until the admin corpus of
+    stored beats replaces the dataset itself.
+    """
+    try:
+        doc = get_doc()
+        feats = (doc or {}).get("music_features") or {}
+        if not feats:
+            return {}
+        g = (genre or "").lower().strip()
+
+        def _match(name: str) -> Optional[Dict[str, Any]]:
+            e = feats.get(name)
+            return e if isinstance(e, dict) and e.get("bpm_median") else None
+
+        entry = _match(g)
+        source = g
+        if entry is None and g:
+            for name in feats:
+                if name != "global" and (name in g or g in name):
+                    entry = _match(name)
+                    if entry:
+                        source = name
+                        break
+        if entry is None:
+            entry = _match("global")
+            source = "global"
+        if entry is None:
+            return {}
+        return {
+            "bpm": float(entry["bpm_median"]),
+            "bpm_range": entry.get("bpm_range") or [],
+            "energy": float(entry.get("energy_mean") or 0.0),
+            "duration_sec": int(entry.get("duration_median_sec") or 0),
+            "source_genre": source,
+            "measured_previews": int(entry.get("measured_previews") or 0),
+        }
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 # ── blending API (all never-raise) ───────────────────────────────────────────
 
 _SCENE_MAP = {
@@ -464,6 +575,14 @@ def platform_awareness_string(platform: str) -> str:
             if doc:
                 platform_signals: Dict[str, Any] = doc.get("platform_signals", {})
                 live_lines = list(platform_signals.get(plat, []))
+                # Social + advertising quality beacon: measured engagement
+                # patterns (Mastodon trending posts, marketing headlines)
+                # apply to every platform's copy, so append them everywhere.
+                sap = doc.get("social_ad_patterns") or {}
+                live_lines += [
+                    ln for ln in (sap.get("signal_lines") or [])
+                    if isinstance(ln, str) and ln.strip()
+                ]
 
         all_lines = strategy_lines + live_lines
         if not all_lines:
