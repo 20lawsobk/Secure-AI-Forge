@@ -71,22 +71,56 @@ class _DigitalAttention(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         Q, K, V = ctx.saved_tensors
+        gpu = ctx.gpu
         causal = ctx.causal
         B, T, D = Q.shape
         scale = 1.0 / (D ** 0.5)
-        scores = torch.bmm(Q, K.transpose(1, 2)) * scale
-        if causal:
-            causal_mask = torch.triu(torch.full((T, T), float('-inf')), diagonal=1)
-            scores = scores + causal_mask.unsqueeze(0)
-        attn = torch.softmax(scores, dim=-1)
-        grad_V = torch.bmm(attn.transpose(1, 2), grad_output)
-        grad_attn = torch.bmm(grad_output, V.transpose(1, 2))
-        grad_scores = grad_attn * attn
-        grad_scores = grad_scores - attn * grad_scores.sum(dim=-1, keepdim=True)
-        grad_scores = grad_scores * scale
-        grad_Q = torch.bmm(grad_scores, K)
-        grad_K = torch.bmm(grad_scores.transpose(1, 2), Q)
-        return grad_Q, grad_K, grad_V, None, None
+
+        # Route all compute through the digital GPU to keep the full
+        # forward+backward execution on the custom silicon path.
+        # DigitalGPU.gemm expects 2D (M, K) × (K, N), so we loop over the
+        # batch dimension; softmax handles any shape via h_softmax/np_like.
+        Q_np = Q.detach().numpy().astype(np.float64)   # (B, T, D)
+        K_np = K.detach().numpy().astype(np.float64)   # (B, T, D)
+        V_np = V.detach().numpy().astype(np.float64)   # (B, T, D)
+        grad_np = grad_output.numpy().astype(np.float64)  # (B, T, D)
+
+        grad_Q_np = np.empty_like(Q_np)
+        grad_K_np = np.empty_like(K_np)
+        grad_V_np = np.empty_like(V_np)
+
+        causal_mask = np.triu(np.full((T, T), -1e9), k=1) if causal else None
+
+        for b in range(B):
+            # scores (T, T) = Q[b] @ K[b]^T × scale — digital GPU 2-D GEMM
+            scores = gpu.gemm(Q_np[b], K_np[b].T) * scale
+            if causal_mask is not None:
+                scores = scores + causal_mask
+            # attn (T, T) via digital GPU softmax (shape-agnostic)
+            attn = gpu.softmax(scores, axis=-1)
+
+            # grad_V[b] = attn^T @ grad[b]
+            grad_V_np[b] = gpu.gemm(attn.T, grad_np[b])
+
+            # grad_attn (T, T) = grad[b] @ V[b]^T
+            grad_attn = gpu.gemm(grad_np[b], V_np[b].T)
+
+            # Softmax Jacobian: dL/d_scores = (dL/d_attn - sum) * attn
+            grad_scores = grad_attn * attn
+            grad_scores = grad_scores - attn * grad_scores.sum(axis=-1, keepdims=True)
+            grad_scores = grad_scores * scale
+
+            # grad_Q[b] = grad_scores @ K[b], grad_K[b] = grad_scores^T @ Q[b]
+            grad_Q_np[b] = gpu.gemm(grad_scores, K_np[b])
+            grad_K_np[b] = gpu.gemm(grad_scores.T, Q_np[b])
+
+        return (
+            torch.from_numpy(grad_Q_np.astype(np.float32)),
+            torch.from_numpy(grad_K_np.astype(np.float32)),
+            torch.from_numpy(grad_V_np.astype(np.float32)),
+            None,
+            None,
+        )
 
 
 class _DigitalGEMMBiasReLU(torch.autograd.Function):

@@ -231,8 +231,93 @@ const SEARCH_QUERIES = {
 
 const TAVILY_API = "https://api.tavily.com/search";
 const EXA_API = "https://api.exa.ai/search";
-const CACHE_TTL_MS = 30 * 60 * 1000;
+/** Base TTL floor (10 min) when the Python corpus is fresh/empty and needs live signals most. */
+const CACHE_TTL_MIN_MS = 10 * 60 * 1000;
+/** TTL ceiling (45 min) when the Python corpus is self-sufficient and external signals matter less. */
+const CACHE_TTL_MAX_MS = 45 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 10_000;
+
+// ─── Python corpus maturity probe ────────────────────────────────────────────
+// We query the Python AI server's self-sufficiency status and use it to scale
+// the awareness cache TTL: when the model's own phrase corpus is small
+// (buffer_weight near 1.0 → still learning from external signals), we use a
+// shorter TTL so the TS layer refreshes more often and feeds richer live data.
+// As the corpus matures (buffer_weight → 0), the Python layer leans on its own
+// corpus and we relax the TTL to reduce unnecessary RSS/search fetches.
+
+interface CorpusMaturity {
+  bufferWeight: number;  // 0–1; 1 = fully external, 0 = self-sufficient
+  ownCorpus: number;
+  retireThreshold: number;
+  retired: boolean;
+  fetchedAt: number;
+}
+
+let _corpusMaturityCache: CorpusMaturity | null = null;
+const CORPUS_PROBE_TTL_MS = 5 * 60 * 1000; // re-probe Python every 5 min
+
+async function fetchCorpusMaturity(): Promise<CorpusMaturity> {
+  const now = Date.now();
+  if (_corpusMaturityCache && now - _corpusMaturityCache.fetchedAt < CORPUS_PROBE_TTL_MS) {
+    return _corpusMaturityCache;
+  }
+  try {
+    const port = process.env.MODEL_API_PORT ?? "9878";
+    const apiKey =
+      process.env.AI_SERVER_KEY ||
+      process.env.AI_TRAINING_KEY_PROD ||
+      process.env.ADMIN_KEY ||
+      "";
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3_000);
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/api/awareness/quality/status`, {
+        signal: controller.signal,
+        headers: apiKey ? { "X-Api-Key": apiKey } : {},
+      });
+      if (res.ok) {
+        const data = (await res.json()) as {
+          buffer_weight?: number;
+          own_corpus?: number;
+          retire_threshold?: number;
+          retired?: boolean;
+        };
+        const maturity: CorpusMaturity = {
+          bufferWeight: typeof data.buffer_weight === "number" ? data.buffer_weight : 1.0,
+          ownCorpus: typeof data.own_corpus === "number" ? data.own_corpus : 0,
+          retireThreshold: typeof data.retire_threshold === "number" ? data.retire_threshold : 500,
+          retired: !!data.retired,
+          fetchedAt: now,
+        };
+        _corpusMaturityCache = maturity;
+        return maturity;
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch {
+    // Never block — fall back to "model is immature" so we refresh aggressively
+  }
+  const fallback: CorpusMaturity = {
+    bufferWeight: 1.0,
+    ownCorpus: 0,
+    retireThreshold: 500,
+    retired: false,
+    fetchedAt: now,
+  };
+  _corpusMaturityCache = fallback;
+  return fallback;
+}
+
+/**
+ * Dynamic cache TTL:
+ *   buffer_weight=1.0 (fresh/empty corpus) → 10 min   (need live external data)
+ *   buffer_weight=0.0 (self-sufficient)    → 45 min   (model carries its own)
+ */
+function dynamicCacheTtl(bufferWeight: number): number {
+  const w = Math.max(0, Math.min(1, bufferWeight));
+  return CACHE_TTL_MIN_MS + (1 - w) * (CACHE_TTL_MAX_MS - CACHE_TTL_MIN_MS);
+}
 
 // ─── Keyword Tables ───────────────────────────────────────────────────────────
 
@@ -1265,7 +1350,7 @@ class ContentSignalMonitor {
   });
 
   async fetchLiveSignals(): Promise<LiveIndustrySignal[]> {
-    if (this.cache && Date.now() - this.cache.fetchedAt < CACHE_TTL_MS) {
+    if (this.cache && Date.now() - this.cache.fetchedAt < CACHE_TTL_MIN_MS) {
       const fresh = this.cache.signals.filter((s) => !this.seenIds.has(s.id));
       for (const s of fresh) this.seenIds.add(s.id);
       return fresh;
@@ -1828,6 +1913,22 @@ class ContentGenerationContextBuilder {
     if (ctx.generationHints.tempoBias !== "neutral")
       lines.push(`Tempo bias: ${ctx.generationHints.tempoBias}`);
 
+    // Corpus maturity bridge — consumed by Python quality_awareness.py and
+    // script_agent.py to calibrate how heavily they lean on the live buffer
+    // vs the model's own grown corpus.  buffer_weight=1.0 means Python should
+    // weigh external signals heavily; 0.0 means the model is self-sufficient.
+    const maturity = (
+      ctx as ContentAwarenessContext & { _maturity?: CorpusMaturity }
+    )._maturity;
+    if (maturity) {
+      lines.push("=== CORPUS MATURITY ===");
+      lines.push(`buffer_weight: ${maturity.bufferWeight.toFixed(3)}`);
+      lines.push(
+        `own_corpus: ${maturity.ownCorpus}/${maturity.retireThreshold}`,
+      );
+      lines.push(`external_signal_priority: ${maturity.retired ? "low" : maturity.bufferWeight > 0.7 ? "high" : "medium"}`);
+    }
+
     return { ...ctx, contextString: lines.join("\n") };
   }
 
@@ -2024,11 +2125,19 @@ class ContentGenerationAwarenessService {
   // ── Internal ───────────────────────────────────────────────────────────────
 
   private async getOrBuild(): Promise<ContentAwarenessContext> {
-    if (this.cache && Date.now() - this.cache.builtAt < CACHE_TTL_MS) {
+    // Probe corpus maturity first (cached for 5 min, never blocks)
+    const maturity = await fetchCorpusMaturity().catch(() => null);
+    const bufferWeight = maturity?.bufferWeight ?? 1.0;
+    const ttl = dynamicCacheTtl(bufferWeight);
+
+    if (this.cache && Date.now() - this.cache.builtAt < ttl) {
       return this.cache.ctx;
     }
     const signals = await this.monitor.fetchLiveSignals();
     const ctx = this.builder.build(signals);
+    // Store corpus maturity alongside the context for use in applyMode
+    (ctx as ContentAwarenessContext & { _maturity?: CorpusMaturity })._maturity =
+      maturity ?? undefined;
     this.cache = { ctx, builtAt: Date.now() };
     return ctx;
   }
