@@ -10624,13 +10624,31 @@ if __name__ == "__main__":
     worker_count = max(1, int(os.environ.get("UVICORN_WORKERS", "1")))
     print(f"[Server] Starting MaxBooster AI Training Server on port {port} "
           f"({worker_count} uvicorn workers, {cpu_count} CPUs detected)")
-    uvicorn.run(
-        "server:app",
-        host="0.0.0.0",
-        port=port,
-        log_level="info",
-        workers=worker_count,
-        timeout_keep_alive=300,
-        limit_concurrency=None,   # no artificial cap — async coalescer + pdim auto-scale handle backpressure
-        backlog=4096,             # maximise OS socket queue for burst acceptance
-    )
+
+    # Any exception that escapes uvicorn.run() — import error, port conflict,
+    # bad config, etc. — must produce a non-zero exit so the Node supervisor's
+    # "exit" event handler fires and schedules a restart.  Without this, an
+    # unhandled exception would let Python exit with code 1 by default (which
+    # is correct), but we make it explicit and log the full traceback so the
+    # cause is visible in workflow logs.
+    try:
+        uvicorn.run(
+            "server:app",
+            host="0.0.0.0",
+            port=port,
+            log_level="info",
+            workers=worker_count,
+            timeout_keep_alive=300,
+            limit_concurrency=None,   # no artificial cap — async coalescer + pdim auto-scale handle backpressure
+            backlog=4096,             # maximise OS socket queue for burst acceptance
+        )
+    except SystemExit:
+        # uvicorn raises SystemExit(0) on clean SIGTERM/SIGINT shutdown.
+        # Re-raise so the process exits with the original code and the Node
+        # supervisor sees the correct signal/code combination.
+        raise
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        print("[Server] uvicorn.run() raised an unexpected exception — exiting with code 1 so supervisor restarts.", flush=True)
+        sys.exit(1)

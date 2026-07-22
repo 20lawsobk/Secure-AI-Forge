@@ -43,7 +43,12 @@ const MAX_RETRY_MS = 30_000;
 const MIN_HEALTHY_RUN_MS = 60_000;
 
 // Poll interval for the health monitor (detects silent crashes)
-const HEALTH_POLL_INTERVAL_MS = 15_000;
+const HEALTH_POLL_INTERVAL_MS = 8_000;
+
+// Consecutive hung-probe threshold before we force-kill an unowned process.
+// Each probe waits up to 25 s, so 3 probes ≈ 75 s of confirmed hang before
+// we resort to pkill.  After the kill the next "down" poll spawns a fresh one.
+const MAX_HUNG_PROBES_UNOWNED = 3;
 
 // ─── Internal HTTP pool (warm-pass calls only) ────────────────────────────────
 // Dedicated undici agent so post-startup warm-up requests never share
@@ -63,6 +68,7 @@ let lastStartTime = 0;
 let restartScheduled = false;
 let healthTimer: ReturnType<typeof setInterval> | null = null;
 let shuttingDown = false;
+let consecutiveHungProbes = 0;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -249,9 +255,22 @@ function spawnPython() {
     pythonProcess = null;
     restartScheduled = false;
 
-    if (shuttingDown || signal === "SIGTERM" || signal === "SIGINT") {
-      console.log("[Python] Server shut down gracefully.");
+    if (shuttingDown) {
+      console.log("[Python] Server shut down gracefully (intentional).");
       return;
+    }
+
+    // If Python exited via SIGTERM or SIGINT it may be a system-wide signal
+    // (e.g. Replit's process manager stopping the whole workflow) rather than
+    // our own stopPythonServer() call.  Give our own SIGTERM handler 500 ms to
+    // set shuttingDown=true; if it does, stand down — otherwise restart.
+    if (signal === "SIGTERM" || signal === "SIGINT") {
+      await new Promise((r) => setTimeout(r, 500));
+      if (shuttingDown) {
+        console.log("[Python] Server shut down gracefully (system-wide signal).");
+        return;
+      }
+      console.log(`[Python] Received external ${signal} — will restart (not an intentional shutdown).`);
     }
 
     // If another process grabbed the port (e.g., standalone workflow restarted), don't fight it
@@ -298,12 +317,14 @@ function spawnPython() {
 //             (If our pythonProcess is still tracked, the exit event will fire
 //              and handle the restart — avoid double-spawn.)
 //
-//   hung    — Port open but HTTP /health doesn't respond in 10 s.
+//   hung    — Port open but HTTP /health doesn't respond within 25 s.
 //             We own the process → SIGKILL so the exit event fires and triggers
 //             the normal backoff-restart path.
-//             We don't own it → log only (can't force-kill an external process).
+//             We don't own it → count consecutive hung probes.  After
+//             MAX_HUNG_PROBES_UNOWNED we force-kill via pkill so the next
+//             "down" probe can spawn a fresh one.
 //
-//   healthy — Nothing to do.
+//   healthy — Reset consecutiveHungProbes; nothing else to do.
 
 function startHealthMonitor() {
   if (healthTimer) return;
@@ -312,7 +333,13 @@ function startHealthMonitor() {
 
     const status = await probeHttpHealth();
 
+    if (status === "healthy") {
+      consecutiveHungProbes = 0;
+      return;
+    }
+
     if (status === "down") {
+      consecutiveHungProbes = 0;
       if (pythonProcess) return;  // exit event in flight — don't double-spawn
       console.log("[Python] Health monitor: server is down — restarting...");
       setPythonRestarting(true);
@@ -325,24 +352,43 @@ function startHealthMonitor() {
     }
 
     if (status === "hung") {
-      console.warn("[Python] Health monitor: server is HUNG (port open, HTTP unresponsive) — force-killing…");
+      consecutiveHungProbes++;
       if (pythonProcess) {
         // We own the process — SIGKILL so the exit event fires the normal
         // backoff-restart path.  Hold requests while it restarts.
+        console.warn("[Python] Health monitor: server is HUNG — force-killing owned process…");
         setPythonRestarting(true);
         pythonProcess.kill("SIGKILL");
+        consecutiveHungProbes = 0;
       } else {
         // We don't own the process (api-server restarted and found Python already
-        // running — "monitoring only" mode).  We cannot kill it, and calling
-        // setPythonRestarting(true) here would hold ALL requests indefinitely
-        // because there is no restart cycle to call setPythonRestarting(false).
-        // Instead, pass requests through and let the circuit-breaker surface
-        // individual errors.  If Python truly crashes, the next "down" probe
-        // will spawn a new one via the normal path.
-        console.warn("[Python] Hung process not owned by us — not holding requests; circuit breaker will handle per-request errors until Python recovers");
+        // running — "monitoring only" mode).  We track consecutive hung probes.
+        // After MAX_HUNG_PROBES_UNOWNED we resort to pkill so the next "down"
+        // poll spawns a clean one.  We do NOT call setPythonRestarting(true)
+        // here because there is no restart cycle to release it — that would hold
+        // all requests permanently.  Instead pass requests through and let the
+        // circuit breaker surface individual 5xx errors during the hang window.
+        console.warn(
+          `[Python] Hung unowned process — probe ${consecutiveHungProbes}/${MAX_HUNG_PROBES_UNOWNED}; ` +
+          `circuit breaker handling per-request errors until Python recovers.`
+        );
+        if (consecutiveHungProbes >= MAX_HUNG_PROBES_UNOWNED) {
+          console.warn("[Python] Hung threshold reached — force-killing unowned process via pkill…");
+          consecutiveHungProbes = 0;
+          // pkill -9 -f matches against the full command line; targets server.py
+          // specifically so we don't hit any other Python processes.
+          const { execFile } = await import("child_process");
+          execFile("pkill", ["-9", "-f", "server\\.py"], (err) => {
+            if (err && (err as NodeJS.ErrnoException).code !== 1) {
+              // exit code 1 = no matching process (already dead); any other error is real
+              console.warn(`[Python] pkill failed: ${err.message}`);
+            } else {
+              console.log("[Python] Force-killed hung unowned server.py process — health monitor will respawn.");
+            }
+          });
+        }
       }
     }
-    // 'healthy' — nothing to do
   }, HEALTH_POLL_INTERVAL_MS);
   healthTimer.unref();
 }
