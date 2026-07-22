@@ -119,6 +119,10 @@ GOAL_ALIASES: Dict[str, str] = {
     "followers": "grow_followers",
     "conversion": "drive_conversion",
     "sales": "drive_conversion",
+    # MaxBooster beat-marketplace aliases: purchase == conversion intent.
+    "purchase": "drive_conversion",
+    "drive_purchase": "drive_conversion",
+    "buy": "drive_conversion",
     "streams": "drive_streams",
     "engagement": "drive_engagement",
     "awareness": "build_awareness",
@@ -1879,3 +1883,216 @@ def compose_caption(
         "ctas_considered": len(ctas),
         "variants": variant_list,
     }
+
+
+# ---------------------------------------------------------------------------
+# Beat-marketplace conditioning (structured beat_context + platform_constraints)
+# ---------------------------------------------------------------------------
+# MaxBooster sends a structured ``beat_context`` block (title/genre/mood/BPM/
+# key/production details/pricing/listen URL, optionally measured
+# ``audio_analysis`` facts from the audio job) plus ``platform_constraints``
+# (no_link_in_bio, professional_register). Everything below is never-raise and
+# sanitizes attacker-influenceable strings before they reach awareness text.
+
+_BC_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
+_URL_RE = re.compile(r"^https?://[\w./\-#?=&%~+:\[\]]+$", re.IGNORECASE)
+_LINK_IN_BIO_RE = re.compile(r"link\s+in\s+(?:the\s+)?bio", re.IGNORECASE)
+_EMOJI_RE = re.compile(
+    "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF"
+    "\u2B00-\u2BFF\uFE0F\u203C\u2049\u20E3]"
+)
+# Engagement-bait reaction asks that professional_register must suppress.
+_REACTION_ASK_RE = re.compile(
+    r"(?:drop|comment|spam|react with)\s+(?:a|an|some)?\s*(?:emoji|"
+    + _EMOJI_RE.pattern + r")[^.!\n]*", re.IGNORECASE)
+
+
+def _bc_text(v: Any, cap: int = 200) -> str:
+    """Sanitize one free-form beat_context string for awareness inclusion."""
+    if v is None:
+        return ""
+    s = _BC_CTRL_RE.sub(" ", str(v))
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:cap]
+
+
+def sanitize_listen_url(v: Any) -> str:
+    """Return the listen URL only when it is a plain, well-formed http(s) URL."""
+    s = _bc_text(v, cap=300)
+    return s if _URL_RE.match(s) else ""
+
+
+def beat_context_awareness(bc: Any) -> str:
+    """Serialize a structured ``beat_context`` into awareness signal lines.
+
+    Produces ``[HIGH]`` lines (parsed into actionable signals downstream) with
+    the beat's real facts so copy is written ABOUT the beat instead of echoing
+    the topic string, plus purchase anchors when pricing info is present.
+    Never raises; returns "" when there is nothing usable.
+    """
+    if not isinstance(bc, dict):
+        return ""
+    try:
+        lines: List[str] = []
+        facts: List[str] = []
+        title = _bc_text(bc.get("title"), 120)
+        genre = _bc_text(bc.get("genre"), 40)
+        mood = _bc_text(bc.get("mood"), 40)
+        key = _bc_text(bc.get("key"), 20)
+        prod = _bc_text(bc.get("production_details"), 240)
+        target = _bc_text(bc.get("target_artist"), 200)
+        bpm = None
+        try:
+            bpm = float(bc.get("bpm")) if bc.get("bpm") is not None else None
+        except (TypeError, ValueError):
+            bpm = None
+        if title:
+            facts.append(f'the beat is titled "{title}"')
+        if genre or mood:
+            facts.append(" ".join(p for p in (mood, genre) if p) + " sound")
+        if bpm and 30 <= bpm <= 300:
+            facts.append(f"{bpm:g} BPM")
+        if key:
+            facts.append(f"in {key}")
+        if prod:
+            facts.append(f"built on {prod}")
+        if facts:
+            lines.append("[HIGH] Write about the actual beat — "
+                         + ", ".join(facts) + ". Reference these real "
+                         "production facts instead of generic hype.")
+        if target:
+            lines.append(f"[HIGH] The beat suits {target} — speak directly "
+                         "to that kind of artist.")
+        # Measured sonic facts from the audio job (Fix 9): real descriptors,
+        # so copy never has to invent what the beat sounds like.
+        aa = bc.get("audio_analysis")
+        if isinstance(aa, dict):
+            sonic: List[str] = []
+            bright = _bc_text(aa.get("spectral_brightness"), 20)
+            bass = _bc_text(aa.get("bass_weight"), 20)
+            if bright:
+                sonic.append(f"a {bright} tonal palette")
+            if bass:
+                sonic.append(f"{bass} low-end")
+            try:
+                energy = float(aa.get("energy"))
+                if 0.0 <= energy <= 1.0:
+                    sonic.append(
+                        "high, driving energy" if energy >= 0.66 else
+                        "mid-tempo energy" if energy >= 0.33 else
+                        "restrained, spacious energy")
+            except (TypeError, ValueError):
+                pass
+            instruments = aa.get("detected_instruments")
+            if isinstance(instruments, list):
+                inst = ", ".join(_bc_text(i, 30) for i in instruments[:6]
+                                 if _bc_text(i, 30))
+                if inst:
+                    sonic.append(f"instrumentation: {inst}")
+            if sonic:
+                lines.append("[HIGH] Measured sonics — " + "; ".join(sonic)
+                             + ". Describe the sound with these real traits.")
+        # Purchase anchors (Fix 6): price + scarcity + destination.
+        anchors: List[str] = []
+        try:
+            price = float(bc.get("price_usd"))
+            if 0 < price < 100000:
+                anchors.append(f"lease price ${price:.2f}")
+        except (TypeError, ValueError):
+            pass
+        try:
+            slots = int(bc.get("license_slots_remaining"))
+            if 0 < slots < 1000:
+                anchors.append(f"only {slots} license slots remaining")
+        except (TypeError, ValueError):
+            pass
+        url = sanitize_listen_url(bc.get("listen_url"))
+        if url:
+            anchors.append(f"listen/purchase at {url}")
+        if anchors:
+            lines.append("[HIGH] Conversion anchors — " + "; ".join(anchors)
+                         + ". Use the concrete price and scarcity, and point "
+                         "buyers at the purchase link.")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def purchase_cta(bc: Any, platform: str = "",
+                 constraints: Optional[Dict[str, Any]] = None) -> str:
+    """Concrete purchase-conversion CTA from real beat_context anchors.
+
+    Returns "" when there is nothing concrete to anchor on (caller keeps the
+    intent-library CTA). Never raises.
+    """
+    if not isinstance(bc, dict):
+        return ""
+    try:
+        price = None
+        slots = None
+        try:
+            p = float(bc.get("price_usd"))
+            if 0 < p < 100000:
+                price = p
+        except (TypeError, ValueError):
+            pass
+        try:
+            s = int(bc.get("license_slots_remaining"))
+            if 0 < s < 1000:
+                slots = s
+        except (TypeError, ValueError):
+            pass
+        url = sanitize_listen_url(bc.get("listen_url"))
+        if price is None and url == "" and slots is None:
+            return ""
+        parts: List[str] = []
+        if slots is not None:
+            parts.append(f"{slots} license{'s' if slots != 1 else ''} left")
+        if price is not None:
+            parts.append(f"lease it for ${price:g}")
+        lead = " — ".join(parts) if parts else "Lease this beat now"
+        professional = bool((constraints or {}).get("professional_register"))
+        if url:
+            cta = f"{lead} → {url}"
+        elif (constraints or {}).get("no_link_in_bio"):
+            cta = f"{lead} — tap the link to lock yours in"
+        else:
+            cta = f"{lead} — link in bio"
+        if not professional:
+            cta += " 🛒"
+        return cta[0].upper() + cta[1:]
+    except Exception:
+        return ""
+
+
+def apply_platform_constraints(text: str, constraints: Any,
+                               listen_url: str = "") -> str:
+    """Enforce ``platform_constraints`` on a finished copy string.
+
+    * ``no_link_in_bio`` — rewrite link-in-bio mechanics (not applicable on
+      Twitter/LinkedIn/non-verified TikTok) to the real URL when one is
+      available, otherwise to a neutral phrasing.
+    * ``professional_register`` — remove emoji-reaction asks and strip emoji
+      so the copy fits a professional (LinkedIn-style) register.
+
+    Never raises; returns the input unchanged on any failure.
+    """
+    if not text or not isinstance(constraints, dict):
+        return text
+    try:
+        out = text
+        if constraints.get("no_link_in_bio"):
+            replacement = listen_url if listen_url else "at the link"
+            out = _LINK_IN_BIO_RE.sub(replacement, out)
+        if constraints.get("professional_register"):
+            out = _REACTION_ASK_RE.sub("", out)
+            out = _EMOJI_RE.sub("", out)
+            # Collapse whitespace/punctuation debris the removals leave behind.
+            out = re.sub(r"[ \t]{2,}", " ", out)
+            out = re.sub(r"\s+([,.!?])", r"\1", out)
+            out = re.sub(r"(^|\n)\s*[—-]\s*", r"\1", out)
+            out = "\n".join(ln.rstrip(" —-") for ln in out.splitlines())
+            out = re.sub(r"\n{3,}", "\n\n", out).strip()
+        return out if out.strip() else text
+    except Exception:
+        return text

@@ -6224,6 +6224,17 @@ class ApiGenerateContentRequest(_AwarenessMixin):
     # ── Cross-platform generation: when set, return one adapted variant per
     # platform in a single call instead of requiring N separate requests. ──
     platforms: Optional[List[str]] = None
+    # ── Beat-marketplace conditioning (MaxBooster) ─────────────────────────
+    # beat_context: structured facts about the beat being promoted (title,
+    #   genre, mood, bpm, key, production_details, target_artist, price_usd,
+    #   license_slots_remaining, listen_url, and optionally the measured
+    #   audio_analysis block returned by the audio job poll). Serialized into
+    #   awareness so copy is written ABOUT the beat, and its pricing anchors
+    #   drive a concrete purchase CTA when goal is purchase/conversion.
+    beat_context: Optional[dict[str, Any]] = None
+    # platform_constraints: {"no_link_in_bio": bool, "professional_register":
+    #   bool} — enforced on the finished copy (CTA mechanics + register).
+    platform_constraints: Optional[dict[str, Any]] = None
 
 
 class ApiGenerateCampaignRequest(_AwarenessMixin):
@@ -6605,6 +6616,28 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
     topic    = _resolve_topic_from_url(req.topic or req.title or "")
     goal     = req.goal or "engagement"
 
+    # ── Beat-marketplace conditioning: fold structured beat_context into the
+    # request's awareness (the canonical conditioning channel — merge_awareness
+    # reads req.awareness) so both the model path and the awareness-composed
+    # path write about the actual beat. `idea`/topic stays a clean string. ──
+    from ai_model import request_intelligence as _ri_bc
+    _beat_aw = _ri_bc.beat_context_awareness(req.beat_context)
+    if _beat_aw:
+        _aw_prev = req.awareness
+        if isinstance(_aw_prev, dict):
+            _aw_prev = (_aw_prev.get("contextString", "") or "")
+        req.awareness = "\n".join(
+            p for p in [(_aw_prev or "").strip(), _beat_aw] if p)
+    _pc = req.platform_constraints if isinstance(req.platform_constraints, dict) else None
+    _listen_url = (_ri_bc.sanitize_listen_url(req.beat_context.get("listen_url"))
+                   if isinstance(req.beat_context, dict) else "")
+    # Purchase goal → concrete conversion CTA anchored on real price/scarcity/
+    # URL instead of the generic engagement library line.
+    _purchase_goal = _ri_bc.GOAL_ALIASES.get(
+        str(goal).strip().lower(), str(goal).strip().lower()) == "drive_conversion"
+    _purchase_cta = (_ri_bc.purchase_cta(req.beat_context, platform, _pc)
+                     if _purchase_goal else "")
+
     def _build(_request=None, _platform=None):
         # ── Request intelligence: analyse intent, audience & strategy up front ──
         from ai_model import request_intelligence as ri
@@ -6705,12 +6738,27 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
         # char budget → trim on a word boundary. Applied to every variant so the
         # winner and the alternatives stay consistent. ──────────────────────────
         def _apply_controls(v: dict) -> dict:
-            cap = v["caption"]
+            hook_v, body_v, cta_v = v["hook"], v["body"], v["cta"]
+            # Purchase goal + concrete beat anchors → override the generic
+            # library CTA with the real price/scarcity/URL line.
+            if _purchase_cta:
+                cta_v = _purchase_cta
+            # Platform constraints are enforced on every copy part so no
+            # variant leaks link-in-bio mechanics or off-register emoji asks.
+            if _pc:
+                hook_v = ri.apply_platform_constraints(hook_v, _pc, _listen_url)
+                body_v = ri.apply_platform_constraints(body_v, _pc, _listen_url)
+                cta_v  = ri.apply_platform_constraints(cta_v,  _pc, _listen_url)
+            if _purchase_cta or _pc:
+                cap = "\n\n".join(p for p in (hook_v, body_v, cta_v) if p).strip()
+            else:
+                cap = v["caption"]
             if req.include_cta is False:
-                cap = f"{v['hook']}\n\n{v['body']}".strip()
+                cap = f"{hook_v}\n\n{body_v}".strip()
             if req.max_chars and len(cap) > int(req.max_chars):
                 cap = _trim_to_chars(cap, int(req.max_chars))
-            return {**v, "caption": cap, "char_count": len(cap)}
+            return {**v, "hook": hook_v, "body": body_v, "cta": cta_v,
+                    "caption": cap, "char_count": len(cap)}
 
         variant_objs = [_apply_controls(v) for v in composed.get("variants", [])]
         # Guarantee at least one variant even if the composer returned none.
@@ -8549,6 +8597,53 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
     }
 
 
+def _summarize_audio_analysis(render: dict) -> Optional[dict]:
+    """Compact, MEASURED sonic facts for a finished audio render. Never raises.
+
+    Surfaced on the audio-job poll response so downstream content generation
+    (``beat_context.audio_analysis``) can write from real sonics instead of
+    inventing descriptors. All values are measured from the rendered file —
+    no invented instruments: ``detected_instruments`` only appears when stems
+    were actually separated.
+    """
+    try:
+        import numpy as _np
+        name = str(render.get("url") or "").rsplit("/", 1)[-1]
+        if not name:
+            return None
+        path = _UPLOADS_PATH / name
+        if not path.exists():
+            return None
+        import librosa
+        y, sr = librosa.load(str(path), sr=22050, mono=True, duration=60.0)
+        if y is None or y.size == 0:
+            return None
+        rms = float(_np.sqrt(_np.mean(y ** 2)) + 1e-12)
+        loudness_db = render.get("loudness_lufs")
+        if loudness_db is None:
+            loudness_db = round(20.0 * float(_np.log10(rms)), 1)
+        centroid = float(_np.mean(librosa.feature.spectral_centroid(y=y, sr=sr)))
+        S = _np.abs(librosa.stft(y, n_fft=2048))
+        freqs = librosa.fft_frequencies(sr=sr, n_fft=2048)
+        low_ratio = float(S[freqs < 150.0].sum() / (S.sum() + 1e-9))
+        out: dict = {
+            "loudness_db": loudness_db,
+            # RMS mapped to 0–1; 0.35 RMS ≈ a loud, dense master.
+            "energy": round(max(0.0, min(1.0, rms / 0.35)), 2),
+            "spectral_brightness": ("dark" if centroid < 1500.0 else
+                                    "balanced" if centroid < 3000.0 else
+                                    "bright"),
+            "bass_weight": ("heavy" if low_ratio > 0.25 else
+                            "moderate" if low_ratio > 0.12 else "light"),
+        }
+        stems = render.get("stems") or {}
+        if isinstance(stems, dict) and stems:
+            out["detected_instruments"] = sorted(stems.keys())
+        return out
+    except Exception:
+        return None
+
+
 def _arc_spectral_clean_file(audio_path) -> None:
     """Decode → RTA ARC spectral denoise → re-encode the file in place.
 
@@ -9109,6 +9204,9 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         _job_update(job_id, {
             "status":           "done",
             "url":              render["url"],
+            # Measured sonic summary for downstream content generation
+            # (never-raise; None when analysis was not possible).
+            "audio_analysis":   _summarize_audio_analysis(render),
             "duration":         int(duration_sec),
             "bpm":              render.get("bpm", target_bpm),
             "key":              render.get("key", target_key),
@@ -10074,6 +10172,9 @@ async def api_poll_audio_job(job_id: str, _key=Depends(require_scope("read"))):
             "sample_rate":   job.get("sample_rate"),
             "bit_depth":     job.get("bit_depth"),
             "loudness_lufs": job.get("loudness_lufs"),
+            # Measured sonic facts (loudness/energy/brightness/bass/stems) —
+            # forwarded by clients into /api/generate/content beat_context.
+            "audio_analysis": job.get("audio_analysis"),
             "stems":         job.get("stems") or {},
             # Awareness-driven section plan actually rendered (null = plain loop).
             "arrangement":   job.get("arrangement"),

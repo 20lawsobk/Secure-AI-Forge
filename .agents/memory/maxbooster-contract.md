@@ -36,3 +36,10 @@ not drop the TS files in. Keep every change additive so existing dashboard calle
 Both the `AI Training Server` workflow AND `Start application` can bind 9878 → orphan/stale pythons.
 The `AI Training Server` workflow currently owns 9878 (its child python is the live server). After
 editing server.py, restart `AI Training Server` to load new code; verify with `ps aux | rg [s]erver.py`.
+
+## Beat-marketplace conditioning (Fix 5/6/9)
+- `/api/generate/content` accepts `goal:"drive_purchase"` (GOAL_ALIASES → drive_conversion), structured `beat_context`, and `platform_constraints {no_link_in_bio, professional_register}`.
+- beat_context flows through `req.awareness` (the canonical channel — never into `idea`/topic) via `ri.beat_context_awareness`; concrete purchase CTA (`ri.purchase_cta`) overrides the library CTA when price/slots/listen_url anchors exist; constraints enforced on hook/body/cta in `_apply_controls`.
+- Audio job done-write stores `_summarize_audio_analysis(render)` (measured librosa loudness/energy/brightness/bass + stems-derived instruments — never invented) and the poll whitelist exposes `audio_analysis`; clients forward it back as `beat_context.audio_analysis`.
+- **Gotcha:** server.py imports only `Any, Optional, List` from typing with `from __future__ import annotations` — a `Dict[...]` annotation on a pydantic model compiles fine but fails at request time with "class not fully defined". Use builtin `dict[...]`.
+- Guard tests: tests/test_beat_context.py.
