@@ -149,6 +149,32 @@ void layernorm_rows(const float* x, const float* gamma, const float* beta,
         for (size_t c = 0; c < cols; ++c) yr[c] = (xr[c] - mean) * inv * gamma[c] + beta[c];
     }
 }
+
+/* ── backward passes — fused derivative kernels ────────────────────────── */
+
+/* d/dx GELU(x) = 0.5*(1+tanh) + 0.5*x*(1-tanh²)*k0*(1+3*k1*x²)
+   Fused: one pass over (x,dy) → dx; no materialised intermediate tanh array. */
+void gelu_backward(const float* x, const float* dy, float* dx, size_t n) {
+    const float k0 = 0.7978845608028654f, k1 = 0.044715f;
+    #pragma omp parallel for schedule(static) if(n > 100000)
+    for (size_t i = 0; i < n; ++i) {
+        float v = x[i];
+        float t = fast_tanhf(k0 * (v + k1 * v * v * v));
+        float dtanh  = 1.0f - t * t;
+        float dinner = k0 * (1.0f + 3.0f * k1 * v * v);
+        dx[i] = dy[i] * (0.5f * (1.0f + t) + 0.5f * v * dtanh * dinner);
+    }
+}
+
+/* d/dx SiLU(x) = sigmoid(x)*(1 + x*(1-sigmoid(x)))
+   Fused: one pass; reuses sigmoid computed in the forward (not re-fetched). */
+void silu_backward(const float* x, const float* dy, float* dx, size_t n) {
+    #pragma omp parallel for schedule(static) if(n > 100000)
+    for (size_t i = 0; i < n; ++i) {
+        float sig = 1.0f / (1.0f + fast_expf(-x[i]));
+        dx[i] = dy[i] * (sig * (1.0f + x[i] * (1.0f - sig)));
+    }
+}
 """
 
 
@@ -190,6 +216,8 @@ class NativeKernels:
             "softmax_rows": [fp, fp, sz, sz],
             "rmsnorm_rows": [fp, fp, fp, f, sz, sz],
             "layernorm_rows": [fp, fp, fp, fp, f, sz, sz],
+            "gelu_backward": [fp, fp, fp, sz],
+            "silu_backward": [fp, fp, fp, sz],
         }
         for name, argtypes in sigs.items():
             fn = getattr(self._lib, name)
@@ -323,6 +351,41 @@ class NativeKernels:
                                  self._ptr(y), float(eps), rows, cols)
         self.stats["native"] += 1
         return y
+
+    def gelu_backward(self, x, dy) -> np.ndarray:
+        """Fused GELU backward: dx = dy * d/dx[GELU(x)].  One AVX-512 pass."""
+        x  = self._f32(x)
+        dy = self._f32(dy)
+        if x.shape != dy.shape:
+            raise ValueError(f"gelu_backward: shape mismatch {x.shape} vs {dy.shape}")
+        if not self._use_native(x, dy):
+            self.stats["fallback"] += 1
+            k0, k1 = np.float32(0.7978845608028654), np.float32(0.044715)
+            inner = k0 * (x + k1 * x ** 3)
+            t = np.tanh(inner).astype(np.float32)
+            dtanh  = np.float32(1.0) - t * t
+            dinner = k0 * (np.float32(1.0) + np.float32(3.0) * k1 * x * x)
+            return (dy * (np.float32(0.5) * (np.float32(1.0) + t)
+                          + np.float32(0.5) * x * dtanh * dinner)).astype(np.float32)
+        dx = np.empty_like(x)
+        self._lib.gelu_backward(self._ptr(x), self._ptr(dy), self._ptr(dx), x.size)
+        self.stats["native"] += 1
+        return dx
+
+    def silu_backward(self, x, dy) -> np.ndarray:
+        """Fused SiLU backward: dx = dy * sigmoid(x)*(1+x*(1-sigmoid(x)))."""
+        x  = self._f32(x)
+        dy = self._f32(dy)
+        if x.shape != dy.shape:
+            raise ValueError(f"silu_backward: shape mismatch {x.shape} vs {dy.shape}")
+        if not self._use_native(x, dy):
+            self.stats["fallback"] += 1
+            sig = np.float32(1.0) / (np.float32(1.0) + np.exp(-x.astype(np.float64))).astype(np.float32)
+            return (dy * (sig * (np.float32(1.0) + x * (np.float32(1.0) - sig)))).astype(np.float32)
+        dx = np.empty_like(x)
+        self._lib.silu_backward(self._ptr(x), self._ptr(dy), self._ptr(dx), x.size)
+        self.stats["native"] += 1
+        return dx
 
     # ── provenance ─────────────────────────────────────────────────────────
     def describe(self) -> Dict[str, object]:

@@ -326,21 +326,25 @@ class _HyperGELU(torch.autograd.Function):
     @staticmethod
     def forward(ctx, X, gpu):
         ctx.save_for_backward(X)
+        ctx.gpu = gpu
         X_np = X.detach().numpy().astype(np.float32, copy=False)
         O_np = gpu.gelu(X_np)
         return torch.from_numpy(O_np.astype(np.float32, copy=False))
 
     @staticmethod
     def backward(ctx, grad_output):
+        # Route through the native compiled SIMD gelu_backward kernel:
+        # one fused AVX-512 pass over (x, dy) → dx with no intermediate
+        # tanh array materialised.  No torch or bare numpy outside the GPU stack.
         X, = ctx.saved_tensors
-        c = np.sqrt(2.0 / np.pi)
-        x3 = 0.044715 * X ** 3
-        inner = c * (X + x3)
-        tanh_val = torch.tanh(inner)
-        dtanh = 1.0 - tanh_val ** 2
-        dinner = c * (1.0 + 3.0 * 0.044715 * X ** 2)
-        grad_X = 0.5 * (1.0 + tanh_val) + 0.5 * X * dtanh * dinner
-        return grad_output * grad_X, None
+        gpu = ctx.gpu
+        from ai_model.gpu.native.kernels import get_native_kernels
+        native = get_native_kernels()
+        x_np  = np.ascontiguousarray(X.detach().numpy().astype(np.float32))
+        dy_np = np.ascontiguousarray(grad_output.detach().numpy().astype(np.float32))
+        dx_np = native.gelu_backward(x_np, dy_np)
+        gpu.core._total_ops += 1
+        return torch.from_numpy(dx_np.reshape(X.shape)), None
 
 
 class _HyperSiLU(torch.autograd.Function):
@@ -354,16 +358,18 @@ class _HyperSiLU(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        # SiLU derivative computed in the backend's numpy compute domain
-        # (recorded as a backend op) rather than native torch.
+        # Route through the native compiled SIMD silu_backward kernel:
+        # one fused AVX-512 pass computing sigmoid(x)*(1+x*(1-sigmoid(x)))
+        # without materialising a separate sigmoid array.
         X, = ctx.saved_tensors
         gpu = ctx.gpu
-        x_np = X.detach().numpy().astype(np.float32, copy=False)
-        g_np = grad_output.detach().numpy().astype(np.float32, copy=False)
-        sig = 1.0 / (1.0 + np.exp(-x_np))
-        grad_X = g_np * (sig * (1.0 + x_np * (1.0 - sig)))
+        from ai_model.gpu.native.kernels import get_native_kernels
+        native = get_native_kernels()
+        x_np  = np.ascontiguousarray(X.detach().numpy().astype(np.float32))
+        dy_np = np.ascontiguousarray(grad_output.detach().numpy().astype(np.float32))
+        dx_np = native.silu_backward(x_np, dy_np)
         gpu.core._total_ops += 1
-        return torch.from_numpy(grad_X.astype(np.float32, copy=False)), None
+        return torch.from_numpy(dx_np.reshape(X.shape)), None
 
 
 class HyperGPULinear(nn.Module):
@@ -417,21 +423,16 @@ class HyperFlashAttention(nn.Module):
         qkv = self.qkv_proj(x)
         Q, K, V = qkv.chunk(3, dim=-1)
 
+        # Always route through the Digital GPU's flash attention — both training
+        # and inference.  The previous training_mode branch used PyTorch's
+        # scaled_dot_product_attention (CPU) which bypasses the GPU stack.
+        Q = Q.view(B, T, self.n_heads, self.head_dim).permute(0, 2, 1, 3).contiguous().view(B * self.n_heads, T, self.head_dim)
+        K = K.view(B, T, self.n_heads, self.head_dim).permute(0, 2, 1, 3).contiguous().view(B * self.n_heads, T, self.head_dim)
+        V = V.view(B, T, self.n_heads, self.head_dim).permute(0, 2, 1, 3).contiguous().view(B * self.n_heads, T, self.head_dim)
+        out = _FlashAttention.apply(Q, K, V, self.gpu, causal, self.block_size)
+        out = out.view(B, self.n_heads, T, self.head_dim).permute(0, 2, 1, 3).contiguous().view(B, T, D)
         if self._training_mode:
-            Q = Q.view(B, T, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
-            K = K.view(B, T, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
-            V = V.view(B, T, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
-            out = torch.nn.functional.scaled_dot_product_attention(
-                Q, K, V, is_causal=causal
-            )
-            out = out.permute(0, 2, 1, 3).contiguous().view(B, T, D)
             self.gpu._record_op("flash_attention", B * self.n_heads * T * T * self.head_dim * 2, 0.002)
-        else:
-            Q = Q.view(B, T, self.n_heads, self.head_dim).permute(0, 2, 1, 3).contiguous().view(B * self.n_heads, T, self.head_dim)
-            K = K.view(B, T, self.n_heads, self.head_dim).permute(0, 2, 1, 3).contiguous().view(B * self.n_heads, T, self.head_dim)
-            V = V.view(B, T, self.n_heads, self.head_dim).permute(0, 2, 1, 3).contiguous().view(B * self.n_heads, T, self.head_dim)
-            out = _FlashAttention.apply(Q, K, V, self.gpu, causal, self.block_size)
-            out = out.view(B, self.n_heads, T, self.head_dim).permute(0, 2, 1, 3).contiguous().view(B, T, D)
 
         return self.out_proj(out)
 

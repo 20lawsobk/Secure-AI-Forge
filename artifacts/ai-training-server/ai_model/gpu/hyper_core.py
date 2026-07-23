@@ -257,6 +257,22 @@ class HyperSIMDCore(SIMDCore):
         self._total_ops += 1
         return tc.mixed_precision_matmul(A, B)
 
+    def softmax(self, X: np.ndarray, axis: int = -1) -> np.ndarray:
+        """Override base SIMDCore.softmax to route through the native SIMD kernel
+        for the common last-axis case.  Falls back to the base numpy implementation
+        for any other axis (rare in practice)."""
+        if axis == -1 or axis == X.ndim - 1:
+            Xf = np.ascontiguousarray(X.astype(np.float32, copy=False))
+            orig = Xf.shape
+            cols = orig[-1]
+            rows = int(np.prod(orig[:-1])) if Xf.ndim > 1 else 1
+            out2d = self._native.softmax_rows(Xf.reshape(rows, cols))
+            self._total_ops += 1
+            return out2d.reshape(orig)
+        # Non-last axis: delegate to base SIMDCore numpy implementation.
+        self._total_ops += 1
+        return super().softmax(X, axis=axis)
+
     def flash_attention(
         self, Q: np.ndarray, K: np.ndarray, V: np.ndarray,
         causal: bool = False, block_size: int = 64,
@@ -267,52 +283,37 @@ class HyperSIMDCore(SIMDCore):
         Tk = K.shape[1]
         if V.shape[1] != Tk:
             raise ShapeError(f"flash_attention: K length {Tk} != V length {V.shape[1]}")
-        scale = 1.0 / np.sqrt(D)
-        # block_size is now operational; clamp to a valid range so any legacy
-        # caller (it used to be a no-op) can't produce an invalid range step.
+        scale = np.float32(1.0 / np.sqrt(D))
         bs = max(1, min(int(block_size), Tk))
-
-        # True tiled FlashAttention: stream the K/V blocks and rescale a running
-        # (max, denom, accumulator) with online softmax, so the full [B, Tq, Tk]
-        # score matrix is NEVER materialized. Peak score memory is
-        # O(Tq * block_size) instead of O(Tq * Tk); the result is identical to
-        # full softmax attention (verified to ~1e-15 vs the naive reference).
-        # Iterating over Tk (not Tq) preserves general cross-attention support.
-        # Adaptive tiling: for long KV sequences reduce Python outer-loop
-        # iterations by widening the block.  Each iteration does O(Tq*bs*D)
-        # BLAS work; a 2× wider block halves iteration count at the cost of
-        # 2× more score memory per block — still far less than the O(Tq*Tk)
-        # full-score-matrix that naive attention materialises.
-        # Short sequences (Tk ≤ bs) already run in a single iteration; this
-        # only fires when the sequence is long enough to benefit.
+        # Adaptive block widening for long sequences — halves Python loop count.
         if Tk >= 256 and bs < 128:
             bs = min(128, Tk)
 
-        Qf: np.ndarray = Q.astype(np.float32, copy=False)
-        Kf: np.ndarray = K.astype(np.float32, copy=False)
-        Vf: np.ndarray = V.astype(np.float32, copy=False)
+        Qf: np.ndarray = np.ascontiguousarray(Q.astype(np.float32, copy=False))
+        Kf: np.ndarray = np.ascontiguousarray(K.astype(np.float32, copy=False))
+        Vf: np.ndarray = np.ascontiguousarray(V.astype(np.float32, copy=False))
 
-        O = np.zeros((B, Tq, D), dtype=np.float32)       # unnormalized accumulator
-        m = np.full((B, Tq), -np.inf, dtype=np.float32)  # running row max
-        l = np.zeros((B, Tq), dtype=np.float32)          # running softmax denom
+        O = np.zeros((B, Tq, D), dtype=np.float32)
+        m = np.full((B, Tq), -np.inf, dtype=np.float32)
+        l = np.zeros((B, Tq), dtype=np.float32)
 
         for start in range(0, Tk, bs):
             end = min(start + bs, Tk)
-            scores = np.matmul(
-                Qf, Kf[:, start:end, :].transpose(0, 2, 1), dtype=np.float32
-            ) * scale                                    # [B, Tq, blk] -- one block only
+            # Route both inner GEMMs through the GPU's batched_gemm kernel
+            # (TensorCoreUnit dispatch) rather than calling np.matmul directly.
+            K_block_T = np.ascontiguousarray(Kf[:, start:end, :].transpose(0, 2, 1))
+            scores = self.batched_gemm(Qf, K_block_T) * scale   # [B, Tq, blk]
             if causal:
-                qi = np.arange(Tq).reshape(-1, 1)
-                kj = np.arange(start, end).reshape(1, -1)
-                scores = np.where(kj > qi, -1e9, scores)
+                qi = np.arange(Tq, dtype=np.int32).reshape(-1, 1)
+                kj = np.arange(start, end, dtype=np.int32).reshape(1, -1)
+                scores = np.where(kj > qi, np.float32(-1e9), scores)
 
             m_new = np.maximum(m, scores.max(axis=-1))
             exp_scores = np.exp(scores - m_new[:, :, None])
-            exp_m_diff = np.exp(m - m_new)               # 0 on first block (m=-inf)
+            exp_m_diff = np.exp(m - m_new)
             l = exp_m_diff * l + exp_scores.sum(axis=-1)
-            O = exp_m_diff[:, :, None] * O + np.matmul(
-                exp_scores, Vf[:, start:end, :], dtype=np.float32
-            )
+            V_block = np.ascontiguousarray(Vf[:, start:end, :])
+            O = exp_m_diff[:, :, None] * O + self.batched_gemm(exp_scores, V_block)
             m = m_new
 
         out = O / l[:, :, None]
@@ -340,21 +341,27 @@ class HyperSIMDCore(SIMDCore):
         H_out = (H - kH) // stride + 1
         W_out = (Wid - kW) // stride + 1
 
-        # Vectorized im2col via stride tricks (no Python patch loop): build all
-        # receptive-field patches as a strided view, then a single batched GEMM.
-        # 1.4-2.3x faster than the loop im2col, identical result. Output dtype
-        # follows the input (preserving the prior kernel's contract).
+        # im2col via stride tricks: build all receptive-field patches as a
+        # strided view, then dispatch a single 2-D tensor_core_gemm by
+        # collapsing the batch dimension into the spatial dimension.
+        # [B, K, P] → transpose(1,0,2) → [K, B, P] → reshape → [K, B*P]
+        # so one GPU GEMM handles the entire batch in a single dispatch.
         X = np.ascontiguousarray(X)
         s = X.strides
+        K_dim = C_in * kH * kW
+        P = H_out * W_out
         shape = (B, C_in, kH, kW, H_out, W_out)
         strides = (s[0], s[1], s[2], s[3], s[2] * stride, s[3] * stride)
         patches = np.lib.stride_tricks.as_strided(X, shape=shape, strides=strides)
-        cols = patches.reshape(B, C_in * kH * kW, H_out * W_out)
-        W_col = W.reshape(C_out, -1).astype(X.dtype, copy=False)
-        out = np.matmul(W_col, cols).reshape(B, C_out, H_out, W_out)
+        cols = patches.reshape(B, K_dim, P)
+        W_col = W.reshape(C_out, K_dim).astype(np.float32, copy=False)
+        cols_flat = np.ascontiguousarray(cols.transpose(1, 0, 2)).reshape(K_dim, B * P)
+        # [C_out, K] @ [K, B*P] → [C_out, B*P] — one TensorCore dispatch
+        out_flat = self.tensor_core_gemm(W_col, cols_flat)
+        out = out_flat.reshape(C_out, B, H_out, W_out).transpose(1, 0, 2, 3)
 
         self._total_ops += 1
-        return out
+        return out.astype(X.dtype, copy=False)
 
     def conv3d(
         self, X: np.ndarray, W: np.ndarray,
@@ -383,20 +390,25 @@ class HyperSIMDCore(SIMDCore):
         H_out = (H - kH) // sh + 1
         W_out = (Wid - kW) // sw + 1
 
-        # Vectorized 3D im2col via stride tricks + single batched GEMM.
-        # Output dtype follows the input (preserving the prior kernel's contract).
+        # 3-D im2col via stride tricks + single tensor_core_gemm.
+        # Collapse batch into spatial: [B, K, P] → [K, B*P] → one GPU GEMM.
         X = np.ascontiguousarray(X)
         s = X.strides
+        K_dim = C_in * kD * kH * kW
+        P = D_out * H_out * W_out
         shape = (B, C_in, kD, kH, kW, D_out, H_out, W_out)
         strides = (s[0], s[1], s[2], s[3], s[4],
                    s[2] * sd, s[3] * sh, s[4] * sw)
         patches = np.lib.stride_tricks.as_strided(X, shape=shape, strides=strides)
-        cols = patches.reshape(B, C_in * kD * kH * kW, D_out * H_out * W_out)
-        W_col = W.reshape(C_out, -1).astype(X.dtype, copy=False)
-        out = np.matmul(W_col, cols).reshape(B, C_out, D_out, H_out, W_out)
+        cols = patches.reshape(B, K_dim, P)
+        W_col = W.reshape(C_out, K_dim).astype(np.float32, copy=False)
+        cols_flat = np.ascontiguousarray(cols.transpose(1, 0, 2)).reshape(K_dim, B * P)
+        # [C_out, K] @ [K, B*P] → [C_out, B*P] — one TensorCore dispatch
+        out_flat = self.tensor_core_gemm(W_col, cols_flat)
+        out = out_flat.reshape(C_out, B, D_out, H_out, W_out).transpose(1, 0, 2, 3, 4)
 
         self._total_ops += 1
-        return out
+        return out.astype(X.dtype, copy=False)
 
     def layer_norm(
         self, X: np.ndarray, gamma: np.ndarray, beta: np.ndarray,
