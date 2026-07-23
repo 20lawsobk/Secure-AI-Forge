@@ -6,31 +6,36 @@ import { Agent, request as undiciRequest } from "undici";
 const MODEL_API_PORT = process.env.MODEL_API_PORT || "9878";
 const MODEL_API_BASE = `http://localhost:${MODEL_API_PORT}`;
 
-// How often the full GET ping cycle repeats (ms)
-const PING_INTERVAL_MS = 20_000;
+// Fast heartbeat: just /health, fires every 3 s.
+// Detects failures in under one poll cycle and keeps one connection warm
+// without the 26-second sequential crawl.
+const HEARTBEAT_INTERVAL_MS = 3_000;
 
-// Gap between individual pings inside one cycle (ms) — spreads load evenly
-const PING_STAGGER_MS = 800;
+// Residency sweep: ALL endpoints fired concurrently, every 60 s.
+// Keeps HyperGPU kernels, RTA fabric, pocket GEMM dedup, and KV-cache
+// resident between real user requests without the noise of sequential
+// staggered pings.
+const RESIDENCY_INTERVAL_MS = 60_000;
 
-// How often a deep-warm inference pass is fired (ms).
-// Every DEEP_WARM_INTERVAL_MS the keepalive POSTs /api/warm to exercise the
-// Digital GPU inference chains (transformer → flash-attn → pocket GEMM) so
-// KV-cache and GEMM dedup entries stay resident between real user requests.
-const DEEP_WARM_INTERVAL_MS = 5 * 60_000; // 5 minutes
+// Deep-warm inference pass: POST /api/warm, every 5 minutes.
+// Exercises the full Digital GPU chain (transformer → flash-attn → GEMM)
+// so the first real generation request hits a hot path.
+const DEEP_WARM_INTERVAL_MS = 5 * 60_000;
 
-// Status snapshot path — written by the primary after each cycle so worker
+// Status snapshot path — written by the primary after each sweep so worker
 // processes can serve it via GET /api/keepalive/status without IPC.
 const STATUS_FILE = "/tmp/maxcore-keepalive.json";
 
-// ─── Ping paths ──────────────────────────────────────────────────────────────
+// ─── Endpoints ───────────────────────────────────────────────────────────────
 // All GET endpoints on the Python AI server, grouped by subsystem.
-// Hitting these keeps TCP connections warm, the Python process active,
-// Digital GPU subsystems resident, and the circuit breaker counter at zero.
+// Hitting these in the residency sweep keeps TCP connections warm,
+// the Python process active, Digital GPU subsystems resident,
+// and the circuit breaker counter at zero.
 
 export const PING_PATHS: readonly string[] = [
   // ── Core health ────────────────────────────────────────────────────────────
   "/health",
-  "/api/health",           // model + Digital GPU detailed health
+  "/api/health",
 
   // ── Dashboard ──────────────────────────────────────────────────────────────
   "/dashboard/stats",
@@ -39,14 +44,11 @@ export const PING_PATHS: readonly string[] = [
   "/model/status",
 
   // ── Digital GPU subsystems ─────────────────────────────────────────────────
-  // These keep HyperGPU (HyperSIMDCore, flash-attn, conv kernels), the RTA
-  // rendering fabric (path tracer / video grader / spectral), and the pocket
-  // accelerator (GEMM dedup cache) resident and responsive.
   "/gpu/status",
   "/gpu/hyper/status",
   "/gpu/capabilities",
-  "/api/rta/status",                          // RTA rendering fabric
-  "/api/maxcore/pocket-accelerator/stats",    // pocket/GEMM dedup
+  "/api/rta/status",
+  "/api/maxcore/pocket-accelerator/stats",
 
   // ── Concurrency & job queues ────────────────────────────────────────────────
   "/api/concurrency/stats",
@@ -88,48 +90,109 @@ export const PING_PATHS: readonly string[] = [
   "/api/models/engagement/state",
 ];
 
-// ─── Dedicated keep-alive pool ───────────────────────────────────────────────
-// Separate from the proxy pool so pings never starve real traffic.
+// ─── Connection pools ────────────────────────────────────────────────────────
+// Separate from the proxy pool so keepalive traffic never starves real requests.
 
-const _pingPool = new Agent({
+// Heartbeat pool: single persistent connection, minimal overhead.
+const _heartbeatPool = new Agent({
   keepAliveTimeout: 60_000,
   keepAliveMaxTimeout: 120_000,
-  connections: 4,
+  connections: 1,
+  pipelining: 1,
+});
+
+// Residency pool: enough connections to fire all endpoints concurrently.
+const _residencyPool = new Agent({
+  keepAliveTimeout: 60_000,
+  keepAliveMaxTimeout: 120_000,
+  connections: Math.min(PING_PATHS.length, 32),
   pipelining: 1,
 });
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
 let _running = false;
-let _cycleCount = 0;
-let _consecutiveAllFailed = 0;
-let _timer: ReturnType<typeof setTimeout> | null = null;
-let _lastCycleAt: string | null = null;
+let _cycleCount = 0;          // residency sweep count
+let _heartbeatCount = 0;
+let _heartbeatOk = true;
+let _consecutiveHbFail = 0;
+let _heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
+let _residencyTimer: ReturnType<typeof setTimeout> | null = null;
+let _lastResidencyAt: string | null = null;
 let _lastDeepWarmAt: string | null = null;
 let _lastDeepWarmOk: boolean | null = null;
 let _nextDeepWarmAt = Date.now() + DEEP_WARM_INTERVAL_MS;
 
-// Per-endpoint health: true = last ping succeeded, false = last ping failed
+// Per-endpoint health from the last residency sweep
 const _endpointHealth = new Map<string, boolean>(
   PING_PATHS.map((p) => [p, true]),
 );
 
-// ─── Single ping ─────────────────────────────────────────────────────────────
-
 const ADMIN_KEY = process.env.ADMIN_KEY ?? "";
 
-async function pingOne(path: string): Promise<boolean> {
-  try {
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (ADMIN_KEY) headers["X-Admin-Key"] = ADMIN_KEY;
+function _headers(): Record<string, string> {
+  const h: Record<string, string> = { "Content-Type": "application/json" };
+  if (ADMIN_KEY) h["X-Admin-Key"] = ADMIN_KEY;
+  return h;
+}
 
-    const { statusCode, body } = await undiciRequest(`${MODEL_API_BASE}${path}`, {
-      method: "GET",
-      dispatcher: _pingPool,
-      headers,
-      headersTimeout: 0,
-      bodyTimeout: 0,
-    });
+// ─── Fast heartbeat ──────────────────────────────────────────────────────────
+// Fires every HEARTBEAT_INTERVAL_MS (3 s).  Only hits /health — cheap and
+// sufficient to keep the primary TCP connection warm and detect a crash within
+// one interval rather than waiting up to 20 s.
+
+async function runHeartbeat(): Promise<void> {
+  _heartbeatCount++;
+  try {
+    const { statusCode, body } = await undiciRequest(
+      `${MODEL_API_BASE}/health`,
+      {
+        method: "GET",
+        dispatcher: _heartbeatPool,
+        headers: _headers(),
+        headersTimeout: 5_000,
+        bodyTimeout: 5_000,
+      },
+    );
+    await body.dump();
+    const ok = statusCode < 500;
+    if (!ok && _heartbeatOk) {
+      console.warn(`[Keepalive] Heartbeat #${_heartbeatCount}: /health → ${statusCode} — Python may be struggling`);
+    } else if (ok && !_heartbeatOk) {
+      console.log(`[Keepalive] Heartbeat #${_heartbeatCount}: /health recovered ✓`);
+    }
+    _heartbeatOk = ok;
+    if (ok) _consecutiveHbFail = 0;
+    else _consecutiveHbFail++;
+  } catch {
+    _heartbeatOk = false;
+    _consecutiveHbFail++;
+    if (_consecutiveHbFail === 1 || _consecutiveHbFail % 10 === 0) {
+      console.warn(`[Keepalive] Heartbeat #${_heartbeatCount}: /health unreachable (${_consecutiveHbFail} consecutive)`);
+    }
+  }
+}
+
+// ─── Residency sweep ─────────────────────────────────────────────────────────
+// Fires all PING_PATHS concurrently every RESIDENCY_INTERVAL_MS (60 s).
+// Concurrent (not staggered) so the sweep completes in ~2 s instead of 26 s,
+// then stays silent until the next interval.
+
+async function pingOne(
+  path: string,
+  pool: Agent,
+): Promise<boolean> {
+  try {
+    const { statusCode, body } = await undiciRequest(
+      `${MODEL_API_BASE}${path}`,
+      {
+        method: "GET",
+        dispatcher: pool,
+        headers: _headers(),
+        headersTimeout: 10_000,
+        bodyTimeout: 10_000,
+      },
+    );
     await body.dump();
     return statusCode < 500;
   } catch {
@@ -137,31 +200,57 @@ async function pingOne(path: string): Promise<boolean> {
   }
 }
 
-// How quickly to retry a deep-warm that failed (ms).
-// Used when the first pass fires before Python is up.  Normal steady-state
-// interval is DEEP_WARM_INTERVAL_MS (5 min).
-const DEEP_WARM_RETRY_MS = 2 * 60_000; // 2 minutes
+async function runResidencySweep(): Promise<void> {
+  _cycleCount++;
+
+  // Fire all endpoints concurrently — results arrive together in ~RTT time
+  const results = await Promise.all(
+    PING_PATHS.map(async (path) => {
+      const ok = await pingOne(path, _residencyPool);
+      _endpointHealth.set(path, ok);
+      return ok;
+    }),
+  );
+
+  const ok = results.filter(Boolean).length;
+  const fail = results.length - ok;
+
+  _lastResidencyAt = new Date().toISOString();
+
+  if (fail === PING_PATHS.length) {
+    console.warn(
+      `[Keepalive] Sweep #${_cycleCount}: all ${fail} endpoints unreachable — Python may be starting`,
+    );
+  } else if (fail > 0) {
+    const failed = PING_PATHS.filter((p) => !_endpointHealth.get(p));
+    console.warn(
+      `[Keepalive] Sweep #${_cycleCount}: ${ok} ok, ${fail} unreachable — ${failed.join(", ")}`,
+    );
+  } else {
+    console.log(`[Keepalive] Sweep #${_cycleCount}: all ${ok} endpoints alive`);
+  }
+
+  // Deep-warm: only when Python is actually up and the interval has elapsed
+  if (fail < PING_PATHS.length && Date.now() >= _nextDeepWarmAt) {
+    _nextDeepWarmAt = Date.now() + DEEP_WARM_INTERVAL_MS;
+    runDeepWarm().catch(() => {});
+  }
+
+  _flushStatus(ok, fail);
+}
 
 // ─── Deep-warm pass ──────────────────────────────────────────────────────────
-// POST /api/warm exercises the Digital GPU inference chains so KV-cache,
-// pocket GEMM dedup entries, and flash-attn kernel paths stay hot between
-// real user requests.  Safe to call repeatedly — Python side is idempotent
-// and never-raise.
+
+const DEEP_WARM_RETRY_MS = 2 * 60_000;
 
 async function runDeepWarm(): Promise<void> {
-  const ADMIN_KEY_HDR = process.env.ADMIN_KEY ?? "";
   try {
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-    if (ADMIN_KEY_HDR) headers["X-Admin-Key"] = ADMIN_KEY_HDR;
-
     const { statusCode, body } = await undiciRequest(
       `${MODEL_API_BASE}/api/warm`,
       {
         method: "POST",
-        dispatcher: _pingPool,
-        headers,
+        dispatcher: _residencyPool,
+        headers: _headers(),
         body: "{}",
         headersTimeout: 0,
         bodyTimeout: 0,
@@ -173,73 +262,17 @@ async function runDeepWarm(): Promise<void> {
 
     if (_lastDeepWarmOk) {
       console.log(`[Keepalive] Deep-warm POST /api/warm → ${statusCode} ✓`);
-      // Success — next deep-warm at the normal steady-state interval
       _nextDeepWarmAt = Date.now() + DEEP_WARM_INTERVAL_MS;
     } else {
-      console.warn(
-        `[Keepalive] Deep-warm POST /api/warm → ${statusCode} (body: ${raw.slice(0, 200)})`,
-      );
-      // Python responded but returned an error — retry at the short interval
+      console.warn(`[Keepalive] Deep-warm POST /api/warm → ${statusCode} (body: ${raw.slice(0, 200)})`);
       _nextDeepWarmAt = Date.now() + DEEP_WARM_RETRY_MS;
     }
   } catch (err) {
-    // Connection error (Python still starting) — schedule a fast retry
     _lastDeepWarmOk = false;
     _lastDeepWarmAt = new Date().toISOString();
     _nextDeepWarmAt = Date.now() + DEEP_WARM_RETRY_MS;
     console.warn(`[Keepalive] Deep-warm POST /api/warm failed — retrying in ${DEEP_WARM_RETRY_MS / 60000}min: ${err}`);
   }
-}
-
-// ─── Full ping cycle ─────────────────────────────────────────────────────────
-
-async function runCycle(): Promise<void> {
-  _cycleCount++;
-  let ok = 0;
-  let fail = 0;
-
-  for (let i = 0; i < PING_PATHS.length; i++) {
-    const path = PING_PATHS[i]!;
-    const success = await pingOne(path);
-    _endpointHealth.set(path, success);
-    success ? ok++ : fail++;
-
-    if (i < PING_PATHS.length - 1) {
-      await new Promise((r) => setTimeout(r, PING_STAGGER_MS));
-    }
-  }
-
-  _lastCycleAt = new Date().toISOString();
-
-  if (fail === PING_PATHS.length) {
-    _consecutiveAllFailed++;
-    console.warn(
-      `[Keepalive] Cycle #${_cycleCount}: all ${fail} pings failed — ` +
-        `AI server may be starting up (${_consecutiveAllFailed} consecutive all-fail cycles)`,
-    );
-  } else {
-    _consecutiveAllFailed = 0;
-    if (fail > 0) {
-      const failed = PING_PATHS.filter((p) => !_endpointHealth.get(p));
-      console.warn(
-        `[Keepalive] Cycle #${_cycleCount}: ${ok} ok, ${fail} failed — ${failed.join(", ")}`,
-      );
-    } else {
-      console.log(`[Keepalive] Cycle #${_cycleCount}: all ${ok} endpoints alive`);
-    }
-  }
-
-  // ── Deep-warm check ────────────────────────────────────────────────────────
-  // Only fire when Python is actually up (at least one endpoint responded) and
-  // the interval has elapsed.  Skip during all-fail windows to avoid piling up
-  // requests against a restarting server.
-  if (fail < PING_PATHS.length && Date.now() >= _nextDeepWarmAt) {
-    _nextDeepWarmAt = Date.now() + DEEP_WARM_INTERVAL_MS;
-    // Run in background — don't block the ping cycle scheduling
-    runDeepWarm().catch(() => {});
-  }
-
-  _flushStatus(ok, fail);
 }
 
 // ─── Status snapshot ─────────────────────────────────────────────────────────
@@ -253,8 +286,12 @@ function _flushStatus(ok: number, fail: number): void {
     const snapshot = {
       running: _running,
       cycleCount: _cycleCount,
-      lastCycleAt: _lastCycleAt,
-      intervalMs: PING_INTERVAL_MS,
+      heartbeatCount: _heartbeatCount,
+      heartbeatOk: _heartbeatOk,
+      consecutiveHeartbeatFail: _consecutiveHbFail,
+      lastResidencyAt: _lastResidencyAt,
+      heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
+      residencyIntervalMs: RESIDENCY_INTERVAL_MS,
       totalEndpoints: PING_PATHS.length,
       summary: { ok, fail },
       endpoints,
@@ -271,8 +308,7 @@ function _flushStatus(ok: number, fail: number): void {
   }
 }
 
-/** Return the keepalive status snapshot.  Workers read from the file written
- *  by the primary; the primary can use this directly. */
+/** Return the keepalive status snapshot. */
 export function getKeepaliveStatus(): Record<string, unknown> {
   try {
     const raw = fs.readFileSync(STATUS_FILE, "utf8");
@@ -281,8 +317,11 @@ export function getKeepaliveStatus(): Record<string, unknown> {
     return {
       running: _running,
       cycleCount: _cycleCount,
-      lastCycleAt: _lastCycleAt,
-      intervalMs: PING_INTERVAL_MS,
+      heartbeatCount: _heartbeatCount,
+      heartbeatOk: _heartbeatOk,
+      lastResidencyAt: _lastResidencyAt,
+      heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
+      residencyIntervalMs: RESIDENCY_INTERVAL_MS,
       totalEndpoints: PING_PATHS.length,
       summary: { ok: 0, fail: 0 },
       endpoints: {},
@@ -292,7 +331,7 @@ export function getKeepaliveStatus(): Record<string, unknown> {
         lastDeepWarmOk: null,
         nextDeepWarmAt: new Date(_nextDeepWarmAt).toISOString(),
       },
-      message: "warming up — first cycle not yet complete",
+      message: "warming up — first sweep not yet complete",
     };
   }
 }
@@ -300,34 +339,57 @@ export function getKeepaliveStatus(): Record<string, unknown> {
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 export function startKeepalive(): void {
+  if (_running) return;
   _running = true;
+
   console.log(
-    `[Keepalive] Starting — pinging ${PING_PATHS.length} endpoints every ${PING_INTERVAL_MS / 1000}s, ` +
-      `deep-warm every ${DEEP_WARM_INTERVAL_MS / 60000}min`,
+    `[Keepalive] Starting — heartbeat every ${HEARTBEAT_INTERVAL_MS / 1000}s, ` +
+    `residency sweep every ${RESIDENCY_INTERVAL_MS / 1000}s, ` +
+    `deep-warm every ${DEEP_WARM_INTERVAL_MS / 60000}min`,
   );
 
-  const schedule = () => {
-    _timer = setTimeout(async () => {
-      await runCycle();
-      schedule();
-    }, PING_INTERVAL_MS);
+  // ── Heartbeat loop ───────────────────────────────────────────────────────
+  const scheduleHeartbeat = () => {
+    _heartbeatTimer = setTimeout(async () => {
+      await runHeartbeat();
+      if (_running) scheduleHeartbeat();
+    }, HEARTBEAT_INTERVAL_MS);
   };
 
-  // Run the first cycle immediately so the server is warm on startup;
-  // also fire the first deep-warm right away (don't wait 5 min on boot)
-  runCycle().then(() => {
+  // ── Residency sweep loop ─────────────────────────────────────────────────
+  const scheduleResidency = () => {
+    _residencyTimer = setTimeout(async () => {
+      await runResidencySweep();
+      if (_running) scheduleResidency();
+    }, RESIDENCY_INTERVAL_MS);
+  };
+
+  // First heartbeat: tiny delay so the server is bound before we hit it
+  setTimeout(async () => {
+    await runHeartbeat();
+    if (_running) scheduleHeartbeat();
+  }, 500);
+
+  // First residency sweep: run immediately so GPU subsystems warm on boot,
+  // then schedule the recurring interval
+  runResidencySweep().then(() => {
     _nextDeepWarmAt = Date.now() + DEEP_WARM_INTERVAL_MS;
-    schedule();
+    if (_running) scheduleResidency();
   });
-  // First deep-warm runs in parallel with the first ping cycle
+
+  // First deep-warm: run in parallel with the first sweep (don't wait 5 min)
   runDeepWarm().catch(() => {});
 }
 
 export function stopKeepalive(): void {
   _running = false;
-  if (_timer !== null) {
-    clearTimeout(_timer);
-    _timer = null;
-    console.log("[Keepalive] Stopped");
+  if (_heartbeatTimer !== null) {
+    clearTimeout(_heartbeatTimer);
+    _heartbeatTimer = null;
   }
+  if (_residencyTimer !== null) {
+    clearTimeout(_residencyTimer);
+    _residencyTimer = null;
+  }
+  console.log("[Keepalive] Stopped");
 }

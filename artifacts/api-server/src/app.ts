@@ -6,6 +6,7 @@ import compression from "compression";
 import rateLimit from "express-rate-limit";
 import { Agent, request as undiciRequest } from "undici";
 import router from "./routes";
+import { isPythonRestarting } from "./server-state.js";
 
 const app: Express = express();
 
@@ -55,27 +56,62 @@ const _uploadsPool = new Agent({
   pipelining: 1,
 });
 
+// 50 ms poll matches model-proxy.ts HOLD_POLL_MS so uploads drain at the same
+// cadence as API requests once Python recovers.
+const _UPLOADS_HOLD_POLL_MS = 50;
+
+async function _waitForUploadsRecovery(): Promise<void> {
+  for (;;) {
+    if (!isPythonRestarting()) return;
+    await new Promise<void>((r) => setTimeout(r, _UPLOADS_HOLD_POLL_MS));
+  }
+}
+
+function _isUploadsConnErr(e: unknown): boolean {
+  const err = e as any;
+  return (
+    err.code === "ECONNREFUSED" ||
+    err.cause?.code === "ECONNREFUSED" ||
+    err.cause?.code === "UND_ERR_SOCKET" ||
+    err.code === "UND_ERR_SOCKET" ||
+    Boolean(err.cause?.message?.includes("other side closed"))
+  );
+}
+
 app.get("/uploads/*path", async (req: Request, res: Response) => {
-  try {
-    const upstreamRes = await undiciRequest(`${_MODEL_API_BASE}${req.path}`, {
-      method: "GET",
-      dispatcher: _uploadsPool,
-    });
-    if (upstreamRes.statusCode >= 400) {
-      res
-        .status(upstreamRes.statusCode)
-        .send(upstreamRes.statusCode.toString());
-      await upstreamRes.body.dump();
+  // Hold the request while Python is restarting — same guarantee as the API
+  // proxy: never 502 a caller just because the model server is mid-restart.
+  await _waitForUploadsRecovery();
+
+  for (;;) {
+    try {
+      const upstreamRes = await undiciRequest(`${_MODEL_API_BASE}${req.path}`, {
+        method: "GET",
+        dispatcher: _uploadsPool,
+      });
+      if (upstreamRes.statusCode >= 400) {
+        res.status(upstreamRes.statusCode).send(upstreamRes.statusCode.toString());
+        await upstreamRes.body.dump();
+        return;
+      }
+      const contentType =
+        (upstreamRes.headers["content-type"] as string | undefined) ??
+        "application/octet-stream";
+      res.setHeader("Content-Type", contentType);
+      const buf = Buffer.from(await upstreamRes.body.arrayBuffer());
+      res.send(buf);
       return;
+    } catch (err) {
+      if (_isUploadsConnErr(err)) {
+        // Python crashed mid-flight — wait for recovery and retry
+        await _waitForUploadsRecovery();
+        // brief settle pause before retrying the socket
+        await new Promise<void>((r) => setTimeout(r, _UPLOADS_HOLD_POLL_MS));
+      } else {
+        res.status(502).json({ error: "Could not fetch asset from AI server" });
+        return;
+      }
     }
-    const contentType =
-      (upstreamRes.headers["content-type"] as string | undefined) ??
-      "application/octet-stream";
-    res.setHeader("Content-Type", contentType);
-    const buf = Buffer.from(await upstreamRes.body.arrayBuffer());
-    res.send(buf);
-  } catch (err) {
-    res.status(502).json({ error: "Could not fetch asset from AI server" });
   }
 });
 

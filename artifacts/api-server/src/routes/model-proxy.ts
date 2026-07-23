@@ -91,19 +91,23 @@ function _cbRecordFailure(): void {
 
 // Guaranteed-completion policy: requests are held indefinitely while Python
 // restarts — never 503'd on a timer. The watchdog supervises Python recovery,
-// so readiness always arrives; held requests drain within 300 ms of it.
+// so readiness always arrives; held requests drain within HOLD_POLL_MS of it.
 // REQUEST_HOLD_MS is retained only as the slow-log interval.
 const REQUEST_HOLD_MS = 90_000;
+
+// Poll every 50 ms so held requests drain within one tick of Python becoming
+// ready — invisible latency vs the old 300 ms poll.
+const HOLD_POLL_MS = 50;
 
 async function waitForRecovery(): Promise<boolean> {
   const start = Date.now();
   for (;;) {
     if (!_cbIsOpen() && !isPythonRestarting()) return true;
     const waited = Date.now() - start;
-    if (waited > 0 && waited % REQUEST_HOLD_MS < 300) {
+    if (waited > 0 && waited % REQUEST_HOLD_MS < HOLD_POLL_MS) {
       console.log(`[Proxy] still holding request for Python recovery (${Math.round(waited / 1000)}s)`);
     }
-    await new Promise<void>((r) => setTimeout(r, 300));
+    await new Promise<void>((r) => setTimeout(r, HOLD_POLL_MS));
   }
 }
 
@@ -257,11 +261,13 @@ function handleProxyNetworkError(
 }
 
 // ─── Transient-connection retry wrapper ─────────────────────────────────────
-// Wraps undiciRequest with a single automatic retry through the hold queue.
+// Wraps undiciRequest with an indefinite retry loop through the hold queue.
 // When a request that passed the CB/restart check still gets a connection error
 // mid-flight (Python crashed between the check and the call), we record the
-// failure, wait for recovery, then retry exactly once.  If the retry also
-// fails, the error is re-thrown for the caller's handleProxyNetworkError.
+// failure, wait for recovery, then retry.  We loop — not retry-once — because
+// Python may still be recovering after the first waitForRecovery() resolves
+// (e.g. healthz not yet green, CB opened again by a concurrent probe).
+// This loop is the last line of defence against any 503 escaping to callers.
 
 function _isTransientConnErr(e: unknown): boolean {
   const err = e as any;
@@ -278,16 +284,23 @@ async function _upstreamRequest(
   url: string,
   options: Parameters<typeof undiciRequest>[1],
 ): ReturnType<typeof undiciRequest> {
-  try {
-    return await undiciRequest(url, options);
-  } catch (err) {
-    if (_isTransientConnErr(err)) {
-      _cbRecordFailure(); // open CB if threshold reached
-      console.log(`[Proxy] Connection error on first attempt — waiting for recovery then retrying ${url}`);
-      await waitForRecovery(); // holds indefinitely — resolves once Python recovers
-      return await undiciRequest(url, options); // retry once
+  let attempt = 0;
+  for (;;) {
+    try {
+      return await undiciRequest(url, options);
+    } catch (err) {
+      if (_isTransientConnErr(err)) {
+        attempt++;
+        _cbRecordFailure(); // open CB if threshold reached
+        console.log(
+          `[Proxy] Connection error (attempt ${attempt}) — waiting for recovery then retrying ${url}`,
+        );
+        await waitForRecovery(); // holds indefinitely; resolves once Python is ready
+        // loop: try again — Python may still be settling even after the flag clears
+      } else {
+        throw err; // non-transient — propagate to handleProxyNetworkError
+      }
     }
-    throw err; // re-throw for handleProxyNetworkError
   }
 }
 
