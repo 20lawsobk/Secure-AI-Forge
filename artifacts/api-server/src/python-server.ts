@@ -7,6 +7,14 @@ import { setPythonRestarting } from "./server-state.js";
 
 const PYTHON_PORT = parseInt(process.env.MODEL_API_PORT || "9878", 10);
 
+// Dedicated liveness-probe port for the background healthz thread in Python.
+// This server runs in its own daemon thread, completely independent of
+// uvicorn's event loop.  GC pauses, model inference, and asyncio blocking
+// inside the main server can never stall it — so we probe this port for
+// hung-detection instead of the main API port, eliminating false-positives
+// from GC-paused-but-healthy servers.
+const HEALTHZ_PORT = PYTHON_PORT + 1; // 9879 by default
+
 // Proxy-only mode: this instance must NEVER try to own (spawn or restart) the
 // Python server.  Two conditions each independently set this flag:
 //
@@ -114,44 +122,68 @@ async function pollUntilOpen(port: number, maxMs = 6_000): Promise<boolean> {
 
 // ─── HTTP hang probe ─────────────────────────────────────────────────────────
 // Distinguishes three states:
-//   'down'    — TCP port not open (Python crashed or not yet started)
-//   'hung'    — TCP port open but HTTP /health does not respond within 25 s
-//               (deadlock, OOM-frozen process, etc.)
-//   'healthy' — HTTP /health returned a non-5xx status
+//   'down'    — Main API port (9878) not open: Python crashed or not started.
+//   'hung'    — Main API port open but the dedicated healthz port (9879) does
+//               not respond within 10 s.  The healthz server runs in its own
+//               daemon thread inside Python, completely independent of uvicorn's
+//               event loop.  It can never be blocked by GC, model inference, or
+//               any asyncio operation — so a timeout here means the OS process
+//               itself is truly frozen (deadlock, OOM-kill stall, etc.), not
+//               just uvicorn's event loop paused during GC.
+//   'healthy' — Healthz port responded within the timeout.
 //
-// 25 s timeout (was 10 s): the Python process runs at 87–90% memory in
-// production and frequently triggers GC runs (freeing 30–40k objects) that
-// block the event loop for 10–20 s.  A 10 s probe timeout fires during normal
-// GC and misclassifies a healthy-but-paused server as hung.
-//
-// This is the ONE intentional use of AbortController in the codebase: detecting
-// a genuinely hung OS process requires a real time-bound probe — there is no
-// other observable signal when a process holds its port but stops processing.
+// Why two ports?
+//   GC runs in production block the uvicorn event loop for 10–25 s, which
+//   makes /health on the main port time out and look like a hang even when the
+//   process is perfectly fine.  Probing the healthz thread instead eliminates
+//   that entire class of false-positive kills.
 
 async function probeHttpHealth(): Promise<"healthy" | "hung" | "down"> {
+  // Step 1: is the main API port alive? (process down check)
   const portOpen = await isPortOpen(PYTHON_PORT, 2_000);
   if (!portOpen) return "down";
 
-  // Port is bound — check if the HTTP layer is alive
+  // Step 2: is the healthz thread (independent of uvicorn event loop) alive?
+  // 10 s timeout — the healthz handler does nothing but write a static JSON
+  // byte string, so any response at all means the process is alive.
+  const healthzOpen = await isPortOpen(HEALTHZ_PORT, 1_000);
+  if (!healthzOpen) {
+    // Healthz port not yet bound: Python just started and hasn't called
+    // _start_healthz_server() yet, or this is an older deployment without the
+    // healthz thread.  Fall back to probing the main port so we don't
+    // misclassify a fresh startup as a hang.
+    const controller = new AbortController();
+    const hangTimer = setTimeout(() => controller.abort(), 25_000);
+    try {
+      const { statusCode, body } = await undiciRequest(
+        `http://localhost:${PYTHON_PORT}/health`,
+        { method: "GET", dispatcher: _warmPool, signal: controller.signal,
+          headersTimeout: 0, bodyTimeout: 0 },
+      );
+      await body.dump();
+      clearTimeout(hangTimer);
+      return statusCode < 500 ? "healthy" : "hung";
+    } catch {
+      clearTimeout(hangTimer);
+      return "hung";
+    }
+  }
+
+  // Healthz port is bound — probe it with a tight timeout.
   const controller = new AbortController();
-  const hangTimer = setTimeout(() => controller.abort(), 25_000);
+  const hangTimer = setTimeout(() => controller.abort(), 10_000);
   try {
     const { statusCode, body } = await undiciRequest(
-      `http://localhost:${PYTHON_PORT}/health`,
-      {
-        method: "GET",
-        dispatcher: _warmPool,
-        signal: controller.signal,
-        headersTimeout: 0,
-        bodyTimeout: 0,
-      },
+      `http://localhost:${HEALTHZ_PORT}/healthz`,
+      { method: "GET", dispatcher: _warmPool, signal: controller.signal,
+        headersTimeout: 0, bodyTimeout: 0 },
     );
     await body.dump();
     clearTimeout(hangTimer);
     return statusCode < 500 ? "healthy" : "hung";
   } catch {
     clearTimeout(hangTimer);
-    // ECONNREFUSED when port was just measured open = race; AbortError = true hang
+    // Healthz thread stopped responding — process is genuinely frozen.
     return "hung";
   }
 }
@@ -243,6 +275,7 @@ function spawnPython() {
     env: {
       ...process.env,
       MODEL_API_PORT: String(PYTHON_PORT),
+      HEALTHZ_PORT:   String(HEALTHZ_PORT),
       PYTHONUNBUFFERED: "1",
     },
     stdio: ["ignore", "pipe", "pipe"],

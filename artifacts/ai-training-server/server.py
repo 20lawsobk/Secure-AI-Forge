@@ -1291,6 +1291,56 @@ class ContentRequest(_AwarenessMixin):
 
 # ─── Startup ─────────────────────────────────────────────────────────────────
 
+# ─── Background liveness-probe server ────────────────────────────────────────
+# Runs on HEALTHZ_PORT (default 9879) in its own daemon thread, completely
+# independent of uvicorn's event loop.  GC pauses, model inference, asyncio
+# blocking — nothing in the main server can stall this.  Node's health monitor
+# probes this port instead of the main API port so it can tell the difference
+# between "process is truly hung" and "uvicorn event loop is GC-paused for
+# 10-20 s while the process is otherwise healthy".
+#
+# Without this: a GC pause during a health probe looks like a hang → Node
+# kills and restarts Python → 90-120 s of downtime during model reload.
+# With this: GC can pause for any duration; healthz always responds in < 1 ms.
+
+_HEALTHZ_PORT = int(os.environ.get("HEALTHZ_PORT", str(int(os.environ.get("MODEL_API_PORT", "9878")) + 1)))
+
+
+def _start_healthz_server() -> None:
+    """Bind the healthz TCP socket and serve in a daemon thread.  Never-raise.
+
+    The handler is defined inside this function so the `http.server` import is
+    scoped here — avoids a module-level `import http.server` that is easy to
+    forget and causes an AttributeError at class-definition time.
+
+    If the port is already taken (e.g. previous instance didn't die cleanly) we
+    log and continue; Node falls back to the 25-second uvicorn probe path.
+    """
+    import http.server as _http
+
+    class _HealthzHandler(_http.BaseHTTPRequestHandler):
+        _BODY = b'{"status":"ok","source":"healthz-thread"}'
+
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(self._BODY)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(self._BODY)
+
+        def log_message(self, fmt: str, *args: object) -> None:
+            pass  # silence access logs
+
+    try:
+        srv = _http.HTTPServer(("0.0.0.0", _HEALTHZ_PORT), _HealthzHandler)
+        t = threading.Thread(target=srv.serve_forever, name="healthz-server", daemon=True)
+        t.start()
+        print(f"[Server] Healthz liveness server on port {_HEALTHZ_PORT} (event-loop-independent)", flush=True)
+    except OSError as _hz_err:
+        print(f"[Server] WARNING: healthz server could not bind port {_HEALTHZ_PORT}: {_hz_err} — falling back to uvicorn probe", flush=True)
+
+
 @app.on_event("startup")
 async def on_startup():
     # ── Thread pool: 512 workers for async I/O routing ───────────────────────
@@ -1320,6 +1370,12 @@ async def on_startup():
     os.environ["AI_BATCH_WINDOW_MS"]  = "2"    # 2 ms collection window
     os.environ["AI_BATCH_TIMEOUT_S"]  = "600"  # 10 min — deep queues must not timeout
     os.environ["AI_PIPE_DEPTH"]       = "4"    # collector stays 3 batches ahead of executor
+
+    # Start the event-loop-independent liveness probe server immediately so
+    # Node's health monitor can distinguish GC pauses from true process hangs.
+    # Must be first: if model init blocks for 30+ s the healthz thread needs to
+    # already be bound so Node doesn't misfire a hung-detection kill.
+    _start_healthz_server()
 
     if not DATABASE_URL:
         print("[Server] WARNING: DATABASE_URL not set — running without DB")
