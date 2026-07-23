@@ -1,5 +1,6 @@
 """Execution graph (DAG) + graph scheduler for the digital GPU.
 
+
 ``ExecutionGraph`` is a dataflow DAG of :class:`Node`s connected by named tensor
 ids. ``DigitalScheduler`` runs it: it topologically orders the nodes (real
 dependency ordering with cycle detection — not just insertion order), validates
@@ -24,6 +25,8 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
@@ -97,10 +100,12 @@ class ExecutionGraph:
                 indeg[n.id] += 1
 
         by_id = {n.id: n for n in self.nodes}
-        ready = [nid for nid, d in indeg.items() if d == 0]
+        # deque.popleft() is O(1); list.pop(0) was O(n) — matters for wide
+        # graphs where the ready set can be large.
+        ready: deque = deque(nid for nid, d in indeg.items() if d == 0)
         order: List[Node] = []
         while ready:
-            nid = ready.pop(0)
+            nid = ready.popleft()
             order.append(by_id[nid])
             for m in adj[nid]:
                 indeg[m] -= 1
@@ -448,12 +453,14 @@ class DigitalScheduler:
 
         _check_budget("for the initial tensors")
 
-        for node in graph.topological_order():
-            spec = get_spec(node.opcode)          # -> InvalidOpcodeError if unknown
+        def _run_node(node: Node) -> None:
+            """Execute one node and write its outputs into *tensors* in-place."""
+            spec = get_spec(node.opcode)
             if spec.is_hardware_execution:
                 raise GPUError(
                     f"{spec.key} is marked is_hardware_execution=True but no real "
-                    f"hardware backend is attached; refusing to run it on the Digital GPU engine.")
+                    f"hardware backend is attached; refusing to run it on the "
+                    f"Digital GPU engine.")
             fn = self._dispatch.get(spec.name)
             if fn is None:
                 raise InvalidOpcodeError(
@@ -468,15 +475,12 @@ class DigitalScheduler:
             for name, tid in node.outputs.items():
                 arr = outs[name]
                 tensors[tid] = arr
-                sizes[tid] = int(np.asarray(arr).nbytes)   # replace-on-write
-            _check_budget(f"after {spec.key}")
+                sizes[tid] = int(np.asarray(arr).nbytes)
 
             if self.telemetry is not None:
                 _flops, _flops_unknown = _derived_flops(spec, ins)
                 if _flops_unknown:
                     self._flop_derive_errors += 1
-                # bytes_moved = inputs + outputs = total DRAM traffic (roofline
-                # convention: read + write, not just read).
                 bytes_in = sum(np.asarray(v).nbytes for v in ins.values())
                 bytes_out = sum(np.asarray(v).nbytes for v in outs.values())
                 self.telemetry.record(
@@ -487,4 +491,42 @@ class DigitalScheduler:
                     flops_unknown=_flops_unknown,
                     bytes_moved=bytes_in + bytes_out,
                 )
+
+        # Nodes marked stream > 0 that are consecutive in topological order
+        # and have no data dependency between each other within the wave can
+        # execute concurrently.  Stream-0 nodes (the default) always run
+        # serially as barriers to preserve the original execution semantics for
+        # callers that don't set a stream.
+        wave: List[Node] = []
+
+        def _flush_wave() -> None:
+            if not wave:
+                return
+            if len(wave) == 1:
+                _run_node(wave[0])
+            else:
+                # Parallel dispatch — each node writes disjoint output tensor
+                # ids (validated by _validate() above; shared outputs are
+                # rejected at graph-build time).
+                errors: dict = {}
+                with ThreadPoolExecutor(max_workers=len(wave)) as pool:
+                    futs = {pool.submit(_run_node, n): n for n in wave}
+                    for fut in as_completed(futs):
+                        exc = fut.exception()
+                        if exc is not None:
+                            errors[futs[fut].id] = str(exc)
+                if errors:
+                    raise GPUError(
+                        f"Parallel stream execution errors: {errors}")
+            wave.clear()
+
+        for node in graph.topological_order():
+            if node.stream > 0:
+                wave.append(node)
+            else:
+                _flush_wave()
+                _run_node(node)
+            _check_budget(f"after {node.id}")
+
+        _flush_wave()
         return tensors

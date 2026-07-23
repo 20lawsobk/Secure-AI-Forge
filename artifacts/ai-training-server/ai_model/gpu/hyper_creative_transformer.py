@@ -33,7 +33,10 @@ from ai_model.gpu.hyper_backend import (
     _HyperLayerNorm,
     _HyperSiLU,
 )
+from typing import Optional
+
 from ai_model.model.transformer import (
+    KVCache,
     precompute_rope_freqs,
     apply_rope,
     apply_rope_offset,
@@ -160,6 +163,8 @@ class HyperRoPESelfAttention(nn.Module):
     def decode_one(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
                    past_k: torch.Tensor, past_v: torch.Tensor,
                    key_padding_mask: torch.Tensor | None = None,
+                   _kv_buf: Optional[tuple] = None,
+                   _write_pos: Optional[int] = None,
                    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         offset = past_k.shape[2]
         B, T, C = x.shape  # T == 1
@@ -174,8 +179,17 @@ class HyperRoPESelfAttention(nn.Module):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        k_cat = torch.cat([past_k, k], dim=2)
-        v_cat = torch.cat([past_v, v], dim=2)
+        if _kv_buf is not None and _write_pos is not None:
+            # In-place write into the pre-allocated KVCache buffers — same
+            # optimisation as TransformerLM: no torch.cat allocation.
+            k_buf, v_buf = _kv_buf
+            k_buf[:, :, _write_pos:_write_pos + 1, :] = k
+            v_buf[:, :, _write_pos:_write_pos + 1, :] = v
+            k_cat = k_buf[:, :, :_write_pos + 1, :]
+            v_cat = v_buf[:, :, :_write_pos + 1, :]
+        else:
+            k_cat = torch.cat([past_k, k], dim=2)
+            v_cat = torch.cat([past_v, v], dim=2)
 
         attn = (q @ k_cat.transpose(-2, -1)) * self.scale
         if key_padding_mask is not None:
@@ -226,9 +240,11 @@ class HyperTransformerDecoderLayer(nn.Module):
         x = x + self.drop(self.ffn(self.ln2(x)))
         return x, k, v
 
-    def decode_one(self, x, cos, sin, past_k, past_v, key_padding_mask=None):
+    def decode_one(self, x, cos, sin, past_k, past_v, key_padding_mask=None,
+                   _kv_buf=None, _write_pos=None):
         attn_out, new_k, new_v = self.attn.decode_one(
-            self.ln1(x), cos, sin, past_k, past_v, key_padding_mask)
+            self.ln1(x), cos, sin, past_k, past_v, key_padding_mask,
+            _kv_buf=_kv_buf, _write_pos=_write_pos)
         x = x + attn_out
         x = x + self.ffn(self.ln2(x))
         return x, new_k, new_v
@@ -320,10 +336,27 @@ class HyperCreativeTransformerLM(nn.Module):
         return self._head(h), kv_cache
 
     def decode_one(self, x_new: torch.Tensor,
-                   kv_cache: list[tuple[torch.Tensor, torch.Tensor]],
+                   kv_cache,
                    key_padding_mask: torch.Tensor | None = None,
-                   ) -> tuple[torch.Tensor, list]:
+                   ) -> tuple[torch.Tensor, object]:
         h = self.token_emb(x_new)
+
+        if isinstance(kv_cache, KVCache):
+            # Fast path: in-place KVCache — eliminates torch.cat per layer.
+            write_pos = kv_cache._len
+            for i, layer in enumerate(self.layers):
+                past_k, past_v = kv_cache[i]
+                h, _, _ = layer.decode_one(
+                    h, self.rope_cos, self.rope_sin, past_k, past_v,
+                    key_padding_mask,
+                    _kv_buf=(kv_cache._k[i], kv_cache._v[i]),
+                    _write_pos=write_pos,
+                )
+            kv_cache._len += 1
+            h = self.ln_final(h)
+            return self._head(h), kv_cache
+
+        # Original list-of-tuples path — backward compatible.
         new_cache: list[tuple[torch.Tensor, torch.Tensor]] = []
         for i, layer in enumerate(self.layers):
             past_k, past_v = kv_cache[i]

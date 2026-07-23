@@ -15,6 +15,11 @@ from ai_model.gpu.digital_gpu import (
 # half GEMM). Default off = dispatch straight to the FP32 BLAS SGEMM.
 _EMULATE_FP16 = os.environ.get("MAXCORE_EMULATE_FP16", "") == "1"
 
+# Module-level constant for GELU — computed once at import, not per-call.
+# np.float32 keeps the entire GELU expression in float32, preventing NumPy from
+# silently upcasting to float64 when mixed with Python float literals.
+_GELU_C = np.float32(np.sqrt(2.0 / np.pi))  # ≈ 0.7978845608
+
 
 class PrecisionMode(Enum):
     FP32 = auto()
@@ -115,11 +120,25 @@ class MemoryPool:
     _current_bytes: int = 0
     _alloc_count: int = 0
     _reuse_count: int = 0
+    # Shape-keyed pool of live numpy arrays waiting for reuse.
+    # Key: (shape_tuple, dtype_str) → list of zeroed arrays with that shape.
+    # Populated by free(); drained by alloc() when a matching shape exists.
+    # This eliminates the GC pressure and mmap syscall overhead of creating a
+    # new np.zeros() on every alloc() call (the previous _free_list only stored
+    # handle IDs of already-deleted arrays, so it was never actually consulted).
+    _shape_pool: Dict = field(default_factory=dict)
 
     def alloc(self, shape: Tuple, dtype=np.float32) -> Tuple[int, np.ndarray]:
         with self._lock:
             nbytes = int(np.prod(shape)) * np.dtype(dtype).itemsize
-            arr = np.zeros(shape, dtype=dtype)
+            pool_key = (tuple(shape), np.dtype(dtype).str)
+            recycled = self._shape_pool.get(pool_key)
+            if recycled:
+                arr = recycled.pop()
+                arr.fill(0)   # clear before reuse (same semantics as np.zeros)
+                self._reuse_count += 1
+            else:
+                arr = np.zeros(shape, dtype=dtype)
             mid = self._next_id
             self._next_id += 1
             self._allocated[mid] = arr
@@ -132,7 +151,13 @@ class MemoryPool:
     def free(self, mid: int):
         with self._lock:
             if mid in self._allocated:
-                nbytes = self._allocated[mid].nbytes
+                arr = self._allocated[mid]
+                nbytes = arr.nbytes
+                # Return array to the shape pool so the next alloc with the
+                # same (shape, dtype) can reuse it without a new allocation.
+                pool_key = (arr.shape, arr.dtype.str)
+                bucket = self._shape_pool.setdefault(pool_key, [])
+                bucket.append(arr)
                 self._current_bytes -= nbytes
                 del self._allocated[mid]
                 self._free_list.append(mid)
@@ -246,6 +271,16 @@ class HyperSIMDCore(SIMDCore):
         # O(Tq * block_size) instead of O(Tq * Tk); the result is identical to
         # full softmax attention (verified to ~1e-15 vs the naive reference).
         # Iterating over Tk (not Tq) preserves general cross-attention support.
+        # Adaptive tiling: for long KV sequences reduce Python outer-loop
+        # iterations by widening the block.  Each iteration does O(Tq*bs*D)
+        # BLAS work; a 2× wider block halves iteration count at the cost of
+        # 2× more score memory per block — still far less than the O(Tq*Tk)
+        # full-score-matrix that naive attention materialises.
+        # Short sequences (Tk ≤ bs) already run in a single iteration; this
+        # only fires when the sequence is long enough to benefit.
+        if Tk >= 256 and bs < 128:
+            bs = min(128, Tk)
+
         Qf: np.ndarray = Q.astype(np.float32, copy=False)
         Kf: np.ndarray = K.astype(np.float32, copy=False)
         Vf: np.ndarray = V.astype(np.float32, copy=False)
@@ -360,9 +395,16 @@ class HyperSIMDCore(SIMDCore):
         self, X: np.ndarray, gamma: np.ndarray, beta: np.ndarray,
         eps: float = 1e-5,
     ) -> np.ndarray:
+        # Reuse the centred difference for both variance and normalization.
+        # Previous code called X.mean() explicitly, then X.var() — which
+        # internally calls X.mean() again (two full passes over X).  Then
+        # (X - mean) was a third pass.  Here we compute mean once, store
+        # diff = X - mean (one pass), compute variance from diff (one pass),
+        # and normalize diff in-place (one pass) — 3 passes total vs 5.
         mean = X.mean(axis=-1, keepdims=True)
-        var = X.var(axis=-1, keepdims=True)
-        X_norm = (X - mean) / np.sqrt(var + eps)
+        diff = X - mean                                       # pass 1
+        var = (diff * diff).mean(axis=-1, keepdims=True)      # pass 2: Var = E[diff²]
+        X_norm = diff * (var + eps) ** np.float32(-0.5)       # pass 3: normalise
         self._total_ops += 1
         return gamma * X_norm + beta
 
@@ -410,21 +452,52 @@ class HyperSIMDCore(SIMDCore):
         return out, running_mean, running_var
 
     def gelu(self, X: np.ndarray) -> np.ndarray:
+        # Improvements over the original expression:
+        # 1. _GELU_C is a module-level float32 constant (computed once at import,
+        #    not re-evaluated via np.sqrt every call).
+        # 2. X*X*X (two multiplications) replaces X**3 (Python pow dispatch).
+        # 3. Explicit float32 scalars prevent NumPy from upcasting the entire
+        #    expression to float64, which would double memory traffic and compute.
+        Xf = X.astype(np.float32, copy=False)
+        x3 = Xf * Xf * Xf
+        inner = _GELU_C * (Xf + np.float32(0.044715) * x3)
         self._total_ops += 1
-        return 0.5 * X * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (X + 0.044715 * X ** 3)))
+        return np.float32(0.5) * Xf * (np.float32(1.0) + np.tanh(inner))
 
     def silu(self, X: np.ndarray) -> np.ndarray:
+        # Explicit float32 cast and scalars prevent NumPy from upcasting to
+        # float64.  Negative sign applied via np.negative (one allocation)
+        # rather than the unary minus on X (which would create a float64 copy
+        # if X is float32 and -X triggers a broadcast).
+        Xf = X.astype(np.float32, copy=False)
+        sig = np.float32(1.0) / (np.float32(1.0) + np.exp(np.negative(Xf)))
         self._total_ops += 1
-        return X * (1.0 / (1.0 + np.exp(-X)))
+        return Xf * sig
 
     def grouped_gemm(
         self, A_list: List[np.ndarray], B_list: List[np.ndarray],
     ) -> List[np.ndarray]:
         if len(A_list) != len(B_list):
             raise ShapeError("grouped_gemm: mismatched group count")
-        results = []
-        for A, B in zip(A_list, B_list):
-            results.append(self.tensor_core_gemm(A, B))
+        if not A_list:
+            self._total_ops += 1
+            return []
+        # When every group shares the same shape we can stack the operands and
+        # dispatch a single batched GEMM — one BLAS call, no Python per-group
+        # loop.  The per-group tensor_core_gemm loop was O(G) Python iterations
+        # each carrying interpreter + time.perf_counter overhead.
+        shapes_uniform = (
+            all(A.shape == A_list[0].shape for A in A_list) and
+            all(B.shape == B_list[0].shape for B in B_list)
+        )
+        if shapes_uniform:
+            A_stack = np.stack([A.astype(np.float32, copy=False) for A in A_list])
+            B_stack = np.stack([B.astype(np.float32, copy=False) for B in B_list])
+            C_stack = np.matmul(A_stack, B_stack)  # [G, M, N] — single dispatch
+            results = [C_stack[i] for i in range(len(A_list))]
+        else:
+            # Heterogeneous shapes: fall back to per-group tensor-core dispatch.
+            results = [self.tensor_core_gemm(A, B) for A, B in zip(A_list, B_list)]
         self._total_ops += 1
         return results
 

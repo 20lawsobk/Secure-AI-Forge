@@ -136,13 +136,17 @@ class _HyperConv2d(torch.autograd.Function):
         else:
             X_padded = X
 
-        grad_W = torch.zeros_like(W)
-        for b in range(B):
-            for i in range(H_out):
-                for j in range(W_out):
-                    patch = X_padded[b, :, i*stride:i*stride+kH, j*stride:j*stride+kW]
-                    for co in range(C_out):
-                        grad_W[co] += grad_output[b, co, i, j] * patch
+        # Vectorized grad_W via unfold + einsum — replaces the previous
+        # quadruple Python loop (B × H_out × W_out × C_out iterations).
+        # torch.nn.functional.unfold extracts all C_in*kH*kW patch columns at
+        # once: X_unfold [B, C_in*kH*kW, H_out*W_out].  A single einsum then
+        # computes the outer-product sum over (batch, spatial) in one BLAS call.
+        X_unfold = torch.nn.functional.unfold(
+            X_padded.float(), (kH, kW), stride=stride
+        )  # [B, C_in*kH*kW, H_out*W_out]
+        grad_output_r = grad_output.reshape(B, C_out, -1)  # [B, C_out, H_out*W_out]
+        # grad_W[co, cin_k] = Σ_{b,p} grad_r[b,co,p] * X_unfold[b,cin_k,p]
+        grad_W = torch.einsum('bcp,bkp->ck', grad_output_r, X_unfold).view_as(W)
 
         return grad_X, grad_W, None, None, None
 
@@ -171,27 +175,44 @@ class _HyperConv3d(torch.autograd.Function):
             slices = tuple(slice(0, s) for s in X.shape)
             grad_X = grad_X[slices]
 
-        grad_W = torch.zeros_like(W)
         B = grad_output.shape[0]
         C_out = W.shape[0]
         kD, kH, kW = W.shape[2], W.shape[3], W.shape[4]
         sd, sh, sw = stride
-
         pd, ph, pw = padding
+
         if any(p > 0 for p in padding):
             X_padded = torch.nn.functional.pad(X, (pw, pw, ph, ph, pd, pd))
         else:
             X_padded = X
 
-        D_out, H_out, W_out = grad_output.shape[2], grad_output.shape[3], grad_output.shape[4]
+        D_out, H_out, W_out = (
+            grad_output.shape[2], grad_output.shape[3], grad_output.shape[4]
+        )
 
-        for b in range(B):
-            for d in range(D_out):
-                for i in range(H_out):
-                    for j in range(W_out):
-                        patch = X_padded[b, :, d*sd:d*sd+kD, i*sh:i*sh+kH, j*sw:j*sw+kW]
-                        for co in range(C_out):
-                            grad_W[co] += grad_output[b, co, d, i, j] * patch
+        # Vectorized grad_W via 3-D im2col (stride_tricks) + einsum — replaces
+        # the previous quintuple Python loop (B×D_out×H_out×W_out×C_out).
+        # We reuse the same as_strided im2col trick from the forward kernel so
+        # there is no new dependency.  The result is one np.einsum call backed
+        # by BLAS instead of millions of tiny Python tensor additions.
+        X_np = np.ascontiguousarray(
+            X_padded.detach().numpy().astype(np.float32)
+        )
+        _, C_in, *_ = X_np.shape
+        s = X_np.strides
+        patches = np.lib.stride_tricks.as_strided(
+            X_np,
+            shape=(B, C_in, kD, kH, kW, D_out, H_out, W_out),
+            strides=(s[0], s[1], s[2], s[3], s[4],
+                     s[2] * sd, s[3] * sh, s[4] * sw),
+        )
+        # cols: [B, C_in*kD*kH*kW, D_out*H_out*W_out]
+        cols = patches.reshape(B, C_in * kD * kH * kW, D_out * H_out * W_out)
+        # grad_output: [B, C_out, D_out*H_out*W_out]
+        go_r = grad_output.detach().numpy().astype(np.float32).reshape(B, C_out, -1)
+        # grad_W_col[co, cin_k] = Σ_{b,p} go_r[b,co,p] * cols[b,cin_k,p]
+        grad_W_col = np.einsum('bcp,bkp->ck', go_r, cols)
+        grad_W = torch.from_numpy(grad_W_col).view_as(W)
 
         return grad_X, grad_W, None, None, None
 
