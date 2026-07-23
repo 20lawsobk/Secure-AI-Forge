@@ -30,14 +30,33 @@ except Exception:  # pragma: no cover - exercised only if repo layout changes
     _dedup = None
 
 
+_DEDUP_SHARDS = 256   # shard count; last-2-hex of sha256 key → 0-255
+
+
 class _FallbackDedup:
     """In-process mirror of the dedup_cache API, used only if the real module
-    cannot be imported. Mirrors its contract: only dict values are stored."""
+    cannot be imported.  Mirrors its contract: only dict values are stored.
+
+    256-shard implementation: keys are sha256 hex digests so the last two hex
+    characters give a perfectly uniform 0-255 shard index.  Concurrent get/put
+    for *different* keys acquire *different* shard locks and never block each
+    other — critical for 90 000-concurrent-request workloads where every unique
+    request performs one dedup lookup per generation call.
+    """
 
     def __init__(self) -> None:
-        self._d: dict[str, tuple[dict, float]] = {}
-        self._stats = {"hits": 0, "misses": 0, "stores": 0, "errors": 0}
-        self._lock = threading.Lock()
+        self._shards: list[dict[str, tuple[dict, float]]] = [
+            {} for _ in range(_DEDUP_SHARDS)
+        ]
+        self._locks = [threading.Lock() for _ in range(_DEDUP_SHARDS)]
+        # Stats use a separate lightweight lock — never held during data access.
+        self._stats      = {"hits": 0, "misses": 0, "stores": 0, "errors": 0}
+        self._stats_lock = threading.Lock()
+
+    @staticmethod
+    def _idx(key: str) -> int:
+        """Shard index from the last two hex chars of a sha256 digest key."""
+        return int(key[-2:], 16)   # 0x00-0xFF, O(1), no extra hash
 
     def key_for(self, namespace: str, req: Any) -> Optional[str]:
         try:
@@ -49,23 +68,30 @@ class _FallbackDedup:
     def get(self, key: Optional[str]) -> Optional[dict]:
         if not key:
             return None
-        with self._lock:
-            item = self._d.get(key)
-            if item and item[1] > time.time():
+        idx = self._idx(key)
+        now = time.time()
+        with self._locks[idx]:
+            item = self._shards[idx].get(key)
+            hit  = item is not None and item[1] > now
+            val  = item[0] if hit else None
+        with self._stats_lock:
+            if hit:
                 self._stats["hits"] += 1
-                return item[0]
-            self._stats["misses"] += 1
-            return None
+            else:
+                self._stats["misses"] += 1
+        return val
 
     def put(self, key: Optional[str], value: Any, ttl: Optional[int] = None) -> None:
         if not key or not isinstance(value, dict):
             return
-        with self._lock:
-            self._d[key] = (value, time.time() + (ttl or 3600))
+        idx = self._idx(key)
+        with self._locks[idx]:
+            self._shards[idx][key] = (value, time.time() + (ttl or 3600))
+        with self._stats_lock:
             self._stats["stores"] += 1
 
     def stats(self) -> dict:
-        with self._lock:
+        with self._stats_lock:
             h, m = self._stats["hits"], self._stats["misses"]
             total = h + m
             return {**self._stats, "hit_rate": round(h / total, 3) if total else 0.0}
