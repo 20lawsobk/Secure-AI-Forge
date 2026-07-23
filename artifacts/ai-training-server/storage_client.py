@@ -31,14 +31,18 @@ STORAGE_INSTANCE = os.getenv("STORAGE_INSTANCE", "max-booster-training")
 
 KEY_PREFIX = "mb:"
 
-# ─── Connection pool ──────────────────────────────────────────────────────────
-# urllib3 HTTP/1.1 with a large pool is the right choice for high-throughput
-# server-to-server K/V lookups.  HTTP/2 multiplexing funnels all threads onto
-# one connection; the remote server then serialises streams on it, which is
-# slower than 64 truly-independent HTTP/1.1 connections that the server handles
-# in parallel.  maxsize=64 means up to 64 concurrent requests are in-flight
-# simultaneously with zero queuing at the pool level.
+# ─── Connection pools ────────────────────────────────────────────────────────
+# Main pool: high-throughput SET/GET/LPUSH traffic.  read=8 s keeps individual
+# storage calls snappy; we fall back to the disk store on a miss anyway.
+#
+# Ping pool: dedicated single connection used exclusively by health checks.
+# Kept separate so a saturated main pool (64 connections in-flight) can never
+# starve the health check, and so we can use a longer read timeout (20 s)
+# without slowing down normal traffic.  Replit deployments can take 5–15 s to
+# serve the first request after a cold wake; 8 s is too short and causes the
+# server to declare pdim "offline" for the entire wakeup window.
 _pool_manager: Any = None
+_ping_pool_manager: Any = None
 _pool_lock = threading.Lock()
 
 
@@ -55,6 +59,23 @@ def _get_pool() -> Any:
                     headers={"Content-Type": "application/json"},
                 )
     return _pool_manager
+
+
+def _get_ping_pool() -> Any:
+    """Dedicated 1-connection pool for PING health checks with a 20 s read
+    timeout so pdim cold-wake responses (5–15 s) don't look like hangs."""
+    global _ping_pool_manager
+    if _ping_pool_manager is None and _HAS_URLLIB3:
+        with _pool_lock:
+            if _ping_pool_manager is None:
+                _ping_pool_manager = urllib3.PoolManager(
+                    num_pools=1,
+                    maxsize=1,
+                    timeout=urllib3.Timeout(connect=5, read=20),
+                    retries=urllib3.Retry(total=0),
+                    headers={"Content-Type": "application/json"},
+                )
+    return _ping_pool_manager
 
 
 class _DiskStore:
@@ -271,8 +292,42 @@ class StorageClient:
         return f"{KEY_PREFIX}{key}"
 
     def ping(self) -> bool:
-        result = self._exec("PING")
-        return str(result).upper() == "PONG"
+        """Health-check PING using the dedicated long-timeout ping pool.
+
+        Bypasses the main pool so (a) saturated main-pool connections never
+        starve the health check, and (b) the 20 s read timeout lets us survive
+        pdim cold-wake latency (5–15 s) without false negatives.
+        """
+        if not self._url or not self._token:
+            return False
+        payload = json.dumps({"cmd": "PING"}).encode("utf-8")
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Content-Type": "application/json",
+        }
+        pool = _get_ping_pool()
+        if pool is not None:
+            try:
+                resp = pool.request("POST", self._url, body=payload, headers=headers)
+                body = resp.data.decode("utf-8").strip()
+                parsed = json.loads(body) if body else {}
+                result = parsed.get("result") if isinstance(parsed, dict) else parsed
+                return str(result).upper() == "PONG"
+            except Exception as e:
+                logger.debug("[Storage] ping (urllib3) failed: %s", e)
+                return False
+        # urllib3 unavailable — fall back to stdlib with same long timeout
+        from urllib.request import urlopen, Request as _Req
+        req = _Req(self._url, data=payload, headers=headers, method="POST")
+        try:
+            with urlopen(req, timeout=20) as resp:
+                body = resp.read().decode("utf-8").strip()
+                parsed = json.loads(body) if body else {}
+                result = parsed.get("result") if isinstance(parsed, dict) else parsed
+                return str(result).upper() == "PONG"
+        except Exception as e:
+            logger.debug("[Storage] ping (urllib) failed: %s", e)
+            return False
 
     def _periodic_health_check(self):
         while True:
@@ -287,13 +342,11 @@ class StorageClient:
                         self._flush_fallback_to_storage()
             except Exception:
                 self._available = False
-            # Probe frequently while offline: pdim has its own stay-alive and
-            # recovers quickly, so we want to detect and reconnect within one
-            # probe window (~10 s) rather than waiting the full 30 s.
-            # When live the flywheels generate constant traffic, so any failure
-            # surfaces immediately via _exec returning None; the thread can back
-            # off to 60 s without missing a real outage.
-            time.sleep(10 if not self._available else 60)
+            # Probe every 5 s while offline so we catch pdim coming back online
+            # (or finishing its cold wake) within one probe window.
+            # Back off to 60 s when live — constant traffic from the flywheels
+            # means any real outage surfaces via _exec → None immediately anyway.
+            time.sleep(5 if not self._available else 60)
 
     def _flush_fallback_to_storage(self) -> None:
         """Re-sync in-memory and disk fallback data to pdim after reconnect."""

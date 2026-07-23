@@ -1667,15 +1667,29 @@ def _init_storage():
     global _asset_index, _coverage_watchdog
     from storage_client import get_storage
     storage = get_storage()
-    ok = storage.ping()
+
+    # Retry the startup ping up to 4 times with 5 s delays (20 s total window).
+    # pdim is an external Replit deployment that can take 5–15 s to serve its
+    # first request after a cold wake.  A single failed ping at process start
+    # would leave storage "offline" until the periodic health-check thread
+    # recovers it — now we give it a fair chance before falling back.
+    ok = False
     global _storage_mode
+    for _attempt in range(4):
+        ok = storage.ping()
+        if ok:
+            break
+        if _attempt < 3:
+            print(f"[Storage] Startup ping attempt {_attempt + 1}/4 failed — retrying in 5 s")
+            time.sleep(5)
+
     if ok:
         _storage_mode = "live"
         print("[Storage] Connected to MaxBooster storage server")
         _load_checkpoint_from_storage()
     else:
         _storage_mode = "local_fallback" if storage.disk_store_available else "offline"
-        print(f"[Storage] Storage server offline — using in-process fallback (mode={_storage_mode})")
+        print(f"[Storage] Storage server offline after 4 attempts — using in-process fallback (mode={_storage_mode})")
 
     # ── Audio manifest reconciliation (runs on every boot, cheap when healthy)
     _reconcile_audio_manifest(storage)

@@ -51,6 +51,25 @@ old-env standby Python can grab the lock. Verify with
 `curl -H "X-Admin-Key: $ADMIN_KEY" localhost:9878/storage/status` → `available:true`
 and the expected `instance` name.
 
+# Ping pool must be separate from the main request pool
+
+`StorageClient` uses a dedicated `_ping_pool_manager` (1 connection, `read=20s`) for
+`ping()` / `_periodic_health_check`, separate from the main pool (64 connections,
+`read=8s`). This is required for two reasons:
+
+1. **Cold-wake latency**: Replit deployments take 5–15 s on first request after idle.
+   An 8 s read timeout fires during that window, marking pdim "offline" for the entire
+   cold-wake period. The 20 s ping pool survives it.
+2. **Pool saturation**: Under load the 64-connection main pool can be fully occupied.
+   A dedicated 1-connection ping pool can never be starved by request traffic.
+
+`_init_storage()` in `server.py` retries the startup ping 4× with 5 s delays (20 s
+total) before falling back to local mode — gives pdim a fair chance to cold-wake before
+we declare it offline at boot.
+
+`_periodic_health_check` sleeps 5 s (not 10 s) when offline so cold-wake detection
+happens within one probe window.
+
 # Whole-app hang ≠ token mismatch
 
 A second, distinct failure mode (seen 2026-07-08): **every** route on
