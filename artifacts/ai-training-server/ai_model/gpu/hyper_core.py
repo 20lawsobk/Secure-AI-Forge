@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from ai_model.gpu.digital_gpu import (
     GPUError, ShapeError, SIMDCore, VRAM
 )
+from ai_model.gpu.native.kernels import get_native_kernels
 
 # Numerics-reference switch: when set, mixed-precision GEMMs round operands to
 # bit-level FP16 before the FP32-accumulate product (slower on CPU; BLAS has no
@@ -211,6 +212,12 @@ class HyperSIMDCore(SIMDCore):
         self._mem_pool = MemoryPool()
         self._profile_data: Dict[str, float] = {}
         self._total_ops = 0
+        # Compiled native SIMD kernels (gelu, silu, layernorm_rows, etc.).
+        # These are the GPU's own fused compute primitives — compiled C with
+        # AVX-512 + OpenMP, with a numpy never-raise fallback if gcc is absent.
+        # Loaded once at construction so all kernel calls go through the GPU
+        # stack rather than ad-hoc numpy expressions.
+        self._native = get_native_kernels()
 
     def _select_tensor_core(self) -> TensorCoreUnit:
         return min(self.tensor_core_units, key=lambda tc: tc.ops_executed)
@@ -395,18 +402,23 @@ class HyperSIMDCore(SIMDCore):
         self, X: np.ndarray, gamma: np.ndarray, beta: np.ndarray,
         eps: float = 1e-5,
     ) -> np.ndarray:
-        # Reuse the centred difference for both variance and normalization.
-        # Previous code called X.mean() explicitly, then X.var() — which
-        # internally calls X.mean() again (two full passes over X).  Then
-        # (X - mean) was a third pass.  Here we compute mean once, store
-        # diff = X - mean (one pass), compute variance from diff (one pass),
-        # and normalize diff in-place (one pass) — 3 passes total vs 5.
-        mean = X.mean(axis=-1, keepdims=True)
-        diff = X - mean                                       # pass 1
-        var = (diff * diff).mean(axis=-1, keepdims=True)      # pass 2: Var = E[diff²]
-        X_norm = diff * (var + eps) ** np.float32(-0.5)       # pass 3: normalise
+        # Route through the compiled native SIMD layernorm_rows kernel — a
+        # fused single-pass AVX-512 + OpenMP implementation that is the GPU
+        # stack's own compute primitive for normalization.  layernorm_rows
+        # expects [rows, cols] 2-D input, so we reshape, run, and restore.
+        Xf = X.astype(np.float32, copy=False)
+        orig_shape = Xf.shape
+        cols = orig_shape[-1]
+        rows = int(np.prod(orig_shape[:-1])) if Xf.ndim > 1 else 1
+        X2d = Xf.reshape(rows, cols)
+        out2d = self._native.layernorm_rows(
+            X2d,
+            gamma.astype(np.float32, copy=False).ravel(),
+            beta.astype(np.float32, copy=False).ravel(),
+            eps=eps,
+        )
         self._total_ops += 1
-        return gamma * X_norm + beta
+        return out2d.reshape(orig_shape)
 
     def batch_norm(
         self, X: np.ndarray, gamma: np.ndarray, beta: np.ndarray,
@@ -452,27 +464,22 @@ class HyperSIMDCore(SIMDCore):
         return out, running_mean, running_var
 
     def gelu(self, X: np.ndarray) -> np.ndarray:
-        # Improvements over the original expression:
-        # 1. _GELU_C is a module-level float32 constant (computed once at import,
-        #    not re-evaluated via np.sqrt every call).
-        # 2. X*X*X (two multiplications) replaces X**3 (Python pow dispatch).
-        # 3. Explicit float32 scalars prevent NumPy from upcasting the entire
-        #    expression to float64, which would double memory traffic and compute.
-        Xf = X.astype(np.float32, copy=False)
-        x3 = Xf * Xf * Xf
-        inner = _GELU_C * (Xf + np.float32(0.044715) * x3)
+        # Route through the compiled native SIMD gelu kernel — a fused
+        # AVX-512 loop using a Cephes-style polynomial tanh that auto-
+        # vectorizes and never materializes the intermediate cube or inner
+        # product as separate numpy temporaries.  Shape-agnostic: NativeKernels
+        # flattens to a contiguous float* and restores the original shape.
+        out = self._native.gelu(X.astype(np.float32, copy=False))
         self._total_ops += 1
-        return np.float32(0.5) * Xf * (np.float32(1.0) + np.tanh(inner))
+        return out.reshape(X.shape)
 
     def silu(self, X: np.ndarray) -> np.ndarray:
-        # Explicit float32 cast and scalars prevent NumPy from upcasting to
-        # float64.  Negative sign applied via np.negative (one allocation)
-        # rather than the unary minus on X (which would create a float64 copy
-        # if X is float32 and -X triggers a broadcast).
-        Xf = X.astype(np.float32, copy=False)
-        sig = np.float32(1.0) / (np.float32(1.0) + np.exp(np.negative(Xf)))
+        # Route through the compiled native SIMD silu kernel — a fused
+        # x/(1+exp(-x)) loop with the same Cephes fast_expf used by gelu,
+        # eliminating the two-pass numpy sigmoid (exp + division).
+        out = self._native.silu(X.astype(np.float32, copy=False))
         self._total_ops += 1
-        return Xf * sig
+        return out.reshape(X.shape)
 
     def grouped_gemm(
         self, A_list: List[np.ndarray], B_list: List[np.ndarray],
@@ -493,7 +500,9 @@ class HyperSIMDCore(SIMDCore):
         if shapes_uniform:
             A_stack = np.stack([A.astype(np.float32, copy=False) for A in A_list])
             B_stack = np.stack([B.astype(np.float32, copy=False) for B in B_list])
-            C_stack = np.matmul(A_stack, B_stack)  # [G, M, N] — single dispatch
+            # Route through the GPU's own batched_gemm — runs through
+            # TensorCoreUnit op accounting and stays in the GPU stack.
+            C_stack = self.batched_gemm(A_stack, B_stack)  # [G, M, N]
             results = [C_stack[i] for i in range(len(A_list))]
         else:
             # Heterogeneous shapes: fall back to per-group tensor-core dispatch.

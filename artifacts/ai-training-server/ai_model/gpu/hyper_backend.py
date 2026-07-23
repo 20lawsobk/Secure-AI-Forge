@@ -120,33 +120,62 @@ class _HyperConv2d(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         X, W = ctx.saved_tensors
+        gpu = ctx.gpu
         stride = ctx.stride
         padding = ctx.padding
 
-        grad_X = torch.nn.functional.conv_transpose2d(
-            grad_output, W, stride=stride, padding=padding,
-        )
-        if grad_X.shape != X.shape:
-            grad_X = grad_X[:, :, :X.shape[2], :X.shape[3]]
-
         B, C_out, H_out, W_out = grad_output.shape
         _, C_in, kH, kW = W.shape
-        if padding > 0:
-            X_padded = torch.nn.functional.pad(X, (padding, padding, padding, padding))
-        else:
-            X_padded = X
 
-        # Vectorized grad_W via unfold + einsum — replaces the previous
-        # quadruple Python loop (B × H_out × W_out × C_out iterations).
-        # torch.nn.functional.unfold extracts all C_in*kH*kW patch columns at
-        # once: X_unfold [B, C_in*kH*kW, H_out*W_out].  A single einsum then
-        # computes the outer-product sum over (batch, spatial) in one BLAS call.
-        X_unfold = torch.nn.functional.unfold(
-            X_padded.float(), (kH, kW), stride=stride
-        )  # [B, C_in*kH*kW, H_out*W_out]
-        grad_output_r = grad_output.reshape(B, C_out, -1)  # [B, C_out, H_out*W_out]
-        # grad_W[co, cin_k] = Σ_{b,p} grad_r[b,co,p] * X_unfold[b,cin_k,p]
-        grad_W = torch.einsum('bcp,bkp->ck', grad_output_r, X_unfold).view_as(W)
+        go_np = np.ascontiguousarray(grad_output.detach().numpy().astype(np.float32))
+        W_np  = np.ascontiguousarray(W.detach().numpy().astype(np.float32))
+        X_np  = np.ascontiguousarray(X.detach().numpy().astype(np.float32))
+
+        # ── grad_X via conv_transpose on the Digital GPU ──────────────────
+        # Implement transposed conv: insert stride zeros, pad with (k-1-p),
+        # convolve with spatially-flipped, channel-transposed kernel.
+        # This keeps grad_X entirely within the Digital GPU's conv2d kernel.
+        if stride > 1:
+            H_exp = (H_out - 1) * stride + 1
+            W_exp = (W_out - 1) * stride + 1
+            expanded = np.zeros((B, C_out, H_exp, W_exp), dtype=np.float32)
+            expanded[:, :, ::stride, ::stride] = go_np
+        else:
+            expanded = go_np.copy()
+        ph = kH - 1 - padding
+        pw = kW - 1 - padding
+        if ph > 0 or pw > 0:
+            expanded = np.pad(expanded, ((0, 0), (0, 0), (ph, ph), (pw, pw)))
+        # [C_out, C_in, kH, kW] → flip spatial dims → transpose to [C_in, C_out, kH, kW]
+        W_flip = np.ascontiguousarray(W_np[:, :, ::-1, ::-1].transpose(1, 0, 2, 3))
+        grad_X_np = gpu.conv2d(expanded, W_flip, stride=1, padding=0)
+        H_x, W_x = X.shape[2], X.shape[3]
+        grad_X = torch.from_numpy(
+            np.ascontiguousarray(grad_X_np[:, :, :H_x, :W_x])
+        )
+
+        # ── grad_W via im2col + batched GEMM on the Digital GPU ──────────
+        # Re-run the same as_strided im2col used in the forward kernel, then
+        # dispatch [B, C_out, P] @ [B, P, K] as one GPU batched GEMM and sum
+        # over batch — no torch or np.einsum outside the GPU stack.
+        if padding > 0:
+            X_pad = np.pad(X_np, ((0,0),(0,0),(padding,padding),(padding,padding)))
+        else:
+            X_pad = X_np
+        X_pad = np.ascontiguousarray(X_pad)
+        s = X_pad.strides
+        shape   = (B, C_in, kH, kW, H_out, W_out)
+        strides = (s[0], s[1], s[2], s[3], s[2]*stride, s[3]*stride)
+        patches = np.lib.stride_tricks.as_strided(X_pad, shape=shape, strides=strides)
+        cols    = np.ascontiguousarray(patches.reshape(B, C_in*kH*kW, H_out*W_out))
+        go_r    = np.ascontiguousarray(go_np.reshape(B, C_out, H_out*W_out))
+        cols_t  = np.ascontiguousarray(cols.transpose(0, 2, 1))  # [B, P, K]
+        # GPU batched GEMM: [B, C_out, P] @ [B, P, K] → [B, C_out, K]
+        grad_W_batch = gpu.gemm_batched(go_r, cols_t)
+        grad_W_col   = grad_W_batch.sum(axis=0)                  # [C_out, C_in*kH*kW]
+        grad_W = torch.from_numpy(
+            np.ascontiguousarray(grad_W_col.reshape(W.shape))
+        )
 
         return grad_X, grad_W, None, None, None
 
@@ -166,53 +195,81 @@ class _HyperConv3d(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         X, W = ctx.saved_tensors
+        gpu = ctx.gpu
         stride = ctx.stride
         padding = ctx.padding
-        grad_X = torch.nn.functional.conv_transpose3d(
-            grad_output, W, stride=stride, padding=padding,
-        )
-        if grad_X.shape != X.shape:
-            slices = tuple(slice(0, s) for s in X.shape)
-            grad_X = grad_X[slices]
 
-        B = grad_output.shape[0]
+        B    = grad_output.shape[0]
         C_out = W.shape[0]
+        C_in  = W.shape[1]
         kD, kH, kW = W.shape[2], W.shape[3], W.shape[4]
         sd, sh, sw = stride
         pd, ph, pw = padding
-
-        if any(p > 0 for p in padding):
-            X_padded = torch.nn.functional.pad(X, (pw, pw, ph, ph, pd, pd))
-        else:
-            X_padded = X
-
         D_out, H_out, W_out = (
             grad_output.shape[2], grad_output.shape[3], grad_output.shape[4]
         )
 
-        # Vectorized grad_W via 3-D im2col (stride_tricks) + einsum — replaces
-        # the previous quintuple Python loop (B×D_out×H_out×W_out×C_out).
-        # We reuse the same as_strided im2col trick from the forward kernel so
-        # there is no new dependency.  The result is one np.einsum call backed
-        # by BLAS instead of millions of tiny Python tensor additions.
-        X_np = np.ascontiguousarray(
-            X_padded.detach().numpy().astype(np.float32)
+        go_np = np.ascontiguousarray(grad_output.detach().numpy().astype(np.float32))
+        W_np  = np.ascontiguousarray(W.detach().numpy().astype(np.float32))
+        X_np  = np.ascontiguousarray(X.detach().numpy().astype(np.float32))
+
+        # ── grad_X via conv_transpose on the Digital GPU ──────────────────
+        # Insert stride zeros, pad with (k-1-p), convolve with flipped+
+        # transposed kernel — mirrors the 2-D approach, keeping grad_X within
+        # the Digital GPU's conv3d kernel (no PyTorch CPU fallback).
+        if sd > 1 or sh > 1 or sw > 1:
+            D_exp = (D_out - 1) * sd + 1
+            H_exp = (H_out - 1) * sh + 1
+            W_exp = (W_out - 1) * sw + 1
+            expanded = np.zeros((B, C_out, D_exp, H_exp, W_exp), dtype=np.float32)
+            expanded[:, :, ::sd, ::sh, ::sw] = go_np
+        else:
+            expanded = go_np.copy()
+        epd = kD - 1 - pd
+        eph = kH - 1 - ph
+        epw = kW - 1 - pw
+        if epd > 0 or eph > 0 or epw > 0:
+            expanded = np.pad(expanded,
+                              ((0,0),(0,0),(epd,epd),(eph,eph),(epw,epw)))
+        # [C_out, C_in, kD, kH, kW] → flip spatial → transpose to [C_in, C_out, kD, kH, kW]
+        W_flip = np.ascontiguousarray(
+            W_np[:, :, ::-1, ::-1, ::-1].transpose(1, 0, 2, 3, 4)
         )
-        _, C_in, *_ = X_np.shape
-        s = X_np.strides
+        grad_X_np = gpu.conv3d(expanded, W_flip, stride=(1,1,1), padding=(0,0,0))
+        D_x, H_x, W_x = X.shape[2], X.shape[3], X.shape[4]
+        grad_X_np = np.ascontiguousarray(grad_X_np[:, :, :D_x, :H_x, :W_x])
+        grad_X = torch.from_numpy(grad_X_np)
+        if grad_X.shape != X.shape:
+            slices = tuple(slice(0, s) for s in X.shape)
+            grad_X = grad_X[slices]
+
+        # ── grad_W via 3-D im2col + batched GEMM on the Digital GPU ──────
+        # Same as_strided im2col used in the forward, then a single GPU
+        # batched GEMM [B, C_out, P] @ [B, P, K] summed over batch —
+        # no np.einsum or torch ops outside the GPU stack.
+        if any(p > 0 for p in padding):
+            X_pad = np.pad(X_np, ((0,0),(0,0),(pd,pd),(ph,ph),(pw,pw)))
+        else:
+            X_pad = X_np
+        X_pad = np.ascontiguousarray(X_pad)
+        s = X_pad.strides
         patches = np.lib.stride_tricks.as_strided(
-            X_np,
+            X_pad,
             shape=(B, C_in, kD, kH, kW, D_out, H_out, W_out),
             strides=(s[0], s[1], s[2], s[3], s[4],
-                     s[2] * sd, s[3] * sh, s[4] * sw),
+                     s[2]*sd, s[3]*sh, s[4]*sw),
         )
-        # cols: [B, C_in*kD*kH*kW, D_out*H_out*W_out]
-        cols = patches.reshape(B, C_in * kD * kH * kW, D_out * H_out * W_out)
-        # grad_output: [B, C_out, D_out*H_out*W_out]
-        go_r = grad_output.detach().numpy().astype(np.float32).reshape(B, C_out, -1)
-        # grad_W_col[co, cin_k] = Σ_{b,p} go_r[b,co,p] * cols[b,cin_k,p]
-        grad_W_col = np.einsum('bcp,bkp->ck', go_r, cols)
-        grad_W = torch.from_numpy(grad_W_col).view_as(W)
+        cols   = np.ascontiguousarray(
+            patches.reshape(B, C_in*kD*kH*kW, D_out*H_out*W_out)
+        )
+        go_r   = np.ascontiguousarray(go_np.reshape(B, C_out, -1))
+        cols_t = np.ascontiguousarray(cols.transpose(0, 2, 1))  # [B, P, K]
+        # GPU batched GEMM: [B, C_out, P] @ [B, P, K] → [B, C_out, K]
+        grad_W_batch = gpu.gemm_batched(go_r, cols_t)
+        grad_W_col   = grad_W_batch.sum(axis=0)                 # [C_out, K]
+        grad_W = torch.from_numpy(
+            np.ascontiguousarray(grad_W_col.reshape(W.shape))
+        )
 
         return grad_X, grad_W, None, None, None
 
