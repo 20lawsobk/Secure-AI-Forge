@@ -1,8 +1,206 @@
+import logging
 import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional
+
+_log = logging.getLogger(__name__)
+
+# ─── Digital GPU — module-level singleton (never-raise) ───────────────────────
+#
+# Every linear projection and layer-norm in this file routes through the in-house
+# HyperGPU kernel stack when it is available.  If the backend fails to import or
+# initialise for any reason the code transparently falls back to standard
+# torch.nn.Linear / nn.LayerNorm so generation never breaks.
+#
+# The global is lazily resolved on first use to avoid circular imports during
+# server start-up.
+
+_hyper_gpu = None      # HyperGPU instance, or None
+_gpu_ready  = False    # True once the backend initialised successfully
+_gpu_init_attempted = False
+
+
+def _ensure_gpu() -> bool:
+    """Initialise the HyperGPU singleton once; return whether it is available."""
+    global _hyper_gpu, _gpu_ready, _gpu_init_attempted
+    if _gpu_init_attempted:
+        return _gpu_ready
+    _gpu_init_attempted = True
+    try:
+        from ai_model.gpu.hyper_core import HyperGPU, PrecisionMode
+        _hyper_gpu = HyperGPU(lanes=512, tensor_cores=8,
+                               precision=PrecisionMode.MIXED)
+        _gpu_ready = True
+        _log.info("transformer: DigitalGPU backend active (HyperGPU tensor-core kernels)")
+    except Exception as exc:
+        _log.warning("transformer: DigitalGPU unavailable – falling back to torch "
+                     "(reason: %s)", exc)
+        _gpu_ready = False
+    return _gpu_ready
+
+
+def _make_linear(in_features: int, out_features: int,
+                 bias: bool = False) -> nn.Module:
+    """Return a HyperLinearNL (Digital GPU) if available, else nn.Linear."""
+    if _ensure_gpu():
+        try:
+            from ai_model.gpu.hyper_creative_transformer import HyperLinearNL
+            from ai_model.maxcore.observability import METRICS
+            lin = HyperLinearNL(in_features, out_features, _hyper_gpu, bias=bias)
+            # Wrap forward to count ops in the shared METRICS registry so that
+            # probe_gpu_routing() can verify routing via snapshot() delta.
+            _orig_fwd = lin.forward
+            def _tracked_forward(x: torch.Tensor) -> torch.Tensor:
+                out = _orig_fwd(x)
+                METRICS.incr("transformer.hyper_gemm_ops")
+                return out
+            lin.forward = _tracked_forward  # type: ignore[method-assign]
+            return lin
+        except Exception as exc:
+            _log.warning("transformer: HyperLinearNL unavailable (%s); "
+                         "using nn.Linear fallback", exc)
+    return nn.Linear(in_features, out_features, bias=bias)
+
+
+def _make_ln(dim: int) -> nn.Module:
+    """Return a HyperLN (Digital GPU) if available, else nn.LayerNorm."""
+    if _ensure_gpu():
+        try:
+            from ai_model.gpu.hyper_creative_transformer import HyperLN
+            from ai_model.maxcore.observability import METRICS
+            ln = HyperLN(dim, _hyper_gpu)
+            _orig_fwd = ln.forward
+            def _tracked_forward(x: torch.Tensor) -> torch.Tensor:
+                out = _orig_fwd(x)
+                METRICS.incr("transformer.hyper_layernorm_ops")
+                return out
+            ln.forward = _tracked_forward  # type: ignore[method-assign]
+            return ln
+        except Exception as exc:
+            _log.warning("transformer: HyperLN unavailable (%s); "
+                         "using nn.LayerNorm fallback", exc)
+    return nn.LayerNorm(dim)
+
+
+def _head_gemm(h: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """Weight-tied output projection through Digital GPU (never-raise).
+
+    Equivalent to ``F.linear(h, weight)`` but the matmul routes through the
+    in-house HyperGPU mixed-precision GEMM kernel.  Falls back to F.linear
+    transparently if the backend is unavailable or raises.
+
+    Args:
+        h:      [*, dim] hidden states (any leading dims).
+        weight: [vocab_size, dim] — shared with token_emb.weight.
+    Returns:
+        [*, vocab_size] logits.
+    """
+    if _ensure_gpu():
+        try:
+            from ai_model.gpu.hyper_backend import _MixedPrecisionGEMM
+            from ai_model.maxcore.observability import METRICS
+            shape = h.shape
+            h2d = h.reshape(-1, shape[-1])
+            # weight is (vocab, dim); GEMM needs (dim, vocab)
+            out = _MixedPrecisionGEMM.apply(
+                h2d.float(), weight.t().contiguous().float(), _hyper_gpu
+            )
+            METRICS.incr("transformer.hyper_head_ops")
+            return out.reshape(*shape[:-1], weight.shape[0])
+        except Exception as exc:
+            _log.warning("transformer: _head_gemm GPU path failed (%s); "
+                         "using F.linear fallback", exc)
+    return F.linear(h, weight)
+
+
+# ─── Warm-start routing probe ─────────────────────────────────────────────────
+
+def probe_gpu_routing(model: "TransformerLM", prompt_len: int = 4) -> dict:
+    """Verify that all generation-critical heavy math routes through the Digital GPU.
+
+    Runs a single prefill pass on a synthetic prompt, then compares
+    METRICS.snapshot() before and after to confirm HyperGPU ops were dispatched
+    across all three critical paths:
+
+    * ``transformer.hyper_gemm_ops``     — linear projections (qkv, out, ffn gate/down)
+    * ``transformer.hyper_layernorm_ops`` — pre-norm layer norms
+    * ``transformer.hyper_head_ops``     — weight-tied output projection (logits GEMM)
+
+    Returns a dict with:
+    - ``routed`` (bool): True only when ALL three paths recorded delta > 0
+    - ``partial`` (bool): True when some but not all paths routed
+    - ``fallback_paths`` (list[str]): names of paths still on torch fallback
+    - Per-counter deltas for inspection
+
+    Never raises — any exception is caught and reported in the return value.
+    """
+    try:
+        from ai_model.maxcore.observability import METRICS
+        snap_before = METRICS.snapshot()
+        before_gemm = snap_before["counters"].get("transformer.hyper_gemm_ops", 0)
+        before_ln   = snap_before["counters"].get("transformer.hyper_layernorm_ops", 0)
+        before_head = snap_before["counters"].get("transformer.hyper_head_ops", 0)
+
+        # Single-batch synthetic prefill (no grad needed, eval mode preserved)
+        was_training = model.training
+        model.eval()
+        with torch.no_grad():
+            ids = torch.zeros(1, prompt_len, dtype=torch.long)
+            try:
+                model.prefill(ids)
+            finally:
+                if was_training:
+                    model.train()
+
+        snap_after = METRICS.snapshot()
+        delta_gemm = snap_after["counters"].get("transformer.hyper_gemm_ops", 0) - before_gemm
+        delta_ln   = snap_after["counters"].get("transformer.hyper_layernorm_ops", 0) - before_ln
+        delta_head = snap_after["counters"].get("transformer.hyper_head_ops", 0) - before_head
+
+        # All three critical generation paths must register ops for full routing.
+        path_results = {
+            "linear_projections": delta_gemm > 0,
+            "layer_norms":        delta_ln   > 0,
+            "output_projection":  delta_head > 0,
+        }
+        fallback_paths = [name for name, ok in path_results.items() if not ok]
+        fully_routed   = len(fallback_paths) == 0
+        partially      = bool(fallback_paths) and any(path_results.values())
+
+        result = {
+            "routed":                   fully_routed,
+            "partial":                  partially,
+            "gpu_available":            _gpu_ready,
+            "fallback_paths":           fallback_paths,
+            "delta_hyper_gemm_ops":     delta_gemm,
+            "delta_hyper_layernorm_ops": delta_ln,
+            "delta_hyper_head_ops":     delta_head,
+        }
+
+        if fully_routed:
+            _log.info(
+                "transformer probe: full DigitalGPU routing confirmed "
+                "(linear+%d, ln+%d, head+%d)",
+                delta_gemm, delta_ln, delta_head,
+            )
+        elif partially:
+            _log.warning(
+                "transformer probe: PARTIAL routing – fallback torch paths: %s "
+                "(linear+%d, ln+%d, head+%d)",
+                fallback_paths, delta_gemm, delta_ln, delta_head,
+            )
+        else:
+            _log.warning(
+                "transformer probe: NO DigitalGPU ops detected – "
+                "all paths on torch fallback"
+            )
+        return result
+    except Exception as exc:
+        _log.warning("transformer probe: error during routing check: %s", exc)
+        return {"routed": False, "partial": False, "gpu_available": _gpu_ready,
+                "error": str(exc)}
 
 
 # ─── Static KV Cache ──────────────────────────────────────────────────────────
@@ -116,8 +314,9 @@ class RoPESelfAttention(nn.Module):
         self.head_dim = dim // n_heads
         self.scale = self.head_dim ** -0.5
 
-        self.qkv = nn.Linear(dim, 3 * dim, bias=False)
-        self.out = nn.Linear(dim, dim, bias=False)
+        # Route through Digital GPU when available; fall back to nn.Linear.
+        self.qkv = _make_linear(dim, 3 * dim, bias=False)
+        self.out = _make_linear(dim, dim, bias=False)
         self.attn_drop = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
@@ -239,8 +438,9 @@ class SwiGLUFFN(nn.Module):
         super().__init__()
         hidden = int(dim * expansion * 2 / 3)
         hidden = ((hidden + 63) // 64) * 64  # round to multiple of 64
-        self.gate = nn.Linear(dim, hidden * 2, bias=False)
-        self.down = nn.Linear(hidden, dim, bias=False)
+        # Route gate and down projections through Digital GPU.
+        self.gate = _make_linear(dim, hidden * 2, bias=False)
+        self.down = _make_linear(hidden, dim, bias=False)
         self.drop = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -253,9 +453,10 @@ class SwiGLUFFN(nn.Module):
 class TransformerDecoderLayer(nn.Module):
     def __init__(self, dim: int, n_heads: int, dropout: float = 0.1):
         super().__init__()
-        self.ln1 = nn.LayerNorm(dim)
+        # Route layer norms through Digital GPU.
+        self.ln1 = _make_ln(dim)
         self.attn = RoPESelfAttention(dim, n_heads, dropout)
-        self.ln2 = nn.LayerNorm(dim)
+        self.ln2 = _make_ln(dim)
         self.ffn = SwiGLUFFN(dim, dropout=dropout)
         self.drop = nn.Dropout(dropout)
 
@@ -301,6 +502,10 @@ class TransformerLM(nn.Module):
     - Weight tying between token embedding and output head
     - Scaled initialization (GPT-2 style)
     - KV-cache support via prefill() + decode_one()
+    - Digital GPU routing: all linear projections, layer norms, and the
+      weight-tied output projection use HyperGPU kernels when available, with a
+      transparent torch fallback (never-raise).  Use probe_gpu_routing() to
+      confirm all three paths are active after model construction.
     """
     def __init__(self, vocab_size: int, dim: int = 512, n_layers: int = 8,
                  n_heads: int = 8, max_len: int = 1024, dropout: float = 0.1):
@@ -315,7 +520,8 @@ class TransformerLM(nn.Module):
             TransformerDecoderLayer(dim, n_heads, dropout)
             for _ in range(n_layers)
         ])
-        self.ln_final = nn.LayerNorm(dim)
+        # Final layer norm routes through Digital GPU.
+        self.ln_final = _make_ln(dim)
         self.head = nn.Linear(dim, vocab_size, bias=False)
 
         # Weight tying: output head shares weights with token embedding
@@ -363,7 +569,7 @@ class TransformerLM(nn.Module):
             h = layer(h, cos, sin, mask)
 
         h = self.ln_final(h)
-        return self.head(h)
+        return _head_gemm(h, self.token_emb.weight)
 
     def prefill(self, x: torch.Tensor,
                 key_padding_mask: torch.Tensor | None = None,
@@ -389,7 +595,7 @@ class TransformerLM(nn.Module):
             kv_cache.append((k, v))
 
         h = self.ln_final(h)
-        return self.head(h), kv_cache
+        return _head_gemm(h, self.token_emb.weight), kv_cache
 
     def decode_one(self, x_new: torch.Tensor,
                    kv_cache,
@@ -426,7 +632,7 @@ class TransformerLM(nn.Module):
                 )
             kv_cache._len += 1
             h = self.ln_final(h)
-            return self.head(h), kv_cache
+            return _head_gemm(h, self.token_emb.weight), kv_cache
 
         # Original list-of-tuples path — fully backward compatible.
         new_cache: list[tuple[torch.Tensor, torch.Tensor]] = []
@@ -437,7 +643,7 @@ class TransformerLM(nn.Module):
             new_cache.append((new_k, new_v))
 
         h = self.ln_final(h)
-        return self.head(h), new_cache
+        return _head_gemm(h, self.token_emb.weight), new_cache
 
     # Legacy compatibility: some code checks pos_emb.num_embeddings
     @property
