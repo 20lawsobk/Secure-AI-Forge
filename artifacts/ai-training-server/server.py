@@ -1423,6 +1423,19 @@ async def on_startup():
         _aw_dog()
     except Exception as _aw_dog_exc:  # noqa: BLE001
         print(f"[Server] audio seeding watchdog not started: {_aw_dog_exc}")
+    # Autonomous admin content loop — periodically generates scripts, social
+    # posts, and DAW content under the admin identity and injects them into the
+    # flywheel.  This grows MaxBooster's own phrase corpus so the awareness
+    # bridge retires naturally (buffer_weight → 0) once the admin's content
+    # matches the live industry signal. Never-raise, idempotent daemon.
+    try:
+        from workers.admin_content_loop import start as _loop_start
+        _loop_start(
+            get_script_agent_fn=lambda: _script_agent,
+            get_distribution_agent_fn=lambda: _distribution_agent,
+        )
+    except Exception as _loop_exc:  # noqa: BLE001
+        print(f"[Server] admin content loop not started: {_loop_exc}")
     warm_thread = threading.Thread(target=_warm_content_cache, daemon=True)
     warm_thread.start()
     subsys_thread = threading.Thread(target=_warm_start_subsystems, daemon=True)
@@ -1501,6 +1514,20 @@ def _warm_start_subsystems() -> None:
         ri.build_brief(modality="content", platform="tiktok",
                        topic="warm start probe", goal="growth", tone="energetic")
 
+    def _warm_digital_gpu():
+        # Initialise the DigitalGPU singleton so all subsequent inference calls
+        # route through the MaxCore backend (pdim pocket accelerator + digital
+        # SIMD kernels) rather than falling back to raw numpy/torch paths.
+        # The singleton is module-level in maxcore/api.py and is safe to call
+        # from multiple threads — only the first call does real work.
+        from ai_model.maxcore.api import DigitalGPU as _DG
+        _dg = _DG()
+        # Verify the backend is usable with a no-op probe GEMM.
+        import numpy as _np_wdg
+        _a = _np_wdg.ones((4, 4), dtype="float32")
+        _dg.gemm(_a, _a.T)
+
+    _step("digital_gpu",           _warm_digital_gpu)
     _step("diffusion_pipeline",    _warm_diffusion)
     _step("retrieval_index",       _warm_retrieval)
     _step("intent_detector",       _warm_intent)
@@ -8964,11 +8991,16 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
     # ── Request intelligence: analyse intent & sonic strategy up front ─────
     from ai_model import request_intelligence as ri
     genre_hint = req.genre or "music"
+    # Compute the FULL merged awareness once (caller-supplied + platform buffer +
+    # intent layer) and reuse it everywhere below.  This ensures genre/mood/BPM
+    # conditioning draws from the live Deezer chart signals and quality-awareness
+    # buffer, not just from the raw caller-supplied field (which is often empty).
+    _merged_aw_handler = _merged_awareness_for(req)
     brief = ri.build_brief(
         modality="audio", platform="general",
         topic=f"{genre_hint} {req.intent or req.instrument or 'music clip'}",
         goal=req.intent, tone=None, genre=req.genre,
-        awareness=_merged_awareness_for(req),
+        awareness=_merged_aw_handler,
     )
 
     # ── Awareness genre/mood conditioning (computed in handler scope) ──────
@@ -8979,7 +9011,9 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
     # tracks that match current chart signals.
     # NOTE: these are captured as closure variables for _process() — do NOT
     # call _merged_awareness_for() again inside the background thread.
-    _aw_str_handler = getattr(req, "awareness", "") or ""
+    # Use the full merged awareness (not just raw req.awareness) so the platform
+    # buffer and live chart signals are always reflected in genre/mood extraction.
+    _aw_str_handler = _merged_aw_handler
     _aw_genres_handler = _extract_awareness_genres(_aw_str_handler)
     _aw_moods_handler  = _extract_awareness_moods(_aw_str_handler)
     _req_genre_handler = (req.genre or "").lower().strip()
