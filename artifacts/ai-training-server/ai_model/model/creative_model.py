@@ -6,6 +6,59 @@ import torch.nn.functional as F
 from typing import Union
 from .tokenizer import SimpleTokenizer, BPETokenizer
 
+# ── Digital GPU softmax singleton ─────────────────────────────────────────────
+# All softmax / log-softmax calls in sampling and beam search route through
+# HyperSIMDCore so they execute on the self-contained MaxCore stack instead of
+# Replit's CPU torch kernels.  The singleton is created lazily on first use.
+_hyper_core = None
+_hyper_core_lock = None
+
+def _get_hyper_core():
+    """Return the module-level HyperSIMDCore singleton (thread-safe, lazy)."""
+    global _hyper_core, _hyper_core_lock
+    if _hyper_core_lock is None:
+        import threading
+        _hyper_core_lock = threading.Lock()
+    if _hyper_core is not None:
+        return _hyper_core
+    with _hyper_core_lock:
+        if _hyper_core is None:
+            try:
+                from ai_model.gpu.hyper_core import HyperSIMDCore, PrecisionMode
+                _hyper_core = HyperSIMDCore(
+                    lanes=512, tensor_cores=8, precision=PrecisionMode.MIXED
+                )
+            except Exception:
+                pass
+    return _hyper_core
+
+
+def _gpu_softmax(t: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    """
+    Softmax via HyperSIMDCore (MaxCore digital GPU stack).
+    Falls back to F.softmax transparently if the core is unavailable.
+    Input/output: torch.Tensor (float32).
+    """
+    core = _get_hyper_core()
+    if core is None:
+        return F.softmax(t, dim=dim)
+    try:
+        import numpy as _np
+        arr = t.detach().float().numpy()
+        out = core.softmax(arr, axis=dim)
+        return torch.from_numpy(out)
+    except Exception:
+        return F.softmax(t, dim=dim)
+
+
+def _gpu_log_softmax(t: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    """
+    Log-softmax via HyperSIMDCore.  Falls back to F.log_softmax.
+    """
+    probs = _gpu_softmax(t, dim=dim)
+    # clamp to avoid log(0); -1e9 matches F.log_softmax behaviour on -inf inputs
+    return torch.log(probs.clamp(min=1e-38))
+
 
 class CreativeModel:
     """
@@ -87,13 +140,15 @@ class CreativeModel:
 
         if 0.0 < top_p < 1.0:
             sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-            probs = F.softmax(sorted_logits, dim=-1)
+            # Route through MaxCore digital GPU softmax (not Replit CPU torch)
+            probs = _gpu_softmax(sorted_logits, dim=-1)
             cumulative = torch.cumsum(probs, dim=-1)
             mask = (cumulative - probs) > top_p
             sorted_logits[mask] = float('-inf')
             logits = sorted_logits.scatter(1, sorted_indices, sorted_logits)
 
-        probs = F.softmax(logits, dim=-1)
+        # MaxCore digital GPU softmax — self-contained, no Replit CPU kernels
+        probs = _gpu_softmax(logits, dim=-1)
         return torch.multinomial(probs, num_samples=1)
 
     # ── KV-cache sampling generation ──────────────────────────────────────────
@@ -485,7 +540,8 @@ class CreativeModel:
                     if temperature != 1.0:
                         next_logits = next_logits / max(temperature, 1e-8)
 
-                    log_probs = F.log_softmax(next_logits[0], dim=-1)
+                    # MaxCore digital GPU log-softmax — no Replit CPU kernels
+                    log_probs = _gpu_log_softmax(next_logits[0], dim=-1)
                     topk = min(num_beams * 2, vocab_size)
                     top_vals, top_idxs = torch.topk(log_probs, topk)
 

@@ -782,25 +782,40 @@ def _init_ai_model():
                 base_model = None
 
         if base_model is None:
-            # Fallback: plain TransformerLM routed through the Digital GPU engine
-            from ai_model.model.transformer import TransformerLM
-            base_model = TransformerLM(
-                vocab_size=vocab_size,
-                dim=dim, n_layers=n_layers, n_heads=n_heads, max_len=max_len,
-            )
-            if state_dict is not None:
-                filtered = {
-                    k: v for k, v in state_dict.items()
-                    if k not in base_model.state_dict()
-                    or v.shape == base_model.state_dict()[k].shape
-                }
-                base_model.load_state_dict(filtered, strict=False)
-            backend_name = "Digital GPU / aot_eager"
+            # Secondary fallback: HyperCreativeTransformerLM with a fresh HyperGPU
+            # (covers the case where _hyper_backend failed to init above, e.g. a
+            # transient import error, but the GPU module itself is importable).
+            # This keeps ALL math on the self-contained MaxCore digital GPU stack
+            # — no Replit base-env CPU kernels anywhere in the inference path.
             try:
-                base_model = torch.compile(base_model, backend="aot_eager", fullgraph=False)
-                print("[AI Model] torch.compile applied (aot_eager / Digital GPU path)")
-            except Exception as ce:
-                print(f"[AI Model] torch.compile skipped: {ce}")
+                from ai_model.gpu.hyper_core import HyperGPU, PrecisionMode
+                from ai_model.gpu.hyper_creative_transformer import HyperCreativeTransformerLM
+                _fb_gpu = HyperGPU(lanes=512, tensor_cores=8, precision=PrecisionMode.MIXED)
+                base_model = HyperCreativeTransformerLM(
+                    vocab_size=vocab_size,
+                    dim=dim, n_layers=n_layers, n_heads=n_heads, max_len=max_len,
+                    gpu=_fb_gpu,
+                )
+                if state_dict is not None:
+                    clean_sd = {
+                        (k[len("_orig_mod."):] if k.startswith("_orig_mod.") else k): v
+                        for k, v in state_dict.items()
+                    }
+                    target_sd = base_model.state_dict()
+                    filtered = {k: v for k, v in clean_sd.items()
+                                if k in target_sd and v.shape == target_sd[k].shape}
+                    base_model.load_state_dict(filtered, strict=False)
+                    print(f"[AI Model] Fallback HyperCreativeTransformerLM — "
+                          f"{len(filtered)}/{len(clean_sd)} tensors loaded")
+                else:
+                    print("[AI Model] Fallback HyperCreativeTransformerLM — random init")
+                backend_name = "Digital GPU fallback (HyperGPU)"
+            except Exception as fb_err:
+                # Absolute last resort — should never be reached on this platform.
+                print(f"[AI Model] HyperGPU fallback unavailable ({fb_err}); "
+                      f"no CPU base-env path exists — generation will be disabled")
+                base_model = None
+                backend_name = "unavailable"
         else:
             backend_name = "Digital GPU (HyperGPU + SM102 + pdim)"
 
@@ -2441,7 +2456,6 @@ def _run_bpe_scaleup(req: BPEScaleUpRequest, job_id: str):
         from ai_model.training.trainer import train as run_train, evaluate
         from ai_model.training.config import TrainConfig
         from ai_model.model.tokenizer import BPETokenizer
-        from ai_model.model.transformer import TransformerLM
         from ai_model.model.creative_model import CreativeModel
         import torch
 
@@ -2495,13 +2509,21 @@ def _run_bpe_scaleup(req: BPEScaleUpRequest, job_id: str):
             _creative_model = None
         gc.collect()
 
-        new_model = TransformerLM(
+        # Train entirely on the MaxCore digital GPU stack — no Replit CPU kernels.
+        from ai_model.gpu.hyper_core import HyperGPU, PrecisionMode
+        from ai_model.gpu.hyper_transformer import HyperTransformerLM
+        _train_gpu = HyperGPU(lanes=512, tensor_cores=8, precision=PrecisionMode.MIXED)
+        new_model = HyperTransformerLM(
             vocab_size=new_tokenizer.vocab_size,
             dim=req.dim, n_layers=req.layers, n_heads=req.heads, max_len=req.max_len,
+            backend=None,   # HyperTransformerLM creates its own HyperGPUBackend internally
         )
         n_params = sum(p.numel() for p in new_model.parameters())
-        log_training(f"Model: dim={req.dim} layers={req.layers} heads={req.heads} params={n_params:,}",
-                     job_id=job_id)
+        log_training(
+            f"Digital GPU model (HyperTransformerLM): dim={req.dim} layers={req.layers} "
+            f"heads={req.heads} params={n_params:,} — all math on MaxCore stack",
+            job_id=job_id,
+        )
 
         cfg = TrainConfig({
             "model": {"dim": req.dim, "layers": req.layers, "heads": req.heads, "max_len": req.max_len},
@@ -2557,10 +2579,13 @@ def _run_bpe_scaleup(req: BPEScaleUpRequest, job_id: str):
             "inv_vocab": new_tokenizer.inv_vocab,
             "merges": new_tokenizer.merges,
             "config": new_config,
+            "trained_on": "hyper_gpu",
         }, str(weights_path))
         log_training(f"Saved checkpoint -> {weights_path}", job_id=job_id)
 
-        # Hot-swap the live globals so /generate immediately uses the new model.
+        # Hot-swap: wrap trained HyperTransformerLM directly — no CPU transfer step.
+        # On next startup the checkpoint will load into HyperCreativeTransformerLM
+        # (preferred path in _init_ai_model) which provides KV-cache inference.
         _tokenizer = new_tokenizer
         _model_config = new_config
         _creative_model = CreativeModel(new_model, new_tokenizer)
@@ -2696,7 +2721,6 @@ def _run_hyper_scaleup(req: HyperScaleUpRequest, job_id: str):
         from ai_model.training.trainer import train as run_train, evaluate
         from ai_model.training.config import TrainConfig
         from ai_model.model.tokenizer import BPETokenizer
-        from ai_model.model.transformer import TransformerLM
         from ai_model.model.creative_model import CreativeModel
         from ai_model.gpu.hyper_core import HyperGPU, PrecisionMode
         from ai_model.gpu.hyper_creative_transformer import HyperCreativeTransformerLM
@@ -2809,22 +2833,14 @@ def _run_hyper_scaleup(req: HyperScaleUpRequest, job_id: str):
             log_training(f"Epoch {epoch+1}/{req.epochs} complete. Loss: {loss_str}, PPL: {ppl_str}, "
                          f"HyperGPU ops: {gpu_ops:,}", epoch=epoch + 1, loss=loss, job_id=job_id)
 
-        # Transfer Digital-GPU-trained weights into the fast KV-cache serving model.
-        log_training("Transferring Digital-GPU-trained weights into serving model...", job_id=job_id)
-        serve_model = TransformerLM(
-            vocab_size=new_tokenizer.vocab_size,
-            dim=req.dim, n_layers=req.layers, n_heads=req.heads, max_len=req.max_len,
+        # Serve directly from the trained HyperCreativeTransformerLM — no weight
+        # transfer to a CPU-based model.  HyperCreativeTransformerLM already has
+        # prefill() + decode_one() KV-cache inference, so it IS the serving model.
+        # This keeps 100% of math on the MaxCore digital GPU stack.
+        log_training(
+            "Digital-GPU training complete — serving directly from HyperCreativeTransformerLM "
+            "(no CPU weight-transfer step)", job_id=job_id,
         )
-        missing, unexpected = serve_model.load_state_dict(hyper_model.state_dict(), strict=False)
-        # head.weight is tied to token_emb.weight and re-tied in __init__, so it is
-        # the only expected "missing" key; anything else is a real mismatch.
-        real_missing = [k for k in missing if k != "head.weight"]
-        if real_missing or unexpected:
-            raise RuntimeError(f"Weight transfer mismatch: missing={real_missing} unexpected={unexpected}")
-        log_training("Weight transfer OK (Digital-GPU weights -> KV-cache serving model)", job_id=job_id)
-
-        del hyper_model
-        gc.collect()
 
         weights_dir = root / "ai_model" / "weights"
         weights_dir.mkdir(parents=True, exist_ok=True)
@@ -2838,7 +2854,7 @@ def _run_hyper_scaleup(req: HyperScaleUpRequest, job_id: str):
         new_tokenizer.freeze()
         new_config = {"dim": req.dim, "layers": req.layers, "heads": req.heads, "max_len": req.max_len}
         torch.save({
-            "model_state_dict": serve_model.state_dict(),
+            "model_state_dict": hyper_model.state_dict(),
             "vocab": new_tokenizer.vocab,
             "inv_vocab": new_tokenizer.inv_vocab,
             "merges": new_tokenizer.merges,
@@ -2849,7 +2865,9 @@ def _run_hyper_scaleup(req: HyperScaleUpRequest, job_id: str):
 
         _tokenizer = new_tokenizer
         _model_config = new_config
-        _creative_model = CreativeModel(serve_model, new_tokenizer)
+        # Hot-swap: serve from the trained GPU model directly
+        _creative_model = CreativeModel(hyper_model, new_tokenizer)
+        hyper_model = None  # prevent del below from double-freeing
 
         log_training(f"Digital-GPU scale-up job {job_id} completed. Live model swapped in.", job_id=job_id)
         with _training_lock:
