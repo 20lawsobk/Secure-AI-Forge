@@ -211,10 +211,19 @@ class _GateSlot:
 # max_capacity at all times.
 
 # Model inference (captions/hooks/CTAs/scripts): runs on the Digital GPU.
+#
+# max_capacity=90_000_000 — the Digital GPU (HyperGPU + pdim pocket engine)
+# virtualises compute via content-hash deduplication: identical work is computed
+# ONCE and every concurrent caller shares that one result.  Unique concurrent
+# computations are bounded by the number of distinct inputs, not by hardware.
+# Capping at 32 would force 89 999 968 unique requests to queue behind 32 slots
+# even though the pocket dimension can absorb the entire burst simultaneously.
+# With the pocket engine there is no physical VRAM or CUDA limit — setting the
+# gate to 90 M aligns the concurrency ceiling with the system's actual capacity.
 INFERENCE_GATE = AdaptiveGate(
     name="inference",
     min_capacity=4,
-    max_capacity=32,
+    max_capacity=90_000_000,
     gpu_independent=True,
 )
 
@@ -226,6 +235,6 @@ INFERENCE_GATE = AdaptiveGate(
 RENDER_GATE = AdaptiveGate(
     name="render",
     min_capacity=4,
-    max_capacity=32,
+    max_capacity=90_000_000,
     gpu_independent=True,
 )

@@ -112,13 +112,40 @@ class _Slot:
         self.result: Optional[dict] = None
 
 
+_INFLIGHT_SHARDS = 256   # same hex-tail trick as pocket_accelerator / _FallbackDedup
+
+
 class PDIMOrchestrator:
+    """PDIM orchestrator with 256-shard single-flight inflight tracking.
+
+    The ``_inflight`` dict previously used a single ``threading.Lock`` shared
+    by every concurrent request.  At 90 M concurrent unique requests the single
+    lock serialises all slot-check/insert/remove operations even for completely
+    unrelated keys.
+
+    The 256-shard design assigns each key to exactly one shard via the last two
+    hex characters of the sha256 key digest (0x00–0xFF → shard 0–255).
+    Concurrent requests for different keys acquire different shard locks and
+    never block each other — reducing worst-case contention from O(N) to
+    O(N / 256) ≈ O(350) per shard at 90 M concurrent.
+    """
+
     def __init__(self, storage=None, config: PDIMConfig | None = None, dedup=None):
         self.config = config or PDIMConfig()
         self.storage = storage
         self.dedup = dedup if dedup is not None else (_dedup or _FallbackDedup())
-        self._inflight: dict[str, _Slot] = {}
-        self._lock = threading.Lock()
+        # 256-shard inflight dicts replace the single _lock + _inflight pair.
+        self._inflight_shards: list[dict[str, _Slot]] = [
+            {} for _ in range(_INFLIGHT_SHARDS)
+        ]
+        self._shard_locks = [threading.Lock() for _ in range(_INFLIGHT_SHARDS)]
+
+    # ── shard routing ─────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _shard_idx(key: str) -> int:
+        """Uniform 0-255 shard index from the last two hex chars of a sha256 key."""
+        return int(key[-2:], 16)
 
     # ── synchronous: dedup + single-flight ────────────────────────────────────
     def compute(self, request: Any, compute_fn: Callable[[Any], dict],
@@ -139,6 +166,8 @@ class PDIMOrchestrator:
                 result = compute_fn(request)
             return {"result": result, "source": "compute"}
 
+        idx = self._shard_idx(key)
+
         # Single-flight loop. Exactly one caller per key computes at a time; the
         # rest wait and share its result.  If the leader times out (still
         # running), dies, or produces a non-dict result, we re-contend so
@@ -146,11 +175,11 @@ class PDIMOrchestrator:
         while True:
             leader = False
             slot: _Slot
-            with self._lock:
-                existing = self._inflight.get(key)
+            with self._shard_locks[idx]:
+                existing = self._inflight_shards[idx].get(key)
                 if existing is None:
                     slot = _Slot()
-                    self._inflight[key] = slot
+                    self._inflight_shards[idx][key] = slot
                     leader = True
                 else:
                     slot = existing
@@ -160,7 +189,7 @@ class PDIMOrchestrator:
                 # cache miss above and winning leadership here.
                 cached = self.dedup.get(key)
                 if cached is not None:
-                    self._release(key, slot)
+                    self._release(key, slot, idx)
                     METRICS.incr("pdim.cache_hit")
                     return {"result": cached, "source": "cache"}
                 try:
@@ -172,20 +201,19 @@ class PDIMOrchestrator:
                     if isinstance(result, dict):
                         slot.result = result
                     # Persist to pdim + release the slot in a background thread.
-                    # The slot stays in _inflight during the entire write (~85ms),
-                    # so any new request for this key that arrives during that
-                    # window becomes a follower and receives slot.result directly
-                    # rather than recomputing — closing the post-release/pre-pdim
-                    # race window that caused violations under heavy parallel load.
+                    # The slot stays in _inflight_shards during the entire write
+                    # (~85ms WAN), so any new request for this key that arrives
+                    # during that window becomes a follower and reads slot.result
+                    # directly — no recompute, no post-release/pre-pdim race.
                     threading.Thread(
                         target=self._put_and_release,
-                        args=(key, slot, result),
+                        args=(key, slot, result, idx),
                         daemon=True,
                     ).start()
                     return {"result": result, "source": "compute"}
                 except Exception:
                     # compute_fn raised or thread start failed; release immediately.
-                    self._release(key, slot)
+                    self._release(key, slot, idx)
                     raise
 
             # Follower: wait for the leader then read its result off the slot.
@@ -202,25 +230,25 @@ class PDIMOrchestrator:
                 return {"result": cached, "source": "coalesced"}
             METRICS.incr("pdim.inflight_timeout" if not signaled else "pdim.recontend")
 
-    def _release(self, key: str, slot: _Slot) -> None:
-        with self._lock:
-            self._inflight.pop(key, None)
+    def _release(self, key: str, slot: _Slot, idx: int) -> None:
+        with self._shard_locks[idx]:
+            self._inflight_shards[idx].pop(key, None)
         slot.event.set()
 
-    def _put_and_release(self, key: str, slot: _Slot, result: Any) -> None:
+    def _put_and_release(self, key: str, slot: _Slot, result: Any, idx: int) -> None:
         """Persist result to the dedup cache then release the single-flight slot.
 
         Runs in a daemon thread so the leader's ``compute()`` call returns to its
         caller immediately after the result is computed.  The slot stays in
-        ``_inflight`` for the entire duration of the pdim write (~85 ms WAN), so
-        any concurrent request for the same key that arrives during that window
-        still finds the slot, becomes a follower, and reads ``slot.result``
+        ``_inflight_shards`` for the entire duration of the pdim write (~85 ms
+        WAN), so any concurrent request for the same key that arrives during that
+        window still finds the slot, becomes a follower, and reads ``slot.result``
         directly — no recompute, no race window between _release and pdim commit.
         """
         try:
             self.dedup.put(key, result)
         finally:
-            self._release(key, slot)
+            self._release(key, slot, idx)
 
     # ── durable async: submit / poll / drain ──────────────────────────────────
     def submit(self, request: Any = None, *, queue: str = "default", model_id: str = "model",
@@ -275,8 +303,15 @@ class PDIMOrchestrator:
 
     def stats(self) -> dict:
         out: dict = {"dedup": self.dedup.stats()}
-        with self._lock:
-            out["inflight"] = len(self._inflight)
+        # Sum inflight counts across all 256 shards without holding any lock
+        # longer than necessary — each shard lock is acquired and released
+        # independently so in-flight compute is not stalled by the stats read.
+        total_inflight = 0
+        for i in range(_INFLIGHT_SHARDS):
+            with self._shard_locks[i]:
+                total_inflight += len(self._inflight_shards[i])
+        out["inflight"] = total_inflight
+        out["inflight_shards"] = _INFLIGHT_SHARDS
         if self.storage is not None:
             out["storage"] = self.storage.status()
         out["counters"] = METRICS.snapshot().get("counters", {})

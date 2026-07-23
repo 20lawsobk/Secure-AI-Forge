@@ -468,11 +468,23 @@ def _get_pdim_orchestrator():
 class _AsyncRequestCoalescer:
     """Asyncio-native single-flight for generation handlers.
 
-    - Leader:   awaits the real coroutine, resolves the shared Future.
-    - Followers: await asyncio.shield(future) — zero threads, zero gate slots.
+    Three request paths, in order of cost:
 
-    Thread-safe for coroutines (event loop is single-threaded; the dict
-    mutations between awaits are atomic at the Python level).
+    1. **Settled hit** — a Future for this digest already resolved successfully
+       (within the 500 ms eviction window).  Return ``existing.result()``
+       directly: zero coroutine creation, zero thread-pool entry, zero gate
+       slots.  This is the dominant path at 90 M-concurrent scale where the
+       vast majority of requests arrive after the first compute finishes.
+
+    2. **Active follower** — a Future exists but is still pending.  Await
+       ``asyncio.shield(future)``: the coroutine suspends cheaply with no
+       threads.  One leader computes; every follower wakes up with the result.
+
+    3. **Leader** — no Future exists.  Create one, run ``coro_fn()``, resolve
+       the Future, and schedule eviction after 500 ms.
+
+    Thread-safe for coroutines (the asyncio event loop is single-threaded;
+    all dict mutations between ``await`` points are GIL-atomic).
     """
 
     def __init__(self) -> None:
@@ -486,17 +498,26 @@ class _AsyncRequestCoalescer:
 
     async def compute(self, key_data: dict, coro_fn) -> Any:
         """Run coro_fn() once per unique digest; every other caller gets the
-        same result by awaiting the shared Future — no extra threads created."""
+        same result for free — no extra threads, no extra gate slots."""
         digest = self._digest(key_data)
         loop   = asyncio.get_running_loop()
 
-        # Fast follower path — dict access between awaits is atomic in asyncio.
         existing = self._inflight.get(digest)
-        if existing is not None and not existing.done():
-            return await asyncio.shield(existing)
+        if existing is not None:
+            if not existing.done():
+                # Path 2: active computation — suspend and share the result.
+                return await asyncio.shield(existing)
+            # Path 1: already settled — return the stored result synchronously.
+            # This is the hot path at 90 M concurrent: no Future creation, no
+            # thread-pool entry, no INFERENCE_GATE slot consumed.
+            if not existing.cancelled() and existing.exception() is None:
+                return existing.result()
+            # Settled with an exception — fall through to become a new leader
+            # so the request gets a fresh attempt rather than a stale error.
 
-        # Leader: register Future before the first await so any coroutine
-        # that computes the same digest after this point becomes a follower.
+        # Path 3: Leader — register the Future before the first ``await`` so
+        # any coroutine that computes the same digest after this point sees it
+        # and becomes a follower rather than a duplicate leader.
         fut: asyncio.Future = loop.create_future()
         self._inflight[digest] = fut
 
@@ -509,9 +530,8 @@ class _AsyncRequestCoalescer:
                 fut.set_exception(exc)
             raise
         finally:
-            # Keep the settled Future in the map briefly so coroutines that
-            # computed the digest just before us receive the result rather
-            # than re-triggering a compute.
+            # Keep the settled Future alive for 500 ms so late arrivals get
+            # Path 1 (synchronous result) rather than becoming new leaders.
             async def _evict() -> None:
                 await asyncio.sleep(0.5)
                 self._inflight.pop(digest, None)
