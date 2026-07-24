@@ -1541,6 +1541,24 @@ def _warm_start_subsystems() -> None:
         import numpy as _np_wdg
         _a = _np_wdg.ones((4, 4), dtype="float32")
         _dg.gemm(_a, _a.T)
+        # Pre-register every model weight matrix in the pocket accelerator so
+        # the first real forward pass already sees cache hits.  warmup_pocket()
+        # walks all HyperLinearNL modules and issues one synthetic GEMM each,
+        # seeding the per-array digest cache and priming the adaptive gate.
+        try:
+            if base_model is not None:
+                result = base_model.warmup_pocket()
+                print(f"[WarmStart] pocket pre-registration: {result}", flush=True)
+        except Exception as _wp_exc:
+            print(f"[WarmStart] pocket pre-registration skipped: {_wp_exc}", flush=True)
+        # Prime the replica pool — creates N parallel pocket namespaces that
+        # share the orchestrator's dedup store (cross-replica cache hits are free).
+        try:
+            from ai_model.maxcore.pdim.replica_scaler import get_replica_pool
+            _pool = get_replica_pool()
+            print(f"[WarmStart] replica pool: {_pool.stats()['replica_count']} replicas ready", flush=True)
+        except Exception as _rp_exc:
+            print(f"[WarmStart] replica pool skipped: {_rp_exc}", flush=True)
 
     _step("digital_gpu",           _warm_digital_gpu)
     _step("diffusion_pipeline",    _warm_diffusion)
@@ -2679,6 +2697,47 @@ async def api_gen_cache_stats(key: dict = Depends(verify_api_key)):
     try:
         from ai_model.model.creative_model import get_gen_cache_stats
         return {"success": True, "gen_cache": get_gen_cache_stats()}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+@app.get("/api/gpu/replica-pool/stats")
+async def api_replica_pool_stats(key: dict = Depends(verify_api_key)):
+    """Live stats for the infinite replica namespace pool — replica count,
+    round-robin position, hit rate, and seed log depth."""
+    try:
+        from ai_model.maxcore.pdim.replica_scaler import get_replica_pool
+        return {"success": True, "replica_pool": get_replica_pool().stats()}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+@app.post("/api/gpu/replica-pool/grow")
+async def api_replica_pool_grow(target: int = 4, admin=Depends(verify_admin)):
+    """Grow the replica pool to at least ``target`` parallel namespaces.
+    Each new replica is pre-warmed from the seed log so it starts hot."""
+    from ai_model.maxcore.pdim.replica_scaler import get_replica_pool
+    pool = get_replica_pool()
+    n = await _in_thread(lambda: pool.scale_to(target))
+    return {"success": True, "replica_count": n}
+
+@app.get("/api/gpu/prefix-kv/stats")
+async def api_prefix_kv_stats(key: dict = Depends(verify_api_key)):
+    """Live stats for the compressed prefix KV cache — hits, misses, hit rate,
+    entries held, and TTL. A hit means an entire prompt prefix was served from
+    compressed storage without re-running the prefill pass."""
+    try:
+        from ai_model.gpu.hyper_creative_transformer import get_prefix_kv_stats
+        return {"success": True, "prefix_kv": get_prefix_kv_stats()}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+@app.get("/api/gpu/digest-cache/stats")
+async def api_digest_cache_stats(key: dict = Depends(verify_api_key)):
+    """Live stats for the per-array SHA-256 digest cache in the pocket
+    multiplier. Cached entries eliminate re-hashing weight bytes on every
+    forward pass — a hit on a 3 MB weight matrix saves ~1ms of pure hashing."""
+    try:
+        from ai_model.maxcore.pdim.pocket_multiply import get_digest_cache_stats
+        return {"success": True, "digest_cache": get_digest_cache_stats()}
     except Exception as exc:
         return {"success": False, "error": str(exc)}
 

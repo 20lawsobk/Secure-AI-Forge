@@ -991,6 +991,24 @@ router.get("/gpu/gen-cache/stats", async (req, res) => {
   await proxyRequest(req, res, "/api/gpu/gen-cache/stats");
 });
 
+// Infinite replica namespace pool — parallel pocket namespaces sharing one orchestrator
+router.get("/gpu/replica-pool/stats", async (req, res) => {
+  await proxyRequest(req, res, "/api/gpu/replica-pool/stats");
+});
+router.post("/gpu/replica-pool/grow", async (req, res) => {
+  await proxyRequest(req, res, "/api/gpu/replica-pool/grow");
+});
+
+// Compressed prefix KV cache — eliminates prefill cost for repeated prompt prefixes
+router.get("/gpu/prefix-kv/stats", async (req, res) => {
+  await proxyRequest(req, res, "/api/gpu/prefix-kv/stats");
+});
+
+// Per-array SHA-256 digest cache — eliminates re-hashing weight bytes every forward pass
+router.get("/gpu/digest-cache/stats", async (req, res) => {
+  await proxyRequest(req, res, "/api/gpu/digest-cache/stats");
+});
+
 // ─── Production warm-up endpoints ───────────────────────────────────────────
 
 // Trigger a Digital GPU inference warm pass (transformer → flash-attn → GEMM)

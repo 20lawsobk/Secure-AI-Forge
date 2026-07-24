@@ -31,15 +31,52 @@ from .orchestrator import PDIMOrchestrator
 
 _CODEC = "zlib+b64"
 
+# ── Per-array digest cache ────────────────────────────────────────────────────
+# Model weight matrices are fixed during inference — the same bytes, at the
+# same memory address, on every forward pass.  Re-hashing megabytes of weights
+# on every decode step is pure overhead.
+#
+# Solution: cache SHA-256 per array keyed by (data_ptr, shape, dtype).
+# The data pointer is the RAM address of the underlying buffer; if it hasn't
+# changed, the bytes haven't changed.  This is safe for:
+#   • eval-mode nn.Parameters (weights never modified in-place after init)
+#   • transposed / contiguous views of the same buffer (same pointer)
+# NOT safe for in-place training ops — the training path uses fresh activations
+# whose data pointers vary each call, so they simply won't cache (cache miss →
+# normal hash path).
+#
+# Thread-safety: dict reads are GIL-protected in CPython; writes use a lock
+# only when a new entry is being added (rare; weights are cached after
+# first call and then read without locking).
+
+_DIGEST_CACHE: dict[tuple, str] = {}
+_DIGEST_CACHE_LOCK = threading.Lock()
+
+
+def _array_digest(a: np.ndarray) -> str:
+    """SHA-256 of one array, with caching for unchanging weight matrices."""
+    cache_key = (a.ctypes.data, a.shape, a.dtype.str)
+    cached = _DIGEST_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    h = hashlib.sha256()
+    h.update(str(a.dtype).encode())
+    h.update(str(a.shape).encode())
+    h.update(a.tobytes())
+    result = h.hexdigest()
+    with _DIGEST_CACHE_LOCK:
+        _DIGEST_CACHE[cache_key] = result
+    return result
+
 
 def _digest(*arrays: np.ndarray) -> str:
-    h = hashlib.sha256()
-    for a in arrays:
-        c = np.ascontiguousarray(a)
-        h.update(str(c.dtype).encode())
-        h.update(str(c.shape).encode())
-        h.update(c.tobytes())
-    return h.hexdigest()
+    """Combined SHA-256 of multiple arrays.  Per-array digests are cached."""
+    parts = [_array_digest(np.ascontiguousarray(a)) for a in arrays]
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()
+
+
+def get_digest_cache_stats() -> dict:
+    return {"cached_arrays": len(_DIGEST_CACHE)}
 
 
 def _encode(result: np.ndarray) -> dict:

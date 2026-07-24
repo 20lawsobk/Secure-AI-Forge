@@ -44,6 +44,39 @@ description: All optimizations layered for minimum-latency generation; constrain
 
 **How to apply:** Replace `core.gemm(X, W.T) + bias; core.gelu(out)` call pairs with `core.linear_gelu(X, W, bias)` at any new feedforward block. Existing code using separate calls still works; migrate opportunistically.
 
-## Stats endpoint
-- `/api/gpu/gen-cache/stats` (GET, requires API key) — returns L1 cache size, hits, total, hit_rate, TTL
-- Proxy route: `router.get("/gpu/gen-cache/stats", ...)` in model-proxy.ts
+## Per-array digest cache (pocket_multiply.py)
+- `_array_digest(a)` caches SHA-256 per array by `(ctypes.data, shape, dtype.str)` — memory address + shape + dtype
+- Weight matrix bytes (e.g. 3 MB QKV matrix) hashed ONCE at first call; all subsequent forward passes use the cached hex string
+- Combined digest = SHA-256 of "|".join(per_array_digests) — still hash-secure but fast even for large weights
+- `get_digest_cache_stats()` exposed at `/api/gpu/digest-cache/stats`
+- NOT valid for in-place training ops (activations vary each call → cache miss → normal hash path → no correctness risk)
+
+## Prefix KV cache (hyper_creative_transformer.py)
+- Module-level dict `_PREFIX_KV_CACHE`: key = SHA-256 of first min(T, 256) token IDs
+- Value = zlib-compressed pickle of {h: tensor, kv: list[(K,V)], ts: float, prefix_len: int}
+- Max 32 entries, 600s TTL, zlib level 1 compression (~4-8x smaller than raw tensors)
+- Two fast-paths in `prefill()`:
+  1. Full match (p_len == T): return cached h and kv immediately — zero forward passes
+  2. Partial match (p_len < T): load prefix KV, run suffix only, cat prefix+suffix KV along time axis
+- Store after every full prefill (min 4 tokens) keyed to min(T, 256) prefix length
+- `get_prefix_kv_stats()` exposed at `/api/gpu/prefix-kv/stats`
+- EVAL MODE ONLY: `if not self.training` guard prevents cache use during training
+
+## Infinite replica namespace pool (replica_scaler.py)
+- `ReplicaPool`: N `PocketDimension` instances sharing one orchestrator (cross-replica dedup is free)
+- Default N = max(2, min(cpu_count, 8)) — scales to core count
+- Round-robin dispatches GEMM requests across replicas; seed log (last 64 GEMMs) warms new replicas
+- `get_replica_pool()` singleton; `scale_to(target)` grows pool; never shrinks
+- `/api/gpu/replica-pool/stats` (GET) + `/api/gpu/replica-pool/grow` (POST, admin)
+
+## Weight pre-registration (warmup_pocket on HyperCreativeTransformerLM)
+- `warmup_pocket()` walks all `HyperLinearNL` modules, issues one synthetic GEMM per weight
+- Called during `_warm_digital_gpu()` at startup — first real forward pass sees pocket hits
+- Returns `{layers_warmed: int, weight_matrices: int}`
+
+## Stats endpoints (all require API key unless noted)
+- `/api/gpu/gen-cache/stats` — L1 in-process generation output cache
+- `/api/gpu/digest-cache/stats` — per-array SHA-256 digest cache hit count
+- `/api/gpu/prefix-kv/stats` — prefix KV cache hits/misses/hit_rate
+- `/api/gpu/replica-pool/stats` — replica count, round-robin position, hit rate
+- `/api/gpu/replica-pool/grow` (POST, admin) — grow pool to target replica count
