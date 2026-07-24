@@ -1546,9 +1546,12 @@ def _warm_start_subsystems() -> None:
         # walks all HyperLinearNL modules and issues one synthetic GEMM each,
         # seeding the per-array digest cache and priming the adaptive gate.
         try:
-            if base_model is not None:
-                result = base_model.warmup_pocket()
+            _bm = getattr(_creative_model, "model", None)
+            if _bm is not None and hasattr(_bm, "warmup_pocket"):
+                result = _bm.warmup_pocket()
                 print(f"[WarmStart] pocket pre-registration: {result}", flush=True)
+            else:
+                print("[WarmStart] pocket pre-registration skipped: model not ready", flush=True)
         except Exception as _wp_exc:
             print(f"[WarmStart] pocket pre-registration skipped: {_wp_exc}", flush=True)
         # Prime the replica pool — creates N parallel pocket namespaces that
@@ -8188,262 +8191,37 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
 def _render_audio_clip(job_id: str, bpm: float, key: str,
                        duration_sec: float, sample_rate: int = 44100,
                        genre: str = "", mood: str = "") -> str:
-    """Synthesize a musical audio clip 100% in-house, awareness-driven.
+    """Synthesize a musical audio clip — 100% on the Digital GPU stack.
 
-    Uses the digital GPU (via _digital_gpu_backend / numpy SIMD paths) for all
-    waveform generation math so every synthesis call exercises the same compute
-    stack as the AI model inference paths.
+    All waveform math routes through the self-contained Digital GPU engine
+    (NativeKernels compiled SIMD C + HyperGPU GEMM).  Zero calls to scipy,
+    librosa, or soundfile — the system is fully independent of Replit's base
+    environment for synthesis.
 
-    Genre and mood come from the live ContentAwarenessService music-mode context
-    (trending genres/moods from RSS + chart signals) so the output reflects real
-    industry signals rather than a generic fallback:
-
-    * trap / drill   → punchy 808 sub-bass + triplet hi-hat grid
-    * phonk          → heavy sub + distorted 808 swing + chromatic descent
-    * afrobeats      → syncopated off-beat stab + shaker + bright arp
-    * lo-fi / chill  → warm, slow arp + brushed snare every 2 beats
-    * pop / default  → four-on-floor kick + bright chord arp
+    Genre and mood come from the live ContentAwarenessService music-mode
+    context (trending genres/moods from RSS + Deezer chart signals).
 
     Returns the served relative URL.  Raises on encode failure so the job
     reports an explicit error instead of claiming success with a missing file.
     """
-    import wave as _wave
-    import numpy as np
+    from ai_model.audio.digital_gpu_synth import render_audio_clip as _dg_render
+    from ai_model.audio.digital_gpu_synth import write_wav as _dg_write_wav
     from ai_model.video.ffmpeg_util import run_ffmpeg
 
-    _genre = (genre or "").lower().strip()
-    _mood  = (mood  or "").lower().strip()
+    stereo_f32 = _dg_render(
+        job_id=job_id,
+        bpm=float(bpm),
+        key=(key or "C major"),
+        duration_sec=float(duration_sec),
+        genre=(genre or ""),
+        mood=(mood or ""),
+        sample_rate=int(sample_rate),
+    )
 
-    # ── Digital GPU routing ──────────────────────────────────────────────
-    # Route heavy waveform-matrix math through the digital GPU backend when
-    # available so synthesis uses the same SIMD/GEMM paths as inference.
-    # Falls back to bare numpy transparently — never-raise.
-    def _gpu_dot(a: "np.ndarray", b: "np.ndarray") -> "np.ndarray":
-        try:
-            if _digital_gpu_backend is not None:
-                return _digital_gpu_backend.gemm(
-                    np.ascontiguousarray(a).copy(),
-                    np.ascontiguousarray(b).copy(),
-                )
-        except Exception:
-            pass
-        return np.dot(a, b)
-
-    # ── Map "C major" / "A minor" → root frequency + scale intervals ──────
-    note_semitones = {"C": -9, "C#": -8, "D": -7, "D#": -6, "E": -5, "F": -4,
-                      "F#": -3, "G": -2, "G#": -1, "A": 0, "A#": 1, "B": 2}
-    parts = (key or "C major").split()
-    root_name = parts[0] if parts else "C"
-    is_minor = len(parts) > 1 and parts[1].lower().startswith("min")
-    root_freq = 220.0 * (2.0 ** (note_semitones.get(root_name, 0) / 12.0))
-    scale = [0, 2, 3, 5, 7, 8, 10] if is_minor else [0, 2, 4, 5, 7, 9, 11]
-
-    beat_sec  = max(0.15, 60.0 / max(40.0, min(float(bpm), 200.0)))
-    beat_len  = max(1, int(beat_sec * sample_rate))
-    n_total   = int(duration_sec * sample_rate)
-    audio: np.ndarray = np.zeros(n_total, dtype=np.float64)
-
-    # ── Awareness-driven harmonic matrix (digital GPU path) ───────────────
-    # Build a [degrees × harmonics] overtone matrix and multiply it via
-    # _gpu_dot so synthesis exercises the digital GPU GEMM path.
-    arp_degrees: list
-    note_gain: float
-    swing: float  # 0 = straight, 0.5 = full shuffle/swing
-
-    if any(g in _genre for g in ("trap", "drill", "drill")):
-        arp_degrees = [0, 0, 3, 0, 5, 0, 3, 7]  # sparse, punchy
-        note_gain   = 0.45
-        swing       = 0.18
-    elif "phonk" in _genre:
-        arp_degrees = [0, 7, 5, 3, 0, 10, 7, 5]  # chromatic descent
-        note_gain   = 0.5
-        swing       = 0.22
-    elif any(g in _genre for g in ("afrobeats", "afro", "amapiano")):
-        arp_degrees = [0, 4, 2, 4, 0, 6, 4, 2]  # syncopated stab
-        note_gain   = 0.5
-        swing       = 0.12
-    elif any(g in _genre for g in ("lo-fi", "lofi", "chill", "jazz")):
-        arp_degrees = [0, 2, 4, 2, 6, 4, 2, 0]  # warm, slow
-        note_gain   = 0.40
-        swing       = 0.30
-    elif "reggaeton" in _genre or "latin" in _genre:
-        arp_degrees = [0, 0, 4, 0, 5, 0, 4, 2]
-        note_gain   = 0.48
-        swing       = 0.08
-    else:  # pop / default
-        arp_degrees = [0, 2, 4, 6, 4, 2]
-        note_gain   = 0.55
-        swing       = 0.0
-
-    # Mood modulation: energetic/hype → brighter octave; melancholic → softer
-    base_octave = 1
-    if any(w in _mood for w in ("energetic", "hype", "euphoric", "aggressive")):
-        base_octave = 2
-        note_gain  *= 1.1
-    elif any(w in _mood for w in ("melancholic", "dark", "sad", "chill")):
-        base_octave = 1
-        note_gain  *= 0.85
-
-    # Overtone matrix: rows = harmonic slots (fundamental + overtones),
-    # cols = time samples for one note period.
-    note_sec = beat_sec * (0.5 if "trap" not in _genre else 0.25)
-    note_len = max(1, int(note_sec * sample_rate))
-    t_note   = np.arange(note_len, dtype=np.float64) / sample_rate
-
-    # [4 harmonics × note_len] — passed through digital GPU matmul
-    harmonic_ratios = np.array([[1.0], [2.0], [3.0], [0.5]], dtype=np.float64)
-    harmonic_weights = np.array([[0.55, 0.25, 0.12, 0.08]], dtype=np.float64)  # [1×4]
-    # harmonic_weights @ harmonic_ratios → [1×1] scalar (exercises GPU path)
-    _hw_check = _gpu_dot(harmonic_weights, harmonic_ratios)  # noqa: F841
-
-    env = np.exp(-3.5 * t_note / max(note_sec, 1e-3))
-    idx = 0
-    step = 0
-    while idx < n_total:
-        deg = scale[arp_degrees[step % len(arp_degrees)] % len(scale)]
-        octave = base_octave + (step // len(arp_degrees)) % 2
-        freq   = root_freq * (2.0 ** (deg / 12.0)) * octave
-        # Swing timing: every odd note is shifted later by swing × beat_len
-        _swing_offset = int(swing * beat_len) if (step % 2 == 1) else 0
-        _idx_sw = min(idx + _swing_offset, n_total - 1)
-        # Build overtone mix via matrix multiply through digital GPU
-        freq_vec    = np.array([[freq * r] for r in [1.0, 2.0, 3.0, 0.5]],
-                               dtype=np.float64)          # [4×1]
-        weights_row = np.array([0.55, 0.25, 0.12, 0.08],
-                               dtype=np.float64).reshape(1, 4)  # [1×4]
-        _mix_scalar = float(np.asarray(_gpu_dot(weights_row, np.array([1.0, 0.5, 0.25, 0.5],
-                                                            dtype=np.float64).reshape(4, 1))).ravel()[0])
-        tone = (
-            np.sin(2 * np.pi * freq        * t_note) * 0.55 +
-            np.sin(2 * np.pi * freq * 2.0  * t_note) * (0.25 * _mix_scalar) +
-            np.sin(2 * np.pi * freq * 3.0  * t_note) * 0.12 +
-            np.sin(2 * np.pi * freq * 0.5  * t_note) * 0.08
-        ) * env * note_gain
-        end = min(_idx_sw + note_len, n_total)
-        audio[_idx_sw:end] += tone[: end - _idx_sw]
-        idx += note_len
-        step += 1
-
-    # ── Genre-specific rhythm layer ───────────────────────────────────────
-    if any(g in _genre for g in ("trap", "drill")):
-        # 808 sub-bass kick + triplet hi-hat grid
-        kick_len = int(min(beat_sec * 0.6, 0.35) * sample_rate)
-        if kick_len > 1:
-            tk    = np.arange(kick_len) / sample_rate
-            kfreq = 55.0 * np.exp(-12.0 * tk)   # deep 808 sub
-            kick  = (np.sin(2 * np.pi * kfreq * tk) * np.exp(-6.0 * tk) +
-                     0.3 * np.sin(2 * np.pi * kfreq * 2 * tk) * np.exp(-12.0 * tk))
-            for b in range(0, n_total, beat_len):
-                end = min(b + kick_len, n_total)
-                audio[b:end] += 0.75 * kick[: end - b]
-        # Triplet hi-hat pattern (beat / 3)
-        hihat_period = max(1, beat_len // 3)
-        hihat_len    = min(hihat_period // 2, int(0.02 * sample_rate))
-        if hihat_len > 1:
-            th   = np.arange(hihat_len) / sample_rate
-            hat  = np.random.default_rng(42).standard_normal(hihat_len) * np.exp(-80.0 * th)
-            for b in range(0, n_total, hihat_period):
-                end = min(b + hihat_len, n_total)
-                audio[b:end] += 0.18 * hat[: end - b]
-
-    elif "phonk" in _genre:
-        # Heavy sub-bass + distorted 808 on beat 1 & 3
-        kick_len = int(min(beat_sec * 0.7, 0.40) * sample_rate)
-        if kick_len > 1:
-            tk   = np.arange(kick_len) / sample_rate
-            kf   = 50.0 * np.exp(-8.0 * tk)
-            kick = np.tanh(2.5 * np.sin(2 * np.pi * kf * tk)) * np.exp(-5.0 * tk)
-            for b_i, b in enumerate(range(0, n_total, beat_len)):
-                if b_i % 2 == 0:
-                    end = min(b + kick_len, n_total)
-                    audio[b:end] += 0.80 * kick[: end - b]
-
-    elif any(g in _genre for g in ("afrobeats", "afro", "amapiano")):
-        # Off-beat stab on the "and" of beat 2
-        stab_offset = beat_len + beat_len // 2
-        stab_len    = int(0.08 * sample_rate)
-        stab_period = beat_len * 2
-        if stab_len > 1:
-            ts   = np.arange(stab_len) / sample_rate
-            sf   = root_freq * 1.5
-            stab = np.sin(2 * np.pi * sf * ts) * np.exp(-30.0 * ts)
-            for b in range(stab_offset, n_total, stab_period):
-                end = min(b + stab_len, n_total)
-                audio[b:end] += 0.45 * stab[: end - b]
-        # Shaker on every 16th note
-        shaker_period = max(1, beat_len // 4)
-        shaker_len    = min(shaker_period // 3, int(0.015 * sample_rate))
-        if shaker_len > 1:
-            rng  = np.random.default_rng(7)
-            sh   = rng.standard_normal(shaker_len) * np.exp(
-                -120.0 * np.arange(shaker_len) / sample_rate)
-            for b in range(0, n_total, shaker_period):
-                end = min(b + shaker_len, n_total)
-                audio[b:end] += 0.12 * sh[: end - b]
-
-    elif any(g in _genre for g in ("lo-fi", "lofi", "chill", "jazz")):
-        # Brushed snare on beats 2 & 4 only
-        kick_len = int(min(beat_sec, 0.18) * sample_rate)
-        if kick_len > 1:
-            tk    = np.arange(kick_len) / sample_rate
-            kfreq = 90.0 * np.exp(-18.0 * tk)
-            kick  = np.sin(2 * np.pi * kfreq * tk) * np.exp(-10.0 * tk)
-            for b_i, b in enumerate(range(0, n_total, beat_len)):
-                if b_i % 4 in (1, 3):   # beats 2 & 4
-                    end = min(b + kick_len, n_total)
-                    audio[b:end] += 0.35 * kick[: end - b]
-            # Soft kick on beats 1 & 3
-            for b_i, b in enumerate(range(0, n_total, beat_len)):
-                if b_i % 4 in (0, 2):
-                    tk2   = np.arange(kick_len) / sample_rate
-                    kf2   = 80.0 * np.exp(-20.0 * tk2)
-                    kick2 = np.sin(2 * np.pi * kf2 * tk2) * np.exp(-14.0 * tk2)
-                    end   = min(b + kick_len, n_total)
-                    audio[b:end] += 0.50 * kick2[: end - b]
-
-    else:
-        # Default: four-on-the-floor kick
-        kick_len = int(min(beat_sec, 0.18) * sample_rate)
-        if kick_len > 1:
-            tk    = np.arange(kick_len) / sample_rate
-            kfreq = 110.0 * np.exp(-18.0 * tk)
-            kick  = np.sin(2 * np.pi * kfreq * tk) * np.exp(-10.0 * tk)
-            for b in range(0, n_total, beat_len):
-                end = min(b + kick_len, n_total)
-                audio[b:end] += 0.6 * kick[: end - b]
-
-    # ── Stereo-width simulation via comb filter (digital GPU norm) ─────────
-    # Compute a tiny [1×n_total] row-norm via the GPU path as a gain envelope
-    try:
-        if _digital_gpu_backend is not None and n_total > 0:
-            _norm = _digital_gpu_backend.gemm(
-                np.ones((1, 1), dtype=np.float64),
-                np.array([[1.0]], dtype=np.float64),
-            )
-            _gain = float(np.clip(_norm.ravel()[0], 0.9, 1.1))
-            audio *= _gain
-    except Exception:
-        pass
-
-    # ── Normalize → 16-bit stereo PCM (duplicate mono to stereo) ─────────
-    peak = float(np.max(np.abs(audio))) or 1.0
-    mono = np.clip(audio / peak * 0.92, -1.0, 1.0)
-    # Slight L/R decorrelation via comb delay for perceived width
-    delay_samples = max(1, int(0.008 * sample_rate))
-    left  = mono.copy()
-    right = np.roll(mono, delay_samples)
-    right[:delay_samples] = 0.0
-    stereo = np.empty(n_total * 2, dtype=np.int16)
-    stereo[0::2] = (left  * 32767.0).astype(np.int16)
-    stereo[1::2] = (right * 32767.0).astype(np.int16)
-
+    n_total  = int(duration_sec * sample_rate)
     wav_path = _UPLOADS_PATH / f"audio_{job_id}.wav"
     mp3_path = _UPLOADS_PATH / f"audio_{job_id}.mp3"
-    with _wave.open(str(wav_path), "wb") as wf:
-        wf.setnchannels(2)
-        wf.setsampwidth(2)
-        wf.setframerate(sample_rate)
-        wf.writeframes(stereo.tobytes())
+    _dg_write_wav(wav_path, stereo_f32, sample_rate=int(sample_rate))
 
     try:
         result = run_ffmpeg(

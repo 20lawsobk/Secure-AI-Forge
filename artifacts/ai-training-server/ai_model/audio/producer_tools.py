@@ -160,47 +160,52 @@ def master_export(in_wav: Path, out_path: Path, *, fmt: str = "mp3",
 def separate_stems(in_wav: Path, out_dir: Path, base_name: str, *,
                    fmt: str = "wav", bit_depth: int = 24,
                    bass_cutoff_hz: float = 250.0) -> Dict[str, Path]:
-    """Split a clip into ``drums`` / ``bass`` / ``melody`` stems (real DSP).
+    """Split a clip into ``drums`` / ``bass`` / ``melody`` stems.
 
-    Uses librosa harmonic-percussive source separation (HPSS) to peel off the
-    drums (percussive), then a spectral low/high split on the harmonic residue
-    to separate bass (< ``bass_cutoff_hz``) from the melodic/harmonic content.
-    Stems are time-aligned and sum back to (approximately) the source.
+    Fully self-contained — routes entirely through the Digital GPU stack:
+      • WAV decode: stdlib ``wave`` module
+      • STFT / iSTFT: Digital GPU DFT-matrix GEMM (no librosa / scipy)
+      • HPSS: Wiener soft masks on GPU-computed magnitude spectrogram
+      • Output: stdlib ``wave`` module (no soundfile)
 
-    Returns a mapping ``{stem_name: written_path}``. Raises on failure so the
-    caller can honestly report that stems were unavailable.
+    Returns ``{stem_name: path}``. Raises on failure so the caller reports
+    stems unavailable honestly rather than silently returning silence.
     """
-    import numpy as np
-    import librosa
-    import soundfile as sf
+    import wave as _wave_mod
+    import numpy as _np
 
-    y, sr = librosa.load(str(in_wav), sr=None, mono=True)
+    from ai_model.audio.digital_gpu_synth import (
+        digital_gpu_hpss, write_stem_wav)
+
+    # ── Decode source WAV (stdlib only) ──────────────────────────────────
+    with _wave_mod.open(str(in_wav), "rb") as wf:
+        sr        = wf.getframerate()
+        n_ch      = wf.getnchannels()
+        sw        = wf.getsampwidth()
+        n_frames  = wf.getnframes()
+        raw       = wf.readframes(n_frames)
+
+    dtype_map = {1: _np.int8, 2: _np.int16, 4: _np.int32}
+    pcm = _np.frombuffer(raw, dtype=dtype_map.get(sw, _np.int16))
+    # Mix to mono float32
+    if n_ch > 1:
+        pcm = pcm.reshape(-1, n_ch).mean(axis=1)
+    y = pcm.astype(_np.float32) / float(1 << (sw * 8 - 1))
+
     if y.size == 0:
         raise RuntimeError("empty audio — cannot separate stems")
 
-    # 1) Harmonic / percussive split. margin>1 gives cleaner separation.
-    harmonic, percussive = librosa.effects.hpss(y, margin=(2.0, 2.0))
+    # ── HPSS via Digital GPU STFT/iSTFT ─────────────────────────────────
+    stems_audio = digital_gpu_hpss(
+        y, sample_rate=int(sr),
+        n_fft=2048, hop_length=512,
+        bass_cutoff_hz=float(bass_cutoff_hz),
+    )
 
-    # 2) Spectral low/high split of the harmonic part → bass vs melody.
-    n_fft = 2048
-    hop = n_fft // 4
-    D = librosa.stft(harmonic, n_fft=n_fft, hop_length=hop)
-    freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
-    low_mask = (freqs <= bass_cutoff_hz)[:, None]
-    bass = librosa.istft(D * low_mask, hop_length=hop, length=len(harmonic))
-    melody = librosa.istft(D * (~low_mask), hop_length=hop, length=len(harmonic))
-
-    stems = {"drums": percussive, "bass": bass, "melody": melody}
-
-    subtype = {16: "PCM_16", 24: "PCM_24", 32: "PCM_32"}.get(int(bit_depth),
-                                                             "PCM_24")
+    # ── Write stems via stdlib wave (no soundfile) ────────────────────────
     out: Dict[str, Path] = {}
-    for name, sig in stems.items():
-        peak = float(np.max(np.abs(sig))) if sig.size else 0.0
-        if peak > 1.0:  # guard against istft overshoot clipping
-            sig = sig / peak
-        ext = "wav" if fmt == "wav" else "wav"  # stems always lossless WAV
-        p = Path(out_dir) / f"{base_name}_stem_{name}.{ext}"
-        sf.write(str(p), sig.astype(np.float32), sr, subtype=subtype)
+    for name, sig in stems_audio.items():
+        p = Path(out_dir) / f"{base_name}_stem_{name}.wav"
+        write_stem_wav(p, sig.astype(_np.float32), sample_rate=int(sr))
         out[name] = p
     return out

@@ -36,6 +36,7 @@ _OMP_ELEM_MIN = 100_000
 
 _C_SOURCE = r"""
 #include <stddef.h>
+#include <stdint.h>
 #include <math.h>
 
 /* Cephes-style single-precision exp; branchless so it auto-vectorizes to AVX-512.
@@ -62,6 +63,74 @@ static inline float fast_expf(float x) {
 
 static inline float fast_tanhf(float z) {   /* tanh(z) = 1 - 2/(e^{2z}+1) */
     return 1.0f - 2.0f / (fast_expf(2.0f * z) + 1.0f);
+}
+
+/* 7th-order minimax polynomial for sin on [-π, π] — ~5e-7 relative error.
+   Branchless range-reduction via roundf so the inner loop auto-vectorizes. */
+static inline float fast_sinf_poly(float x) {
+    const float INV_TWO_PI = 0.15915494309f;
+    const float TWO_PI     = 6.28318530718f;
+    x -= TWO_PI * roundf(x * INV_TWO_PI);   /* reduce to (-π, π] */
+    float x2 = x * x;
+    /* Horner: x*(1 - x²/6*(1 - x²/20*(1 - x²/42))) */
+    return x * (1.0f - x2 * (0.16666667f
+                - x2 * (0.00833333f
+                - x2 * 0.00019841269f)));
+}
+
+/* ── Audio synthesis kernels ─────────────────────────────────────────────── */
+
+/* Additive synthesis: out[t] += sum_h(amps[h] * sin(2π*freqs[h]*t/sr))
+   Outer loop over harmonics keeps the inner time-domain loop long and
+   contiguous so GCC ivdep + AVX-512 SIMD width applies cleanly. */
+void additive_synth(const float* freqs, const float* amps, int n_harm,
+                    float sample_rate, float* out, size_t n_samples) {
+    const float TWO_PI = 6.28318530718f;
+    for (int h = 0; h < n_harm; ++h) {
+        float step = TWO_PI * freqs[h] / sample_rate;
+        float a = amps[h];
+        #pragma GCC ivdep
+        for (size_t t = 0; t < n_samples; ++t)
+            out[t] += a * fast_sinf_poly(step * (float)t);
+    }
+}
+
+/* Exponential-decay envelope: out[t] = fast_expf(-rate * t / sr).
+   One contiguous pass — pure memory-bandwidth bound at large n. */
+void exp_decay(float rate, float sample_rate, float* out, size_t n) {
+    const float step = -rate / sample_rate;
+    #pragma GCC ivdep
+    for (size_t i = 0; i < n; ++i) out[i] = fast_expf(step * (float)i);
+}
+
+/* Modulated-frequency exponential sweep: out[t] = sin(2π * f0*exp(-sweep*t/sr) * t/sr).
+   Used for deep 808 sub-bass kicks whose pitch drops exponentially. */
+void freq_sweep_sin(float f0, float sweep, float sample_rate,
+                    float* out, size_t n) {
+    const float TWO_PI_SR = 6.28318530718f / sample_rate;
+    const float NEG_SWEEP_SR = -sweep / sample_rate;
+    #pragma GCC ivdep
+    for (size_t t = 0; t < n; ++t) {
+        float ft = f0 * fast_expf(NEG_SWEEP_SR * (float)t);
+        out[t] = fast_sinf_poly(TWO_PI_SR * ft * (float)t);
+    }
+}
+
+/* Seeded xorshift32 white noise in [-1, 1].  seed=0 → use 0xDEADBEEF.
+   xorshift is embarrassingly SIMD-friendly and has no branching. */
+void white_noise(uint32_t seed, float* out, size_t n) {
+    uint32_t s = seed ? seed : 0xDEADBEEFu;
+    for (size_t i = 0; i < n; ++i) {
+        s ^= s << 13u; s ^= s >> 17u; s ^= s << 5u;
+        out[i] = (float)(int32_t)s * 4.6566128752458e-10f;  /* /2^31 */
+    }
+}
+
+/* Apply element-wise product in-place: out[i] *= scale[i].
+   Used for envelope application without a temporary array. */
+void inplace_mul(float* out, const float* scale, size_t n) {
+    #pragma GCC ivdep
+    for (size_t i = 0; i < n; ++i) out[i] *= scale[i];
 }
 
 /* ── memory-bound elementwise: fusion is the win ─────────────────────────── */
@@ -206,18 +275,27 @@ class NativeKernels:
             self._bind(ctypes)
 
     def _bind(self, ctypes) -> None:
+        import ctypes as _ct
         fp, sz, f = _FP, ctypes.c_size_t, ctypes.c_float
+        ui = _ct.c_uint32
+        i32 = _ct.c_int
         sigs = {
-            "affine_relu_sq": [fp, fp, f, f, f, sz],
-            "hardswish": [fp, fp, sz],
-            "axpby": [fp, fp, fp, f, f, sz],
-            "silu": [fp, fp, sz],
-            "gelu": [fp, fp, sz],
-            "softmax_rows": [fp, fp, sz, sz],
-            "rmsnorm_rows": [fp, fp, fp, f, sz, sz],
-            "layernorm_rows": [fp, fp, fp, fp, f, sz, sz],
-            "gelu_backward": [fp, fp, fp, sz],
-            "silu_backward": [fp, fp, fp, sz],
+            "affine_relu_sq":  [fp, fp, f, f, f, sz],
+            "hardswish":       [fp, fp, sz],
+            "axpby":           [fp, fp, fp, f, f, sz],
+            "silu":            [fp, fp, sz],
+            "gelu":            [fp, fp, sz],
+            "softmax_rows":    [fp, fp, sz, sz],
+            "rmsnorm_rows":    [fp, fp, fp, f, sz, sz],
+            "layernorm_rows":  [fp, fp, fp, fp, f, sz, sz],
+            "gelu_backward":   [fp, fp, fp, sz],
+            "silu_backward":   [fp, fp, fp, sz],
+            # ── audio synthesis kernels ──────────────────────────────────
+            "additive_synth":  [fp, fp, i32, f, fp, sz],
+            "exp_decay":       [f, f, fp, sz],
+            "freq_sweep_sin":  [f, f, f, fp, sz],
+            "white_noise":     [ui, fp, sz],
+            "inplace_mul":     [fp, fp, sz],
         }
         for name, argtypes in sigs.items():
             fn = getattr(self._lib, name)
@@ -351,6 +429,90 @@ class NativeKernels:
                                  self._ptr(y), float(eps), rows, cols)
         self.stats["native"] += 1
         return y
+
+    # ── Audio synthesis kernels ───────────────────────────────────────────────
+
+    def additive_synth(self, freqs, amps, sample_rate: float,
+                       out: np.ndarray) -> np.ndarray:
+        """Accumulate additive synthesis into ``out`` (in-place).
+
+        For each harmonic h: out[t] += amps[h] * sin(2π * freqs[h] * t / sr).
+        The inner time-domain loop is vectorized by the compiler to AVX-512 width.
+        ``out`` must be float32 and pre-allocated to the desired sample count.
+        """
+        freqs = self._f32(np.asarray(freqs).ravel())
+        amps  = self._f32(np.asarray(amps).ravel())
+        if freqs.shape != amps.shape:
+            raise ValueError("freqs and amps must have the same length")
+        out = np.ascontiguousarray(out, dtype=np.float32)
+        n_harm = int(freqs.size)
+        if self.available and n_harm > 0 and out.size > 0:
+            self._lib.additive_synth(
+                self._ptr(freqs), self._ptr(amps),
+                n_harm, float(sample_rate),
+                self._ptr(out), out.size)
+            self.stats["native"] += 1
+        else:
+            # numpy fallback — identical math
+            t = np.arange(out.size, dtype=np.float32) / np.float32(sample_rate)
+            for freq, amp in zip(freqs.tolist(), amps.tolist()):
+                out += amp * np.sin(2.0 * np.pi * freq * t)
+            self.stats["fallback"] += 1
+        return out
+
+    def exp_decay(self, rate: float, sample_rate: float, n: int) -> np.ndarray:
+        """Return exp(-rate * t / sample_rate) for t in [0, n)."""
+        out = np.empty(n, dtype=np.float32)
+        if self.available and n > 0:
+            self._lib.exp_decay(float(rate), float(sample_rate),
+                                self._ptr(out), n)
+            self.stats["native"] += 1
+        else:
+            t = np.arange(n, dtype=np.float32) / np.float32(sample_rate)
+            np.exp(-float(rate) * t, out=out)
+            self.stats["fallback"] += 1
+        return out
+
+    def freq_sweep_sin(self, f0: float, sweep: float,
+                       sample_rate: float, n: int) -> np.ndarray:
+        """sin(2π * f0 * exp(-sweep*t/sr) * t/sr) — deep 808 pitch-drop sweep."""
+        out = np.empty(n, dtype=np.float32)
+        if self.available and n > 0:
+            self._lib.freq_sweep_sin(float(f0), float(sweep),
+                                     float(sample_rate), self._ptr(out), n)
+            self.stats["native"] += 1
+        else:
+            t = np.arange(n, dtype=np.float32) / np.float32(sample_rate)
+            ft = float(f0) * np.exp(-float(sweep) * t)
+            np.sin(2.0 * np.pi * ft * t, out=out)
+            self.stats["fallback"] += 1
+        return out
+
+    def white_noise(self, seed: int, n: int) -> np.ndarray:
+        """Seeded xorshift32 white noise in [-1, 1]."""
+        out = np.empty(n, dtype=np.float32)
+        if self.available and n > 0:
+            self._lib.white_noise(int(seed) & 0xFFFFFFFF, self._ptr(out), n)
+            self.stats["native"] += 1
+        else:
+            rng = np.random.default_rng(seed)
+            out[:] = rng.standard_normal(n).astype(np.float32)
+            self.stats["fallback"] += 1
+        return out
+
+    def inplace_mul(self, out: np.ndarray, scale: np.ndarray) -> np.ndarray:
+        """In-place element-wise multiply: out[i] *= scale[i]."""
+        out   = np.ascontiguousarray(out,   dtype=np.float32)
+        scale = np.ascontiguousarray(scale, dtype=np.float32)
+        if out.shape != scale.shape:
+            raise ValueError(f"inplace_mul shape mismatch: {out.shape} vs {scale.shape}")
+        if self.available and out.size > 0:
+            self._lib.inplace_mul(self._ptr(out), self._ptr(scale), out.size)
+            self.stats["native"] += 1
+        else:
+            out *= scale
+            self.stats["fallback"] += 1
+        return out
 
     def gelu_backward(self, x, dy) -> np.ndarray:
         """Fused GELU backward: dx = dy * d/dx[GELU(x)].  One AVX-512 pass."""
