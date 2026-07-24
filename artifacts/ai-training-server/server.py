@@ -9537,6 +9537,19 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
                         "job_id":       job_id,
                         "status":       "done",
                         "intelligence": brief.to_dict(),
+                        # Full audio result included inline — callers can use
+                        # the URL directly without a follow-up poll.
+                        "url":          _fp_hit.get("url"),
+                        "audio_url":    _fp_hit.get("url"),
+                        "bpm":          _fp_hit.get("bpm"),
+                        "key":          _fp_hit.get("key"),
+                        "format":       _fp_hit.get("format"),
+                        "sample_rate":  _fp_hit.get("sample_rate"),
+                        "bit_depth":    _fp_hit.get("bit_depth"),
+                        "loudness_lufs": _fp_hit.get("loudness_lufs"),
+                        "stems":        _fp_hit.get("stems") or {},
+                        "arrangement":  _fp_hit.get("arrangement"),
+                        "source_sample": _fp_hit.get("source_sample"),
                     }
     except Exception:
         pass  # never block on fast-path failure

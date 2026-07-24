@@ -396,6 +396,67 @@ async function maxcorePost(path: string, body: unknown): Promise<unknown> {
   return res.json();
 }
 
+async function maxcoreGet(path: string): Promise<unknown> {
+  const res = await undiciFetch(`${MAXCORE_URL}${path}`, {
+    method: "GET",
+    headers: { "X-Api-Key": MAXCORE_API_KEY },
+    dispatcher: _modelPool,
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => res.statusText);
+    throw new Error(`maxcore GET ${path} → ${res.status}: ${err}`);
+  }
+  return res.json();
+}
+
+/**
+ * Submit a real audio render job and wait for it to complete.
+ * Returns the audio URL when done. Exploits the fast-path: if the POST
+ * response already has status:"done" and a url (cache hit), returns
+ * immediately without a single poll. Otherwise polls /api/audio-job/:id
+ * every 300 ms until done or timeout.
+ */
+async function renderAudioJob(
+  genre: string,
+  duration: number,
+  awareness?: unknown,
+  timeoutMs = 120_000,
+): Promise<string | null> {
+  type JobResp = Record<string, unknown>;
+  const submit = (await maxcorePost("/api/generate/audio", {
+    genre,
+    duration,
+    ...(awareness ? { awareness } : {}),
+  })) as JobResp;
+
+  // Fast-path: cache hit — url is included in the POST response itself.
+  if (submit["status"] === "done" && typeof submit["url"] === "string") {
+    return submit["url"] as string;
+  }
+
+  const jobId = submit["job_id"] as string | undefined;
+  if (!jobId) return null;
+
+  // Poll until done or timeout.
+  const deadline = Date.now() + timeoutMs;
+  const POLL_MS = 300;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, POLL_MS));
+    try {
+      const job = (await maxcoreGet(`/api/audio-job/${jobId}`)) as JobResp;
+      if (job["status"] === "done" && typeof job["url"] === "string") {
+        return job["url"] as string;
+      }
+      if (job["status"] === "error" || job["status"] === "cancelled") {
+        return null;
+      }
+    } catch {
+      // transient poll error — keep waiting
+    }
+  }
+  return null; // timed out
+}
+
 // ─── Step 1: Normalize input via maxcore /analyze ─────────────────────────────
 
 async function normalizeInput(
@@ -549,27 +610,62 @@ const audioWorker = {
     inputs: unknown,
     awareness: WorkerAwareness,
   ): Promise<GeneratedAsset[]> {
-    const result = (await maxcorePost("/generate/audio", {
-      step,
-      inputs,
-      ...(awareness ? { awareness } : {}),
-    })) as {
-      outputs: Array<{
-        url: string;
-        platform: Platform;
-        slotId: string;
-        meta: Record<string, unknown>;
-      }>;
-    };
+    const params = step.params ?? {};
+    const slots = (params["slots"] as Array<{ id: string; platform: string }> | undefined) ?? [];
+    const maxDuration = (params["maxDurationSec"] as number | undefined) ?? 30;
 
-    return (result.outputs ?? []).map((o) => ({
-      id: randomUUID(),
-      modality: "audio" as OutputModality,
-      payload: o.url,
-      platform: o.platform,
-      slotId: o.slotId,
-      metadata: o.meta ?? {},
-    }));
+    // Derive genre from normalised inputs (semantic.genre) so each slot gets
+    // a contextually appropriate track rather than a generic fallback.
+    const normalizedInputs =
+      inputs != null && typeof inputs === "object"
+        ? (inputs as Record<string, unknown>)
+        : {};
+    const genre =
+      (
+        (normalizedInputs["semantic"] as Record<string, unknown> | undefined)
+          ?.["genre"] as string | undefined
+      ) ?? "music";
+
+    if (slots.length === 0) {
+      // No per-slot spec — generate one track and return it.
+      const url = await renderAudioJob(genre, maxDuration, awareness ?? undefined);
+      if (!url) return [];
+      return [
+        {
+          id: randomUUID(),
+          modality: "audio" as OutputModality,
+          payload: url,
+          platform: "general" as Platform,
+          slotId: "",
+          metadata: { genre, duration: maxDuration },
+        },
+      ];
+    }
+
+    // Generate one track per slot in parallel; all fast-path hits resolve
+    // simultaneously from the in-process cache (< 100 ms each).
+    const settled = await Promise.allSettled(
+      slots.map((slot) =>
+        renderAudioJob(genre, maxDuration, awareness ?? undefined).then((url) => ({
+          url,
+          slot,
+        })),
+      ),
+    );
+
+    return settled
+      .filter(
+        (r): r is PromiseFulfilledResult<{ url: string; slot: { id: string; platform: string } }> =>
+          r.status === "fulfilled" && r.value.url !== null,
+      )
+      .map(({ value: { url, slot } }) => ({
+        id: randomUUID(),
+        modality: "audio" as OutputModality,
+        payload: url,
+        platform: slot.platform as Platform,
+        slotId: slot.id,
+        metadata: { genre, duration: maxDuration },
+      }));
   },
 };
 
