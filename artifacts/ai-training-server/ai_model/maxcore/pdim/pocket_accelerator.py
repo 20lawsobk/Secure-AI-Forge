@@ -98,8 +98,12 @@ class _ShardedLRU:
 
     @staticmethod
     def _idx(key: str) -> int:
-        """Map a hex-digest key to a shard index in O(1) — no extra hash."""
-        return int(key[-2:], 16)   # last 2 hex chars → 0x00-0xFF
+        """Map any key to a shard index in O(1)."""
+        # Originally parsed last 2 chars as hex, but extra_key suffixes
+        # (e.g. ":int=false") make the tail non-hex → ValueError.
+        # Use Python's built-in hash masked to 0-255; collisions are fine
+        # since the shard still does an exact-key lookup.
+        return hash(key) & 0xFF
 
     def get(self, key: str) -> "Optional[tuple[np.ndarray, float]]":
         idx = self._idx(key)

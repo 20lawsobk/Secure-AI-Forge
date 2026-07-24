@@ -189,6 +189,8 @@ class MaxCoreDiffusionPipeline:
 
 def _get_pipeline() -> Optional[MaxCoreDiffusionPipeline]:
     global _pipeline
+    if not _TORCH_OK:
+        return None  # torch unavailable — skip guard in test will trigger correctly
     if _pipeline is not None:
         return _pipeline
     with _pipeline_lock:

@@ -8443,9 +8443,12 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
         # never-raise: on timeout we simply proceed awareness-only.
         if not (meta and int(meta.get("num_chunks", 0)) > 0):
             from workers.seed_audio_dataset import is_seeding as _is_seeding_render
-            _wait_deadline = time.time() + 12.0
+            # Short wait only: if the seeder just started, give it 2s to land
+            # the first chunk. 12s was excessive and added minutes of latency
+            # on every render when pdim is offline (seeder never lands anything).
+            _wait_deadline = time.time() + 2.0
             while _is_seeding_render() and time.time() < _wait_deadline:
-                time.sleep(1.5)
+                time.sleep(0.5)
                 meta = storage.get("mb:dataset:audio:meta")
                 if meta and int(meta.get("num_chunks", 0)) > 0:
                     break  # first chunk landed — metadata refinement available
@@ -9087,7 +9090,6 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
     def _process():
         import time as _t
         import numpy as _np2
-        _t.sleep(2)
 
         # ── Job-level render deadline ──────────────────────────────────────
         # Guaranteed-completion policy: NO render deadline.  The job is never

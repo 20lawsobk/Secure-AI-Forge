@@ -1659,7 +1659,13 @@ def _render_stems_internal(
     step_len = int(step_sec * sample_rate)
     bar_len  = step_len * 16
     sections = _sections_for(_genre, duration_sec, bpm_f)
-    n_total  = sum(int(s[1]) * bar_len for s in sections)
+    # IMPORTANT: n_total must match what render_stems actually produced.
+    # render_stems uses max(int(duration_sec * sample_rate), bar_len * 8).
+    # Re-deriving from sections yields a DIFFERENT value at low BPMs, causing
+    # a broadcast error in render_full_track when it tries to write mix_L
+    # (stems-length) into a stereo buffer sized from this mismatched n_total.
+    # Use the actual rendered length from the stems to guarantee consistency.
+    n_total  = len(stems["drums"]) // 2  # stems are interleaved stereo
     if n_total == 0:
         n_total = int(duration_sec * sample_rate)
 

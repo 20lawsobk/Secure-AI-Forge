@@ -1455,7 +1455,7 @@ router.post("/train/feedback", async (req, res) => {
 
 router.get("/jobs/:jobId/progress", async (req, res) => {
   const { jobId } = req.params;
-  const SSE_POLL_MS = 1_500;
+  const SSE_POLL_MS = 300;
   const SSE_TIMEOUT_MS = 5 * 60 * 1_000;
 
   res.setHeader("Content-Type", "text/event-stream");
