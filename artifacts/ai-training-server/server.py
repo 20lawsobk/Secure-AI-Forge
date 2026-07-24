@@ -1020,6 +1020,13 @@ def _fw_ingest(key: dict, content_type: str, payload: dict, meta: dict) -> None:
 # concurrent admin renders can't clobber each other's index append.
 _AUDIO_DS_INGEST_LOCK = threading.Lock()
 
+# ── In-process audio render cache (Layer 1) ───────────────────────────────────
+# Maps (bpm_bucket, key, genre, dur_bucket, fmt, lufs, stems) → result dict.
+# Lets repeated requests for the same combo return in 0ms without touching
+# storage or synthesis.  Max 128 entries; oldest evicted on overflow.
+_AUDIO_RENDER_CACHE: "dict[tuple, dict]" = {}
+_AUDIO_RENDER_CACHE_LOCK = threading.Lock()
+
 
 def _fw_ingest_audio_render(key: dict, job_id: str, render: dict,
                             genres: list) -> None:
@@ -1510,6 +1517,9 @@ async def on_startup():
         print(f"[Server] admin content loop not started: {_loop_exc}")
     warm_thread = threading.Thread(target=_warm_content_cache, daemon=True)
     warm_thread.start()
+    audio_warm_thread = threading.Thread(target=_warm_audio_pool, daemon=True,
+                                         name="audio-pool-warmer")
+    audio_warm_thread.start()
     subsys_thread = threading.Thread(target=_warm_start_subsystems, daemon=True)
     subsys_thread.start()
 
@@ -1696,6 +1706,53 @@ def _warm_content_cache() -> None:
                 print(f"[CacheWarm] {plat}/{topic}: {exc}")
 
     print(f"[CacheWarm] Pre-warmed {warmed}/{total} content slots into PDIM cache")
+
+
+def _warm_audio_pool() -> None:
+    """Pre-generate audio for common genre/BPM combos so L1 cache is hot
+    before the first user request arrives.  Runs in a daemon thread after
+    warm-start completes; never raises; never blocks the main server.
+
+    Combos are ordered so the most-requested genre (electronic) lands first.
+    Each render goes through the full pool path, writes to L1 cache, and
+    subsequent identical requests return the pre-rendered file instantly.
+    """
+    import time as _awt
+    # Wait for model + storage ready (max 90 s).
+    for _ in range(90):
+        if _model_ready:
+            break
+        _awt.sleep(1)
+    else:
+        print("[AudioWarm] model not ready after 90 s — skipping audio pre-warm",
+              flush=True)
+        return
+
+    COMBOS = [
+        # (genre, duration_sec) — covers the most common dashboard requests
+        ("electronic", 30),
+        ("hip-hop",    30),
+        ("pop",        30),
+        ("trap",       30),
+        ("afrobeats",  30),
+    ]
+    warmed = 0
+    fake_job_prefix = "audiowarm"
+    for genre, dur in COMBOS:
+        try:
+            _fake_id = f"{fake_job_prefix}_{genre}_{dur}s"
+            _render_audio_from_dataset(
+                bpm=None, key=None, duration_sec=dur, job_id=_fake_id,
+                opts={"genre": genre, "preferred_genres": [genre],
+                      "format": "mp3"},
+            )
+            warmed += 1
+            print(f"[AudioWarm] pre-warmed genre={genre!r} {dur}s", flush=True)
+        except Exception as _aw_err:
+            print(f"[AudioWarm] {genre}/{dur}s skipped: {_aw_err}", flush=True)
+
+    print(f"[AudioWarm] L1 audio cache pre-warmed {warmed}/{len(COMBOS)} combos",
+          flush=True)
 
 
 def _reconcile_audio_manifest(storage) -> None:
@@ -8425,33 +8482,32 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
     if not target_bpm:
         target_bpm = 120.0
 
-    # ── Dataset metadata reference (optional parameter refinement) ─────────────
-    # When a real-track dataset exists, run the selector purely for metadata:
-    # the matched sample's genre tags and BPM range are used to cross-check /
-    # confirm the synthesis targets.  No audio bytes are fetched.
-    # Never raises — dataset absence is not an error condition.
+    # ── Layer 2: Dataset pool lookup (ms — SQLite GET + selector) ────────────
+    # The L1 cache key is derived from the CHUNK actually selected, not from
+    # the requested BPM/key (which varies per-request even for the same genre).
+    # This means the pre-warmer's cached files are reused by all real requests
+    # that select the same chunk, regardless of their requested key/tempo.
+    _dur_bucket = round(float(duration_sec or 30.0) / 5) * 5
     _ref_sample: "dict | None" = None
+    _src_from_pool = False
+    _l1_key: "tuple | None" = None
+    src_path = _UPLOADS_PATH / f"audio_src_{job_id}.mp3"
+    applied_bpm = float(target_bpm)
+    applied_key = str(target_key or "C major")
     try:
         storage = get_storage()
         meta = storage.get("mb:dataset:audio:meta")
 
-        # If the dataset is empty but the background seeder is actively
-        # running, wait briefly for the first chunk so this render can
-        # benefit from real-track metadata refinement.  Bounded to 12 s
-        # (well inside the <30 s job budget — this renderer is also used by
-        # the video auto-soundtrack path which has no early-exit guard) and
-        # never-raise: on timeout we simply proceed awareness-only.
+        # Brief seeder wait only when dataset is empty and seeder just started.
         if not (meta and int(meta.get("num_chunks", 0)) > 0):
             from workers.seed_audio_dataset import is_seeding as _is_seeding_render
-            # Short wait only: if the seeder just started, give it 2s to land
-            # the first chunk. 12s was excessive and added minutes of latency
-            # on every render when pdim is offline (seeder never lands anything).
             _wait_deadline = time.time() + 2.0
             while _is_seeding_render() and time.time() < _wait_deadline:
                 time.sleep(0.5)
                 meta = storage.get("mb:dataset:audio:meta")
                 if meta and int(meta.get("num_chunks", 0)) > 0:
-                    break  # first chunk landed — metadata refinement available
+                    break
+
         if meta and int(meta.get("num_chunks", 0)) > 0:
             index = meta.get("index") or [
                 {"idx": i} for i in range(int(meta["num_chunks"]))
@@ -8465,46 +8521,124 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
                 _preferred_mood,
             )
             _ref_sample = _best
-            _ref_genres = _best.get("genres") or []
-            # Fold dataset genre affinity into the synthesis genre when the
-            # dataset confirms a genre signal the awareness layer also sees.
-            if not _synth_genre and _ref_genres:
-                _synth_genre = str(_ref_genres[0]).lower()
-            # Use dataset BPM as a tiebreaker when target_bpm is not explicit.
-            if not target_bpm and float(_best.get("bpm") or 0.0) > 0:
-                target_bpm = float(_best.get("bpm"))
-            print(
-                f"[audio_ref] dataset reference: idx={_best.get('idx')} "
-                f"bpm={_best.get('bpm')} key={_best.get('key')} "
-                f"genres={_ref_genres} — used as metadata reference only; "
-                f"audio synthesized from awareness signals (job={job_id[:8]})",
-                flush=True,
+
+            # ── Layer 1: In-process file cache (0 ms) ─────────────────────
+            # Key on the SELECTED chunk index — all requests that resolve to
+            # the same chunk + duration + format share one cached file, even
+            # when they requested different BPM/key values.
+            _fmt_l1  = str(opts.get("format") or "mp3").lower()
+            _l1_key  = (
+                int(_best["idx"]), _dur_bucket, _fmt_l1,
+                opts.get("loudness_lufs"), bool(opts.get("stems")),
             )
-    except Exception as _ref_err:
-        print(f"[audio_ref] dataset metadata lookup skipped: {_ref_err}",
-              flush=True)
+            with _AUDIO_RENDER_CACHE_LOCK:
+                _l1_hit = _AUDIO_RENDER_CACHE.get(_l1_key)
+            if _l1_hit is not None:
+                _cached_name = str(_l1_hit.get("url") or "").rsplit("/", 1)[-1]
+                if _cached_name and (_UPLOADS_PATH / _cached_name).exists():
+                    print(
+                        f"[audio_pool] L1 cache hit chunk={_best['idx']} "
+                        f"dur={_dur_bucket}s job={job_id[:8]}",
+                        flush=True,
+                    )
+                    return _l1_hit
 
-    # ── Awareness synthesis — always primary ───────────────────────────────────
-    # _render_audio_clip synthesizes genre/mood-aware audio from live industry
-    # signals via the digital GPU engine.  Writes audio_src_<job>.mp3 so the
-    # producer pipeline below can treat it identically to any source file.
-    print(
-        f"[audio_awareness_synth] synthesizing from live awareness signals: "
-        f"genre={_synth_genre!r} mood={_preferred_mood!r} "
-        f"bpm={target_bpm} key={target_key!r} job={job_id[:8]}",
-        flush=True,
-    )
-    _synth_duration = max(4.0, min(float(duration_sec or 30.0), 180.0))
-    # Write to audio_src_<job_id>.mp3 so the producer pipeline below picks it
-    # up as src_path without any file-name conflict with the final output.
-    _render_audio_clip(
-        f"src_{job_id}", target_bpm, target_key,
-        duration_sec=_synth_duration,
-        genre=_synth_genre,
-        mood=_preferred_mood,
-    )
+            # Fetch actual audio bytes — this is the L2 pool serve path.
+            chunk = storage.get(f"mb:dataset:audio:chunk:{_best['idx']}")
+            if chunk and chunk.get("b64"):
+                import base64 as _b64_pool
+                _raw = _b64_pool.b64decode(chunk["b64"])
+                if _raw:
+                    _pool_genres = chunk.get("genres") or []
+                    _pool_bpm    = float(chunk.get("bpm") or target_bpm)
+                    _pool_key    = str(chunk.get("key") or target_key or "C major")
+                    _pool_source = str(chunk.get("source") or "")
 
-    src_path = _UPLOADS_PATH / f"audio_src_{job_id}.mp3"
+                    # ── Flywheel fast-serve (0-copy direct return) ────────────
+                    # Flywheel chunks are FINAL produced MP3 output (already
+                    # through loop / LUFS / master). Write bytes straight to
+                    # out_path and return — no ffmpeg pipeline needed at all.
+                    if _pool_source == "flywheel" and (opts.get("format") or "mp3").lower() == "mp3" and not opts.get("stems"):
+                        _fw_fmt  = str(chunk.get("format") or "mp3").lower()
+                        _fw_ext  = "wav" if _fw_fmt == "wav" else "mp3"
+                        _fw_out  = _UPLOADS_PATH / f"audio_{job_id}.{_fw_ext}"
+                        _fw_out.write_bytes(_raw)
+                        _fw_result = {
+                            "url":           f"/uploads/{_fw_out.name}",
+                            "bpm":           _pool_bpm,
+                            "key":           _pool_key,
+                            "format":        _fw_fmt,
+                            "sample_rate":   int(chunk.get("sample_rate") or 44100),
+                            "bit_depth":     None,
+                            "loudness_lufs": opts.get("loudness_lufs"),
+                            "stems":         {},
+                            "arrangement":   None,
+                            "source_sample": {
+                                "idx": _best.get("idx"), "bpm": _pool_bpm,
+                                "key": _pool_key, "role": "flywheel_direct",
+                            },
+                            "selection_warning": None,
+                        }
+                        with _AUDIO_RENDER_CACHE_LOCK:
+                            _AUDIO_RENDER_CACHE[_l1_key] = _fw_result
+                            # Genre key: immune to dataset growth — the fast-path
+                            # probe checks this without any dataset lookup.
+                            _fmt_l1g = str(opts.get("format") or "mp3").lower()
+                            _dur_l1g = _dur_bucket
+                            for _gl1g in (_preferred_genres or [_synth_genre or ""]):
+                                if _gl1g:
+                                    _AUDIO_RENDER_CACHE[
+                                        ("genre", str(_gl1g).lower(), _dur_l1g, _fmt_l1g,
+                                         opts.get("loudness_lufs"), bool(opts.get("stems")))
+                                    ] = _fw_result
+                            if len(_AUDIO_RENDER_CACHE) > 256:
+                                _AUDIO_RENDER_CACHE.pop(next(iter(_AUDIO_RENDER_CACHE)))
+                        print(
+                            f"[audio_pool] flywheel direct: idx={_best['idx']} "
+                            f"bpm={_pool_bpm} key={_pool_key!r} job={job_id[:8]}",
+                            flush=True,
+                        )
+                        return _fw_result
+
+                    # ── Non-flywheel pool: write as src, ffmpeg pipeline below ─
+                    src_path.write_bytes(_raw)
+                    _src_from_pool = True
+                    if not _synth_genre and _pool_genres:
+                        _synth_genre = str(_pool_genres[0]).lower()
+                    applied_bpm = _pool_bpm
+                    applied_key = _pool_key
+                    print(
+                        f"[audio_pool] L2 pool serve: idx={_best['idx']} "
+                        f"bpm={applied_bpm} key={applied_key!r} "
+                        f"genres={_pool_genres} job={job_id[:8]}",
+                        flush=True,
+                    )
+            else:
+                # Chunk index entry exists but bytes missing — use metadata only.
+                _ref_genres = _best.get("genres") or []
+                if not _synth_genre and _ref_genres:
+                    _synth_genre = str(_ref_genres[0]).lower()
+                if not target_bpm and float(_best.get("bpm") or 0.0) > 0:
+                    target_bpm = float(_best.get("bpm"))
+                    applied_bpm = target_bpm
+    except Exception as _pool_err:
+        print(f"[audio_pool] pool serve skipped: {_pool_err}", flush=True)
+
+    # ── Layer 3: Synthesis fallback (only when pool empty / bytes missing) ─────
+    if not _src_from_pool:
+        print(
+            f"[audio_awareness_synth] synthesizing from live awareness signals: "
+            f"genre={_synth_genre!r} mood={_preferred_mood!r} "
+            f"bpm={target_bpm} key={target_key!r} job={job_id[:8]}",
+            flush=True,
+        )
+        _synth_duration = max(4.0, min(float(duration_sec or 30.0), 180.0))
+        _render_audio_clip(
+            f"src_{job_id}", target_bpm, target_key,
+            duration_sec=_synth_duration,
+            genre=_synth_genre,
+            mood=_preferred_mood,
+        )
     src_wav = _UPLOADS_PATH / f"audio_srcwav_{job_id}.wav"
     looped_wav = _UPLOADS_PATH / f"audio_loop_{job_id}.wav"
 
@@ -8520,10 +8654,7 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
     out_ext = "wav" if fmt == "wav" else "mp3"
     out_path = _UPLOADS_PATH / f"audio_{job_id}.{out_ext}"
 
-    # Synthesis always lands at the requested targets — no pitch/tempo
-    # correction needed (unlike the old clip-repurposing path).
-    applied_bpm = float(target_bpm or 120.0)
-    applied_key = str(target_key or "C major")
+    # applied_bpm / applied_key already set by the pool or synthesis block above.
     _tmp = [src_path, src_wav, looped_wav]
     try:
         # 1) Decode synthesized source → stereo WAV.
@@ -8644,7 +8775,7 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
             except OSError:
                 pass
 
-    return {
+    _result = {
         "url": f"/uploads/{out_path.name}",
         "bpm": applied_bpm,
         "key": applied_key,
@@ -8654,16 +8785,38 @@ def _render_audio_from_dataset(job_id: str, bpm: float, key: str,
         "loudness_lufs": loudness_lufs,
         "stems": stem_urls,
         "arrangement": arrangement_plan,
-        # Provenance: which dataset sample informed the synthesis parameters
-        # (metadata-reference only — no audio was fetched from storage).
+        # Provenance: pool serve (bytes from dataset) or synthesis.
         "source_sample": (
             {"idx": _ref_sample.get("idx"), "bpm": _ref_sample.get("bpm"),
-             "key": _ref_sample.get("key"), "role": "metadata_reference"}
+             "key": _ref_sample.get("key"),
+             "role": "pool" if _src_from_pool else "metadata_reference"}
             if _ref_sample else None
         ),
-        # No selection_warning: synthesis always lands at target key/BPM.
         "selection_warning": None,
     }
+    # ── Write to L1 in-process cache ─────────────────────────────────────────
+    # For synthesis fallback (no pool chunk selected), key by genre+params so
+    # the rendered file is reused for subsequent identical synthesis requests.
+    if _l1_key is None:
+        _bpm_bucket_fb = round(float(applied_bpm) / 5) * 5
+        _l1_key = (
+            "synth", str(_synth_genre or ""), _bpm_bucket_fb,
+            str(applied_key or "").lower(), _dur_bucket,
+            str(fmt).lower(), loudness_lufs, bool(opts.get("stems")),
+        )
+    with _AUDIO_RENDER_CACHE_LOCK:
+        _AUDIO_RENDER_CACHE[_l1_key] = _result
+        # Genre key: fast-path probe checks this without any dataset lookup.
+        _fmt_cache = str(opts.get("format") or "mp3").lower()
+        for _g_cache in (_preferred_genres or [_synth_genre or ""]):
+            if _g_cache:
+                _AUDIO_RENDER_CACHE[
+                    ("genre", str(_g_cache).lower(), _dur_bucket, _fmt_cache,
+                     opts.get("loudness_lufs"), bool(opts.get("stems")))
+                ] = _result
+        if len(_AUDIO_RENDER_CACHE) > 256:
+            _AUDIO_RENDER_CACHE.pop(next(iter(_AUDIO_RENDER_CACHE)))
+    return _result
 
 
 def _summarize_audio_analysis(render: dict) -> Optional[dict]:
@@ -9336,6 +9489,58 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
     _job_update(job_id, {"intelligence": brief.to_dict()})
     if _audio_tech is not None:
         _job_update(job_id, {"technique": _audio_tech.to_dict()})
+
+    # ── Fast-path: genre-key L1 cache probe (zero I/O, pure dict lookup) ─────
+    # Every completed render writes a ("genre", genre, dur_bucket, fmt, lufs, stems)
+    # key into _AUDIO_RENDER_CACHE alongside the chunk-indexed key. The pre-warmer
+    # populates these during startup. If any matching genre key is in the cache and
+    # the file still exists, mark the job done immediately — no thread needed.
+    # The first SSE poll (fired at 0 ms by the client) then resolves in < 50 ms.
+    try:
+        _dur_probe   = round(max(4.0, min(float(req.duration or 30), 180.0)) / 5) * 5
+        _fmt_probe   = (req.format or "mp3").lower()
+        _lufs_probe  = None   # fast-path only for default loudness
+        _stems_probe = bool(req.stems)
+        if _lufs_probe is None and not _stems_probe:
+            with _AUDIO_RENDER_CACHE_LOCK:
+                _fp_hit: "dict | None" = None
+                for _fp_g in _preferred_genres_handler:
+                    _fp_key = ("genre", str(_fp_g).lower(), _dur_probe,
+                               _fmt_probe, _lufs_probe, _stems_probe)
+                    _fp_candidate = _AUDIO_RENDER_CACHE.get(_fp_key)
+                    if _fp_candidate is not None:
+                        _fp_hit = _fp_candidate
+                        break
+            if _fp_hit is not None:
+                _fp_name = str(_fp_hit.get("url") or "").rsplit("/", 1)[-1]
+                if _fp_name and (_UPLOADS_PATH / _fp_name).exists():
+                    _job_update(job_id, {
+                        "status":        "done",
+                        "url":           _fp_hit.get("url"),
+                        "audio_url":     _fp_hit.get("url"),
+                        "bpm":           _fp_hit.get("bpm"),
+                        "key":           _fp_hit.get("key"),
+                        "format":        _fp_hit.get("format"),
+                        "sample_rate":   _fp_hit.get("sample_rate"),
+                        "bit_depth":     _fp_hit.get("bit_depth"),
+                        "loudness_lufs": _fp_hit.get("loudness_lufs"),
+                        "stems":         _fp_hit.get("stems") or {},
+                        "arrangement":   _fp_hit.get("arrangement"),
+                        "source_sample": _fp_hit.get("source_sample"),
+                    })
+                    print(
+                        f"[audio_pool] fast-path hit genre={_preferred_genres_handler[:1]} "
+                        f"dur={_dur_probe}s job={job_id[:8]}",
+                        flush=True,
+                    )
+                    return {
+                        "job_id":       job_id,
+                        "status":       "done",
+                        "intelligence": brief.to_dict(),
+                    }
+    except Exception:
+        pass  # never block on fast-path failure
+
     threading.Thread(target=_process, daemon=True, name=f"ApiAudioJob-{job_id}").start()
     return {"job_id": job_id, "status": "processing", "intelligence": brief.to_dict()}
 
