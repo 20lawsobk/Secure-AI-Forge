@@ -47,6 +47,20 @@ from ai_model.model.transformer import (
     apply_rope_offset,
 )
 
+import logging as _logging
+_hct_logger = _logging.getLogger("hyper_creative_transformer")
+
+# ── Digital-GPU attention GEMM counter ───────────────────────────────────────
+# Incremented each time q@k or attn@v successfully runs through gpu.matmul.
+# Tests can read this to verify the Digital GPU path is taken.
+_gpu_attn_calls: int = 0
+
+
+def get_gpu_attn_calls() -> int:
+    """Return the number of successful Digital GPU attention GEMM calls."""
+    return _gpu_attn_calls
+
+
 # ── Prefix KV cache ───────────────────────────────────────────────────────────
 # Stores the KV state + hidden state at the end of a prompt prefix so that
 # subsequent requests that share the same prefix skip prefill entirely for
@@ -223,7 +237,29 @@ class HyperRoPESelfAttention(nn.Module):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        attn = (q @ k.transpose(-2, -1)) * self.scale
+        # ── Scores: q @ k.T  — routed through Digital GPU ───────────────
+        # gpu.matmul expects 2D inputs; reshape BH×T×D_h to (BH*T)×D_h then
+        # back to BH×T×T.  Fall back to plain torch if gpu.matmul raises.
+        global _gpu_attn_calls
+        BH, T2, D_h = q.shape
+        try:
+            import numpy as _np
+            _q_np = q.reshape(BH * T2, D_h).detach().float().numpy()
+            _kt_np = k.transpose(-2, -1).contiguous().reshape(D_h, BH * T2).detach().float().numpy()
+            # matmul: (BH*T, D_h) @ (D_h, BH*T) won't work — need per-head batching.
+            # Use gemm on the 2D slices: for each head, (T, D_h) @ (D_h, T)
+            _scores_list = []
+            for _h in range(BH):
+                _qh = q[_h].detach().float().numpy()          # (T, D_h)
+                _kh = k[_h].transpose(0, 1).detach().float().numpy()  # (D_h, T)
+                _s = self.gpu.gemm(_qh, _kh)                  # (T, T)
+                _scores_list.append(torch.from_numpy(_s))
+            attn = torch.stack(_scores_list, dim=0) * self.scale  # (BH, T, T)
+            _gpu_attn_calls += 1
+        except Exception as _e:
+            _hct_logger.warning("[gpu-attn] forward_with_kv scores fallback: %s", _e)
+            attn = (q @ k.transpose(-2, -1)) * self.scale
+
         if mask is not None:
             attn = attn + mask.unsqueeze(0).unsqueeze(0)
         if key_padding_mask is not None:
@@ -231,7 +267,21 @@ class HyperRoPESelfAttention(nn.Module):
         attn = F.softmax(attn, dim=-1)
         attn = self.attn_drop(attn)
 
-        out = (attn @ v).transpose(1, 2).contiguous().reshape(B, T, C)
+        # ── Context: attn @ v  — routed through Digital GPU ─────────────
+        try:
+            _ctx_list = []
+            for _h in range(BH):
+                _ah = attn[_h].detach().float().numpy()   # (T, T)
+                _vh = v[_h].detach().float().numpy()       # (T, D_h)
+                _c = self.gpu.gemm(_ah, _vh)              # (T, D_h)
+                _ctx_list.append(torch.from_numpy(_c))
+            out = torch.stack(_ctx_list, dim=0).to(q.dtype)  # (BH, T, D_h)
+            _gpu_attn_calls += 1
+        except Exception as _e:
+            _hct_logger.warning("[gpu-attn] forward_with_kv context fallback: %s", _e)
+            out = attn @ v
+
+        out = out.transpose(1, 2).contiguous().reshape(B, T, C)
         return self.out(out), k, v
 
     def decode_one(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
@@ -265,12 +315,42 @@ class HyperRoPESelfAttention(nn.Module):
             k_cat = torch.cat([past_k, k], dim=2)
             v_cat = torch.cat([past_v, v], dim=2)
 
-        attn = (q @ k_cat.transpose(-2, -1)) * self.scale
+        # ── Scores: q @ k_cat.T  — routed through Digital GPU ───────────
+        global _gpu_attn_calls
+        BH_d = q.shape[0]   # B * n_heads
+        T_kv = k_cat.shape[2]
+        try:
+            _scores_list = []
+            for _h in range(BH_d):
+                _qh = q[_h].detach().float().numpy()                        # (1, D_h)
+                _kh = k_cat[_h].transpose(0, 1).detach().float().numpy()   # (D_h, T_kv)
+                _s = self.gpu.gemm(_qh, _kh)                                # (1, T_kv)
+                _scores_list.append(torch.from_numpy(_s))
+            attn = torch.stack(_scores_list, dim=0) * self.scale  # (BH, 1, T_kv)
+            _gpu_attn_calls += 1
+        except Exception as _e:
+            _hct_logger.warning("[gpu-attn] decode_one scores fallback: %s", _e)
+            attn = (q @ k_cat.transpose(-2, -1)) * self.scale
+
         if key_padding_mask is not None:
             attn = attn.masked_fill(key_padding_mask[:, None, None, :], -1e9)
         attn = F.softmax(attn, dim=-1)
 
-        out = (attn @ v_cat).transpose(1, 2).contiguous().reshape(B, T, C)
+        # ── Context: attn @ v_cat  — routed through Digital GPU ─────────
+        try:
+            _ctx_list = []
+            for _h in range(BH_d):
+                _ah = attn[_h].detach().float().numpy()      # (1, T_kv)
+                _vh = v_cat[_h].detach().float().numpy()     # (T_kv, D_h)
+                _c = self.gpu.gemm(_ah, _vh)                 # (1, D_h)
+                _ctx_list.append(torch.from_numpy(_c))
+            out = torch.stack(_ctx_list, dim=0).to(q.dtype)  # (BH, 1, D_h)
+            _gpu_attn_calls += 1
+        except Exception as _e:
+            _hct_logger.warning("[gpu-attn] decode_one context fallback: %s", _e)
+            out = attn @ v_cat
+
+        out = out.transpose(1, 2).contiguous().reshape(B, T, C)
         return self.out(out), k_cat, v_cat
 
 

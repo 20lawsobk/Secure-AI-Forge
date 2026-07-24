@@ -401,6 +401,60 @@ _PLATFORM_CTAS: Dict[str, List[str]] = {
 }
 
 
+def _format_awareness_prefix(awareness: str) -> str:
+    """
+    Extract top 3 signal lines from awareness and format as a short conditioning
+    prefix (max 60 chars) that can be prepended to the model prompt without eating
+    the token budget.
+
+    Returns e.g. "Context: drill | dark | high | 140bpm"
+    or "Context: trap | hype | energetic" depending on what signals are found.
+    """
+    if not awareness:
+        return ""
+    try:
+        # Strip [INTENT] key=value lines — machine-readable, must not leak into prompts.
+        intent_re = re.compile(r"^\[INTENT\]", re.IGNORECASE)
+
+        # Collect candidate signal tokens: genre/mood/energy/bpm lines
+        tokens = []
+        for line in awareness.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("===") or intent_re.match(stripped):
+                continue
+            # Extract value from [INTENT] style lines that weren't caught above
+            if stripped.startswith("[INTENT]"):
+                continue
+            # Look for key=value pairs (genre=trap, mood=dark, bpm=140 etc.)
+            kv = re.match(r"(?:genre|mood|energy|bpm|tempo)\s*[=:]\s*(.+)", stripped, re.IGNORECASE)
+            if kv:
+                val = kv.group(1).strip().split()[0].rstrip(",.;")[:15]
+                if val:
+                    tokens.append(val)
+                    if len(tokens) >= 4:
+                        break
+
+        if not tokens:
+            # Fall back: first 3 short words from the first non-header line
+            for line in awareness.splitlines():
+                stripped = line.strip()
+                if stripped and not stripped.startswith(("===", "[", "•")) and len(stripped) >= 5:
+                    words = [w.strip(".,;:!?") for w in stripped.split()[:4] if len(w) > 2]
+                    tokens = words[:3]
+                    break
+
+        if not tokens:
+            return ""
+
+        prefix = "Context: " + " | ".join(tokens)
+        # Truncate to 60 chars to avoid eating model token budget
+        if len(prefix) > 60:
+            prefix = prefix[:57].rstrip(" |") + "..."
+        return prefix
+    except Exception:
+        return ""
+
+
 def _detect_genre_from_awareness(awareness: str, explicit_genre: str = "") -> str:
     """Detect genre from awareness string or explicit genre field."""
     if explicit_genre:
@@ -676,45 +730,42 @@ class ScriptAgent:
         self._garble_probe_done = False
 
     def run(self, req: ScriptRequest) -> ScriptResponse:
-        # Awareness is always primary — live industry signals drive content
-        # generation directly.  When awareness context is present (normal
-        # production path), we compose from those signals rather than feeding
-        # them as a hint to model.generate().  The model path is reserved for
-        # the edge case where no awareness data is available.
-        if req.awareness:
-            # Model-health probe (observability trail): sample one small draft
-            # from the model and run the garble diagnostic on it.  Awareness
-            # copy stays authoritative either way — but a garbled/echoing
-            # model must never be suppressed *silently*, so we log the reason.
-            # Gated to once per agent instance (agents are process singletons)
-            # so the probe cost never lands on hot-path request latency.
-            if req.variant_idx == 0 and not self._garble_probe_done:
-                self._garble_probe_done = True
-                try:
-                    from ..request_intelligence import garble_reason
-                    _draft = self.model.generate(
-                        f"<PLATFORM_{req.platform.upper()}> <STAGE_HOOK>",
-                        max_new_tokens=48, temperature=0.8, top_p=0.92,
-                    )
-                    _wl = f"{req.idea} {req.awareness or ''}"
-                    _reason = garble_reason(_draft or "", whitelist=_wl)
-                    if _reason:
-                        logger.warning(
-                            "[garble-guard] suppressed model draft "
-                            "reason=%s platform=%s", _reason, req.platform,
-                        )
-                except Exception:
-                    pass  # probe is never allowed to break generation
-            return self._awareness_compose(req)
-
-        # No awareness context: model.generate() with template last-resort.
+        # Build the model prompt — awareness prefix conditions the model when
+        # present, rather than bypassing it.  The LLM always runs; awareness
+        # becomes a fallback only when the model output fails the garble check.
         platform_token = f"<PLATFORM_{req.platform.upper()}>"
         goal_token = f"<GOAL_{req.goal.upper()}>"
         tone_token = f"<TONE_{req.tone.upper()}>"
-        prompt = f"{platform_token} {goal_token} {tone_token} <STAGE_HOOK>"
+        base_prompt = f"{platform_token} {goal_token} {tone_token} <STAGE_HOOK>"
+
+        if req.awareness:
+            # Prepend a short awareness prefix to steer the model, not replace it.
+            awareness_prefix = _format_awareness_prefix(req.awareness)
+            prompt = (awareness_prefix + "\n\n" + base_prompt) if awareness_prefix else base_prompt
+        else:
+            prompt = base_prompt
 
         try:
             output = self.model.generate(prompt, max_new_tokens=80, temperature=0.8, top_p=0.92)
+
+            # Garble check — the live model run IS the probe; no separate probe needed.
+            _garble_detected = False
+            try:
+                from ..request_intelligence import looks_garbled, garble_reason
+                _wl = f"{req.idea} {req.awareness or ''}"
+                if looks_garbled(output or "", whitelist=_wl):
+                    _garble_detected = True
+                    _reason = garble_reason(output or "", whitelist=_wl)
+                    logger.warning(
+                        "[garble-guard] model output garbled, falling back to awareness "
+                        "reason=%s platform=%s", _reason, req.platform,
+                    )
+            except Exception:
+                pass  # garble check is never allowed to break generation
+
+            # If garbled and we have awareness, use awareness compose as fallback.
+            if _garble_detected and req.awareness:
+                return self._awareness_compose(req)
 
             hook = ""
             body = ""
@@ -751,6 +802,10 @@ class ScriptAgent:
                 return ScriptResponse(hook=hook, body=body, cta=cta, source="ai_model")
         except Exception:
             pass
+
+        # Model failed or output not meaningful — use awareness if available, else template.
+        if req.awareness:
+            return self._awareness_compose(req)
 
         return self._template_fallback(req)
 

@@ -321,6 +321,10 @@ class GenerationBrief:
     energy: float = 0.5
     # ── Brand Voice (persistent per-artist profile; see storage_client) ────
     ai_disclosure: bool = False
+    # ── Visual intent fields (camera, lighting, cinematography style) ────────
+    camera_motion: str = ""      # from intent detection or caller override
+    lighting: str = ""           # cinematic/dramatic/natural/studio/golden_hour/night/neon
+    visual_style: str = ""       # cinematography / style token (e.g. "noir", "cinematic")
 
     def to_dict(self) -> Dict[str, Any]:
         """Compact, transparent representation returned to API callers."""
@@ -498,6 +502,82 @@ def load_brand_voice(profile_id: Optional[str]) -> Optional[Dict[str, Any]]:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Camelot wheel — harmonic key compatibility (Feature C)
+# ---------------------------------------------------------------------------
+# Maps every musical key to its Camelot wheel position (1A–12B).
+# A = minor (inner wheel), B = major (outer wheel).
+
+CAMELOT: Dict[str, str] = {
+    # Minor keys (A)
+    "Ab minor": "1A",  "G# minor": "1A",
+    "Eb minor": "2A",  "D# minor": "2A",
+    "Bb minor": "3A",  "A# minor": "3A",
+    "F minor":  "4A",
+    "C minor":  "5A",
+    "G minor":  "6A",
+    "D minor":  "7A",
+    "A minor":  "8A",
+    "E minor":  "9A",
+    "B minor":  "10A",
+    "F# minor": "11A", "Gb minor": "11A",
+    "Db minor": "12A", "C# minor": "12A",
+    # Major keys (B)
+    "B major":  "1B",  "Cb major": "1B",
+    "F# major": "2B",  "Gb major": "2B",
+    "Db major": "3B",  "C# major": "3B",
+    "Ab major": "4B",  "G# major": "4B",
+    "Eb major": "5B",  "D# major": "5B",
+    "Bb major": "6B",  "A# major": "6B",
+    "F major":  "7B",
+    "C major":  "8B",
+    "G major":  "9B",
+    "D major":  "10B",
+    "A major":  "11B",
+    "E major":  "12B",
+}
+
+# Reverse map: Camelot position → list of key names
+_CAMELOT_REVERSE: Dict[str, List[str]] = {}
+for _key, _pos in CAMELOT.items():
+    _CAMELOT_REVERSE.setdefault(_pos, []).append(_key)
+
+
+def compatible_keys(key: str) -> List[str]:
+    """Return the 3 harmonically adjacent keys for *key* via the Camelot wheel.
+
+    Adjacent positions: same position on opposite wheel (minor↔major), and
+    ±1 position on the same wheel. Never-raise; returns [] on unknown key.
+    """
+    try:
+        pos = CAMELOT.get(key)
+        if not pos:
+            # Try case-insensitive search
+            key_lower = key.lower()
+            for k, v in CAMELOT.items():
+                if k.lower() == key_lower:
+                    pos = v
+                    break
+        if not pos:
+            return []
+        num_str, ring = pos[:-1], pos[-1]
+        num = int(num_str)
+        # Same position, opposite ring
+        opposite_ring = "B" if ring == "A" else "A"
+        same_pos_other = f"{num}{opposite_ring}"
+        # ±1 on same ring (wraps 1–12)
+        prev_pos = f"{((num - 2) % 12) + 1}{ring}"
+        next_pos = f"{(num % 12) + 1}{ring}"
+        result: List[str] = []
+        for adj_pos in (same_pos_other, prev_pos, next_pos):
+            names = _CAMELOT_REVERSE.get(adj_pos, [])
+            if names:
+                result.append(names[0])  # use canonical name
+        return result
+    except Exception:
+        return []
+
+
 # Coarse genre → base energy/warmth, mirroring ai_model/video/ai_scene_builder's
 # _GENRE_DNA so text/image generation lean the same direction video already
 # does for a given genre, instead of treating genre as decorative metadata.
@@ -575,6 +655,14 @@ def _sync_intent_with_trends(
       * divergence → fusion (intent = creative foundation, trend = flavor)
       * numeric energy targets are BLENDED (intent-weighted 65/35), not picked
 
+    Contradiction resolution (Feature D):
+      1. Low-energy genre + high detected energy → keep genre, moderate energy
+      2. Explicit BPM (bpm_confidence > 0.8) + conflicting tempo_feel → BPM wins
+      3. Mood conflicts tonally with genre (happy + minor/drill) → keep both,
+         add contrast directive
+
+    Signals are never silently dropped — a resolution directive is always emitted.
+
     Never raises; on any error returns [] and the caller falls back to the
     old separate-tier directives.
     """
@@ -586,6 +674,66 @@ def _sync_intent_with_trends(
 
         i_genre = (intent_kv.get("genre") or "").replace("_", " ").strip()
         t_genre = ((getattr(tsig, "genre", None) or "")).replace("_", " ").strip()
+
+        # ── Feature D: Contradiction resolution ───────────────────────────────
+
+        # Low-energy genre set
+        _LOW_ENERGY_GENRES = {"lofi", "jazz", "ambient", "downtempo", "classical",
+                               "lo fi", "lo-fi", "acoustic", "soul", "folk"}
+        _genre_slug = i_genre.replace(" ", "_").replace("-", "_").lower()
+
+        # 1. Genre implies low energy but detected energy > 0.7
+        i_energy_raw: Optional[float] = None
+        try:
+            if "energy" in intent_kv:
+                i_energy_raw = float(intent_kv["energy"])
+        except (TypeError, ValueError):
+            pass
+
+        if (i_genre and any(g in i_genre.lower() for g in _LOW_ENERGY_GENRES)
+                and i_energy_raw is not None and i_energy_raw > 0.7):
+            # Keep genre, moderate energy, emit resolution directive
+            i_energy_raw = 0.5
+            out.append(
+                f"Resolution: {i_genre} implies low energy — mellow energy "
+                f"within genre (energy moderated to 0.50)"
+            )
+
+        # 2. Explicit BPM with high confidence conflicts with tempo_feel
+        _bpm_conf: float = 0.0
+        try:
+            _bpm_conf = float(intent_kv.get("bpm_confidence") or 0.0)
+        except (TypeError, ValueError):
+            pass
+        _tempo_feel = (intent_kv.get("tempo_feel") or "").strip()
+        _bpm_val = (intent_kv.get("bpm") or "").strip()
+        if _bpm_val and _bpm_conf > 0.8 and _tempo_feel:
+            _ri_logger.warning(
+                "[intent-sync] BPM=%s (confidence=%.2f) overrides tempo_feel=%s",
+                _bpm_val, _bpm_conf, _tempo_feel,
+            )
+            out.append(
+                f"Resolution: explicit BPM {_bpm_val} overrides tempo feel "
+                f"'{_tempo_feel}' — BPM is authoritative"
+            )
+            # strip conflicting tempo_feel from further processing
+            _tempo_feel = ""
+
+        # 3. Mood conflicts tonally with genre (e.g. happy + drill/minor key)
+        _i_mood = (intent_kv.get("mood") or "").strip()
+        _i_key = (intent_kv.get("key") or "").replace("_", " ").strip()
+        _HAPPY_MOODS = {"happy", "uplifting", "joyful", "fun", "playful", "bubbly"}
+        _DARK_GENRES = {"drill", "dark", "phonk", "metal", "punk", "emo", "gritty"}
+        _mood_is_bright = _i_mood in _HAPPY_MOODS
+        _genre_is_dark = any(g in i_genre.lower() for g in _DARK_GENRES)
+        _key_is_minor = "minor" in _i_key.lower()
+        if _mood_is_bright and (_genre_is_dark or _key_is_minor):
+            out.append(
+                f"Resolution: contrast — {_i_mood} mood in {i_genre} context "
+                f"(keep both; the tension is the artistic choice)"
+            )
+
+        # ── Genre alignment (existing logic) ──────────────────────────────────
         if i_genre and t_genre:
             if i_genre == t_genre or i_genre in t_genre or t_genre in i_genre:
                 out.append(
@@ -611,12 +759,7 @@ def _sync_intent_with_trends(
             out.append(f"Both intent and charts point {i_mood} — lean into it")
 
         # Blended energy target: 65% user intent, 35% live trend.
-        i_energy: Optional[float] = None
-        try:
-            if "energy" in intent_kv:
-                i_energy = float(intent_kv["energy"])
-        except (TypeError, ValueError):
-            i_energy = None
+        i_energy: Optional[float] = i_energy_raw
         t_energy = getattr(tsig, "energy", None)
         if i_energy is not None and t_energy is not None:
             blended = round(0.65 * i_energy + 0.35 * float(t_energy), 2)
@@ -625,7 +768,7 @@ def _sync_intent_with_trends(
                 f"{i_energy:.2f} and live trend {float(t_energy):.2f})"
             )
 
-        return out[:3]
+        return out[:5]
     except Exception:
         return []
 
@@ -777,6 +920,50 @@ def build_brief(
         ] if b]
         if _bits:
             directives.append("Match the track's " + ", ".join(_bits))
+
+    # ── Feature C: Camelot wheel / key compatibility ───────────────────────
+    # When a key is detected with sufficient confidence, emit compatible keys
+    # and a chord-pivot directive so the generated music stays harmonically coherent.
+    _key_conf: float = 0.0
+    if intent_signals is not None:
+        try:
+            _key_conf = float(getattr(intent_signals, "genre_confidence", 0) or 0)
+            # Use overall confidence as key confidence proxy when key was detected
+            _key_conf = float(getattr(intent_signals, "confidence", 0) or 0)
+        except Exception:
+            _key_conf = 0.0
+    if key and (_key_conf >= 0.5 or _key_conf == 0.0):
+        try:
+            _compat = compatible_keys(key)
+            if _compat:
+                directives.append(
+                    f"Chord transitions may pivot through: {', '.join(_compat)}"
+                )
+        except Exception:
+            pass
+
+    # ── Feature F: Arrangement density directive ───────────────────────────
+    _density: Optional[str] = None
+    if intent_signals is not None:
+        try:
+            _density = getattr(intent_signals, "density", None)
+            _density_conf = float(getattr(intent_signals, "density_confidence", 0) or 0)
+            if _density and _density_conf < 0.3:
+                _density = None  # too weak to act on
+        except Exception:
+            _density = None
+    if _density:
+        try:
+            _density_label = {
+                "minimal":    "minimal — keep the arrangement sparse and stripped back",
+                "standard":   "standard — balanced instrument layers",
+                "full":       "full — use all instrument layers",
+                "orchestral": "orchestral — full cinematic arrangement with all layers",
+            }.get(_density, _density)
+            directives.append(f"Arrangement density: {_density_label}")
+        except Exception:
+            pass
+
     if vocabulary:
         directives.append("Favor this artist's vocabulary: " + ", ".join(vocabulary[:6]))
     if avoid_words:
@@ -848,6 +1035,15 @@ def build_brief(
                             _iparts.append("avoid: " + _kv["avoid"].replace(",", ", "))
                         if "reference_artist" in _kv:
                             _iparts.append("reference: " + _kv["reference_artist"])
+                        # Feature A: tempo feel
+                        if "tempo_feel" in _kv:
+                            _iparts.append("tempo feel: " + _kv["tempo_feel"])
+                        # Feature B: vocal style
+                        if "vocal_style" in _kv:
+                            _iparts.append("vocal style: " + _kv["vocal_style"])
+                        # Feature F: density
+                        if "density" in _kv:
+                            _iparts.append("density: " + _kv["density"])
                         if _iparts:
                             _intent_directives.append("User intent — " + " · ".join(_iparts))
                     elif _s.startswith("[HIGH]"):
@@ -1000,6 +1196,9 @@ def build_brief(
         key=_norm(key),
         energy=energy,
         ai_disclosure=disclosure,
+        camera_motion=_norm(camera_motion),
+        lighting=_norm(lighting),
+        visual_style=_norm(color_temperature),  # color_temperature is the best proxy for visual style
     )
 
 
@@ -1410,6 +1609,26 @@ def garble_reason(text: str, whitelist: str = "") -> str:
     if not text:
         return ""
 
+    # ── Trailing fragment check ───────────────────────────────────────────────
+    # A newline followed by a bare alphabetic cut-off (no closing punctuation
+    # or emoji) is a model mid-word truncation artefact, e.g. "listen! 🔥\nplaylist fe".
+    # Legitimate short CTAs always end with !, ?, ., emoji, or similar.
+    if "\n" in text:
+        lines = text.split("\n")
+        # Skip blank trailing lines: a model output ending with "\nplaylist fe\n"
+        # has an empty last element after split; walk back to the last non-empty
+        # line so that trailing newlines don't mask a real truncation fragment.
+        last = ""
+        for _line in reversed(lines):
+            stripped = _line.strip()
+            if stripped:
+                last = stripped
+                break
+        # Only flag if the last non-empty line is very short AND ends with a
+        # plain letter (i.e. abruptly cut off — no punctuation/emoji/special).
+        if last and len(last) < 15 and re.search(r"[a-zA-Z]$", last):
+            return "trailing_fragment"
+
     # ── URL-parser label-echo check (highest priority) ────────────────────────
     # Even one structured label line means the model echoed raw metadata.
     if _URL_LABEL_RE.findall(text) or _MIDLINE_LABEL_RE.search(text):
@@ -1419,14 +1638,21 @@ def garble_reason(text: str, whitelist: str = "") -> str:
 
     # ── Glued-token / letter-digit-fusion check ───────────────────────────────
     wl = set(re.findall(r"[a-z0-9]+", whitelist.lower()))
-    words = re.findall(r"[A-Za-z0-9''\-]+", text)
+    # Extract words, but skip hashtags and mentions — #CamelCaseHashtags and
+    # @mentions are valid social-media tokens; they only look like glued words.
+    raw_words = re.findall(r"[A-Za-z0-9''\-]+", text)
+    # Build a position-aware set of tokens that are preceded by # or @
+    hashtag_tokens: set[str] = set()
+    for m in re.finditer(r"[#@]([A-Za-z0-9_]+)", text):
+        hashtag_tokens.add(m.group(1).lower())
+    words = raw_words
     if not words:
         return ""
     bad = 0
     for w in words:
         base = w.strip("''-").lower()
         core = re.sub(r"[^a-z0-9]", "", base)
-        if not core or core in wl:
+        if not core or core in wl or core in hashtag_tokens:
             continue
         # Implausibly long single token (mashed words)
         if len(core) > 14:

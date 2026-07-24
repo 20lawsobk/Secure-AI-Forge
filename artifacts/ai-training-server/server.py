@@ -1279,36 +1279,93 @@ def _merged_awareness_for(req: Any) -> str:
 def _intent_signals_for(req: Any):
     """Return the :class:`IntentSignals` for *req* (None if nothing to detect).
 
-    Detects from ``req.description`` and/or ``req.prompt_url``.  Intended for
-    callers that need to pass intent_signals= into build_brief() directly so
-    the signal application happens before brand-voice fallbacks, rather than
-    only through the awareness string.  Never raises.
+    Detects from ``req.description`` and/or ``req.prompt_url``.
+    Also merges signals from ``req.audio_ref_b64`` (if provided) — decoded
+    and analysed via detect_from_audio(); caller-specified text signals win
+    when their confidence is higher.
+    Never raises.
     """
     try:
         _desc       = _as_text(getattr(req, "description",  ""))
         _prompt_url = _as_text(getattr(req, "prompt_url",   ""))
-        if not (_desc or _prompt_url):
-            return None
-        from ai_model.intent import detect_intent
-        from ai_model.intent.url_reader import read_url as _read_url
-        _url_text, _url_plat, _url_goal = "", "", ""
-        if _prompt_url:
+        _audio_b64  = _as_text(getattr(req, "audio_ref_b64", ""))
+
+        text_sig = None
+        if _desc or _prompt_url:
+            from ai_model.intent import detect_intent
+            from ai_model.intent.url_reader import read_url as _read_url
+            _url_text, _url_plat, _url_goal = "", "", ""
+            if _prompt_url:
+                try:
+                    _uc       = _read_url(_prompt_url)
+                    _url_text = _uc.combined()
+                    _url_plat = _uc.platform_hint
+                    _url_goal = _uc.goal_hint
+                except Exception:
+                    pass
+            text_sig = detect_intent(
+                description       = _desc,
+                url_content_text  = _url_text,
+                url_platform_hint = _url_plat,
+                url_goal_hint     = _url_goal,
+            )
+            if not text_sig.is_useful():
+                text_sig = None
+
+        audio_sig = None
+        if _audio_b64:
             try:
-                _uc       = _read_url(_prompt_url)
-                _url_text = _uc.combined()
-                _url_plat = _uc.platform_hint
-                _url_goal = _uc.goal_hint
+                import base64 as _b64
+                from ai_model.intent.detector import detect_from_audio as _dfa
+                _raw = _b64.b64decode(_audio_b64 + "==")
+                audio_sig = _dfa(_raw)
             except Exception:
                 pass
-        sig = detect_intent(
-            description       = _desc,
-            url_content_text  = _url_text,
-            url_platform_hint = _url_plat,
-            url_goal_hint     = _url_goal,
-        )
-        return sig if sig.is_useful() else None
+
+        # Merge: text signals win when their confidence is higher
+        if text_sig is not None and audio_sig is not None:
+            # BPM: take the one with higher effective confidence
+            if audio_sig.tempo_bpm is not None and text_sig.tempo_bpm is None:
+                text_sig.tempo_bpm = audio_sig.tempo_bpm
+            # Key: same logic
+            if audio_sig.key is not None and text_sig.key is None:
+                text_sig.key = audio_sig.key
+            return text_sig
+        if text_sig is not None:
+            return text_sig
+        if audio_sig is not None and audio_sig.is_useful():
+            return audio_sig
+        return None
     except Exception:
         return None
+
+
+def _merge_audio_ref_signals(request_body: dict, existing_signals: Any) -> Any:
+    """Decode audio_ref_b64 from a raw request body dict and merge into existing signals.
+
+    If request_body contains 'audio_ref_b64', detect BPM/key from the audio
+    and merge into existing_signals (caller-specified values take priority
+    when they are already set).  Never raises — returns existing_signals unchanged
+    on any error.
+    """
+    try:
+        _audio_b64 = str(request_body.get("audio_ref_b64") or "").strip()
+        if not _audio_b64:
+            return existing_signals
+        import base64 as _b64
+        from ai_model.intent.detector import detect_from_audio as _dfa
+        _raw = _b64.b64decode(_audio_b64 + "==")
+        audio_sig = _dfa(_raw)
+        if existing_signals is None:
+            return audio_sig
+        # Merge: only fill in fields that are not already set
+        if audio_sig.tempo_bpm is not None and getattr(existing_signals, "tempo_bpm", None) is None:
+            existing_signals.tempo_bpm = audio_sig.tempo_bpm
+        if audio_sig.key is not None and getattr(existing_signals, "key", None) is None:
+            existing_signals.key = audio_sig.key
+        return existing_signals
+    except Exception:
+        return existing_signals
 
 
 class ContentRequest(_AwarenessMixin):
@@ -1633,7 +1690,7 @@ def _warm_content_cache() -> None:
                         "source": getattr(sr, "source", "template"),
                     }
 
-                _orch.compute(cache_key, _builder, namespace="api_content_v4")
+                _orch.compute(cache_key, _builder, namespace="api_content_v6")
                 warmed += 1
             except Exception as exc:
                 print(f"[CacheWarm] {plat}/{topic}: {exc}")
@@ -3700,12 +3757,28 @@ async def generate_content(req: ContentRequest, _key = Depends(require_scope("ge
         return script_result, dist_result
 
     def _build_result(_request=None):
-        from ai_model.agents.script_agent import ScriptRequest
+        from ai_model.agents.script_agent import ScriptRequest, ScriptResponse
         from ai_model.agents.distribution_agent import DistributionRequest
         sr = _script_agent.run(ScriptRequest(
             idea=topic, platform=platform, goal=req.goal,
             tone=req.tone, awareness=effective_awareness,
         ))
+
+        # Belt-and-suspenders garble check: if the ScriptAgent's internal
+        # garble detection missed a truncated model output (e.g. trailing-
+        # newline edge case), catch it here before storing in the PDIM cache.
+        # Only retry when we have awareness to compose from.
+        try:
+            from ai_model.request_intelligence import looks_garbled
+            _cap_preview = f"{sr.hook}\n{sr.body}".strip()
+            if effective_awareness and looks_garbled(_cap_preview):
+                sr = _script_agent._awareness_compose(ScriptRequest(
+                    idea=topic, platform=platform, goal=req.goal,
+                    tone=req.tone, awareness=effective_awareness,
+                ))
+        except Exception:
+            pass  # never let the guard break generation
+
         full_script = f"{sr.hook}\n{sr.body}\n{sr.cta}"
         dr = _distribution_agent.run(DistributionRequest(
             script=full_script, platform=platform,
@@ -3730,7 +3803,7 @@ async def generate_content(req: ContentRequest, _key = Depends(require_scope("ge
         _orch = _get_pdim_orchestrator()
         _cache_key = {"platform": platform, "topic": topic, "tone": req.tone,
                       "goal": req.goal, "awareness": effective_awareness}
-        _out = await _in_thread(lambda: _orch.compute(_cache_key, _build_result, namespace="api_content_v4"))
+        _out = await _in_thread(lambda: _orch.compute(_cache_key, _build_result, namespace="api_content_v6"))
         _result = dict(_out["result"])
         if _out.get("source") in ("cache", "coalesced"):
             _result["cached"] = True
@@ -7074,7 +7147,7 @@ async def api_generate_content(req: ApiGenerateContentRequest, _key=Depends(requ
             _orch = _get_pdim_orchestrator()
             async with _get_gpu_pool().spawn(_digest_str(_key)) as _glife:
                 return await _in_thread(
-                    lambda: _orch.compute(req, _build, namespace="api_content_v4")
+                    lambda: _orch.compute(req, _build, namespace="api_content_v6")
                 )
         _out = await _get_async_coalescer().compute(_key, _coalesced_content)
         result = dict(_out["result"])
@@ -9239,6 +9312,25 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         # flywheel ingestion).  Never raises; gated + deduped inside.
         _fw_ingest_audio_render(_key, job_id, render, _preferred_genres)
 
+        # ── Persist stems to uploads/stems/{job_id}/ for per-stem downloads ──
+        # Copies each stem WAV from the uploads root into a structured directory
+        # so /api/audio/{job_id}/stems can serve them by name (drums.wav, etc.)
+        _stem_src_urls: dict = render.get("stems") or {}
+        if _stem_src_urls:
+            try:
+                import shutil as _shutil
+                _stems_dir = _UPLOADS_PATH / "stems" / job_id
+                _stems_dir.mkdir(parents=True, exist_ok=True)
+                for _sname, _surl in _stem_src_urls.items():
+                    _src_fname = str(_surl).lstrip("/").removeprefix("uploads/")
+                    _src_p = _UPLOADS_PATH / _src_fname
+                    _dst_p = _stems_dir / f"{_sname}.wav"
+                    if _src_p.exists() and not _dst_p.exists():
+                        _shutil.copy2(str(_src_p), str(_dst_p))
+                print(f"[stems] saved {len(_stem_src_urls)} stems for job={job_id[:8]}", flush=True)
+            except Exception as _stem_save_err:
+                print(f"[stems] save failed (non-fatal): {_stem_save_err}", flush=True)
+
     _job_update(job_id, {"intelligence": brief.to_dict()})
     if _audio_tech is not None:
         _job_update(job_id, {"technique": _audio_tech.to_dict()})
@@ -9333,7 +9425,7 @@ def _start_video_job(req: ApiGenerateVideoRequest, platform: str) -> tuple[str, 
                 last_frame_b64=req.last_frame_b64 or "",
             )
 
-            production = agent.plan(agent_req)
+            production = agent.plan(agent_req, brief=brief)
 
             # Apply caller-supplied text overrides before rendering
             if req.scenes_override:
@@ -9456,6 +9548,7 @@ def _start_video_job(req: ApiGenerateVideoRequest, platform: str) -> tuple[str, 
                 transition=transition,
                 transition_dur=0.5 if dna.energy > 0.70 else 0.8,
                 label=f"ai:{production.genre_detected}:{production.tone_used}",
+                genre=production.genre_detected or getattr(req, "genre", "") or "",
             )
             if result.success:
                 _job_update(job_id, {
@@ -9853,7 +9946,7 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
     # ── Run plan() synchronously so scenes are available in this response ──
     # Only the heavy render step is deferred to a background thread.
     _agent     = _VA(_creative_model, _script_agent, _visual_spec_agent)
-    production = await _in_thread(lambda: _agent.plan(req))
+    production = await _in_thread(lambda: _agent.plan(req, brief=brief))
 
     # Apply user-edited scene texts if provided (re-render with edits)
     if scenes_override_raw:
@@ -9940,6 +10033,7 @@ async def api_video_generate_ai(request: Request, _key=Depends(require_scope("ge
                 transition=transition,
                 transition_dur=0.5 if dna.energy > 0.70 else 0.8,
                 label=f"ai:{_production.genre_detected}:{_production.tone_used}",
+                genre=_production.genre_detected or _req.genre,
             )
             if result.success:
                 _job_update(job_id, {
@@ -10196,6 +10290,184 @@ async def api_poll_audio_job(job_id: str, _key=Depends(require_scope("read"))):
     if job["status"] == "error":
         return {"status": "error", "error": job.get("error", "Unknown error")}
     return {"status": job["status"]}
+
+
+# ─── Audio stems endpoint ─────────────────────────────────────────────────────
+# GET /api/audio/{job_id}/stems
+# Returns a JSON dict of stem download URLs. The stems were saved when the job
+# completed (if stems=True was requested). For jobs that had stems, the stem
+# URLs are already stored on the job dict under "stems".
+# Additionally persists individual WAV files under uploads/stems/{job_id}/ for
+# direct per-stem downloads.
+
+@app.get("/api/audio/{job_id}/stems")
+async def api_audio_stems(job_id: str, _key=Depends(require_scope("read"))):
+    """Return stem download URLs for a completed audio job."""
+    job = _job_read(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("status") != "done":
+        raise HTTPException(status_code=409, detail=f"Job not complete (status={job.get('status')})")
+
+    # stems dict from the job is already {name: "/uploads/..."} URL strings
+    raw_stems: dict = job.get("stems") or {}
+
+    # Also attempt to create/expose per-stem files under uploads/stems/{job_id}/
+    # so clients can download individual named stems (drums.wav, bass.wav, etc.)
+    stems_dir = _UPLOADS_PATH / "stems" / job_id
+    try:
+        stems_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as _mkdir_err:
+        print(f"[stems] could not create stems dir: {_mkdir_err}", flush=True)
+
+    # Build final URL map — prefer per-job stems dir copies, fall back to raw URLs
+    stem_urls: dict = {}
+    _standard_names = ("drums", "bass", "pads", "lead", "fx", "melody", "percussion")
+
+    for name, src_url in raw_stems.items():
+        # src_url is like "/uploads/audio_{job_id}_stem_{name}.wav"
+        dest_name = f"{name}.wav"
+        dest_path = stems_dir / dest_name
+        if not dest_path.exists():
+            # Copy from the original upload path
+            try:
+                src_filename = src_url.lstrip("/").removeprefix("uploads/")
+                src_path = _UPLOADS_PATH / src_filename
+                if src_path.exists():
+                    import shutil as _shutil
+                    _shutil.copy2(str(src_path), str(dest_path))
+            except Exception as _cp_err:
+                print(f"[stems] copy {name} failed: {_cp_err}", flush=True)
+        # Always expose the per-job URL
+        stem_urls[name] = f"/api/files/stems/{job_id}/{dest_name}"
+
+    # If no stems from job dict, check if stem files exist on disk
+    if not stem_urls:
+        for sname in _standard_names:
+            candidate = stems_dir / f"{sname}.wav"
+            if candidate.exists():
+                stem_urls[sname] = f"/api/files/stems/{job_id}/{sname}.wav"
+
+    return {"stems": stem_urls, "job_id": job_id}
+
+
+# ─── Serve stem files (file-serving route for stems) ─────────────────────────
+
+@app.get("/api/files/stems/{job_id}/{filename}")
+async def api_serve_stem_file(job_id: str, filename: str, _key=Depends(require_scope("read"))):
+    """Download an individual stem WAV file."""
+    # Sanitise filename to prevent path traversal
+    safe_name = Path(filename).name
+    stem_path = (_UPLOADS_PATH / "stems" / job_id / safe_name).resolve()
+    uploads_resolved = _UPLOADS_PATH.resolve()
+    if not str(stem_path).startswith(str(uploads_resolved)):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if not stem_path.exists():
+        raise HTTPException(status_code=404, detail="Stem file not found")
+    return FileResponse(
+        str(stem_path),
+        media_type="audio/wav",
+        filename=safe_name,
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+    )
+
+
+# ─── Audio MIDI endpoint ──────────────────────────────────────────────────────
+# GET /api/audio/{job_id}/midi
+# Generates a MIDI file from the job parameters and returns it as a download.
+
+@app.get("/api/audio/{job_id}/midi")
+async def api_audio_midi(job_id: str, _key=Depends(require_scope("read"))):
+    """Generate and return a MIDI file for a completed audio job."""
+    job = _job_read(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("status") != "done":
+        raise HTTPException(status_code=409, detail=f"Job not complete (status={job.get('status')})")
+
+    bpm   = float(job.get("bpm") or 120)
+    key   = str(job.get("key") or "C")
+    dur   = float(job.get("duration") or 30)
+
+    # Build a minimal MIDI file using only stdlib (struct + bytes).
+    # Format 0, single track, 480 PPQN. Writes a simple chord pattern
+    # at the job's BPM/key to give producers a starting point.
+    try:
+        import io as _io
+        import struct as _struct
+
+        PPQN = 480
+        tempo_us = int(60_000_000 / bpm)  # microseconds per beat
+
+        # Key → root MIDI note (C4 = 60)
+        _key_map = {
+            "C": 60, "C#": 61, "Db": 61, "D": 62, "D#": 63, "Eb": 63,
+            "E": 64, "F": 65, "F#": 66, "Gb": 66, "G": 67, "G#": 68,
+            "Ab": 68, "A": 69, "A#": 70, "Bb": 70, "B": 71,
+        }
+        root = _key_map.get(key.split("m")[0], 60)
+        # Major chord: root, major third, fifth
+        notes = [root, root + 4, root + 7]
+
+        def _var(v: int) -> bytes:
+            """Encode variable-length MIDI quantity."""
+            buf = [v & 0x7F]
+            v >>= 7
+            while v:
+                buf.append((v & 0x7F) | 0x80)
+                v >>= 7
+            buf.reverse()
+            return bytes(buf)
+
+        track_data = _io.BytesIO()
+        # Tempo meta event (delta=0)
+        track_data.write(b"\x00\xFF\x51\x03")
+        track_data.write(_struct.pack(">I", tempo_us)[1:])  # 3-byte big-endian
+
+        # Number of bars to fill `dur` seconds
+        beats_per_bar = 4
+        beat_dur_s = 60.0 / bpm
+        total_beats = max(4, int(dur / beat_dur_s))
+        total_bars  = max(1, total_beats // beats_per_bar)
+
+        for _bar in range(min(total_bars, 32)):  # cap at 32 bars
+            # Note-on for each note in chord (delta=0 for simultaneous)
+            for i, note in enumerate(notes):
+                delta = 0 if i > 0 else 0
+                track_data.write(_var(delta) + bytes([0x90, note, 80]))
+            # Note-off after one bar (4 beats = 4*PPQN ticks)
+            bar_ticks = beats_per_bar * PPQN
+            for i, note in enumerate(notes):
+                delta = bar_ticks if i == 0 else 0
+                track_data.write(_var(delta) + bytes([0x80, note, 0]))
+
+        # End of track meta event
+        track_data.write(b"\x00\xFF\x2F\x00")
+
+        track_bytes = track_data.getvalue()
+        track_len   = len(track_bytes)
+
+        midi_buf = _io.BytesIO()
+        # MIDI Header chunk
+        midi_buf.write(b"MThd")
+        midi_buf.write(_struct.pack(">IHHH", 6, 0, 1, PPQN))
+        # MIDI Track chunk
+        midi_buf.write(b"MTrk")
+        midi_buf.write(_struct.pack(">I", track_len))
+        midi_buf.write(track_bytes)
+
+        midi_bytes = midi_buf.getvalue()
+        safe_key   = key.replace("#", "s").replace("/", "_")
+        filename   = f"audio_{job_id[:8]}_{safe_key}_{int(bpm)}bpm.mid"
+
+        from fastapi.responses import Response as _FResponse
+        return _FResponse(
+            content=midi_bytes,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"MIDI generation failed: {exc}")
 
 
 # -- Model weight sync (no /api/ prefix) --------------------------------------

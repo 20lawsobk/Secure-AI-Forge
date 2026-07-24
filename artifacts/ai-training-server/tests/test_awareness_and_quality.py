@@ -101,12 +101,37 @@ _GLUE_PREFIXES = ("being", "because", "would", "their", "going", "about")
 def looks_garbled(text: str, whitelist: set[str] | None = None) -> bool:
     """True when text shows glued-token / letter-digit-fusion artefacts.
 
-    Exact mirror of ai_model/request_intelligence.py looks_garbled().
+    Mirrors ai_model/request_intelligence.py looks_garbled() including:
+    - trailing-fragment detection (model mid-word truncation via trailing \\n)
+    - hashtag/mention exclusion (#CamelCaseHashtags are valid social tokens)
     """
     if not text:
         return False
+
+    # ── Trailing-fragment check ───────────────────────────────────────────────
+    # A very short last non-empty line that ends with a plain letter is a sign
+    # that the model was cut off mid-word (e.g. "listen! 🔥\nplaylist fe").
+    # Legitimate short CTAs end with !, ?, ., emoji, or similar punctuation.
+    if "\n" in text:
+        lines = text.split("\n")
+        last = ""
+        for _line in reversed(lines):
+            stripped = _line.strip()
+            if stripped:
+                last = stripped
+                break
+        if last and len(last) < 15 and re.search(r"[a-zA-Z]$", last):
+            return True
+
     wl_str = " ".join(whitelist) if whitelist else ""
     wl = set(re.findall(r"[a-z0-9]+", wl_str.lower()))
+
+    # Build a set of hashtag/mention token cores so they are never flagged as
+    # mashed words (#NonChalantSongs is valid social content, not garble).
+    hashtag_tokens: set[str] = set()
+    for m in re.finditer(r"[#@]([A-Za-z0-9_]+)", text):
+        hashtag_tokens.add(re.sub(r"[^a-z0-9]", "", m.group(1).lower()))
+
     words = re.findall(r"[A-Za-z0-9''\-]+", text)
     if not words:
         return False
@@ -114,7 +139,7 @@ def looks_garbled(text: str, whitelist: set[str] | None = None) -> bool:
     for w in words:
         base = w.strip("''-").lower()
         core = re.sub(r"[^a-z0-9]", "", base)
-        if not core or core in wl:
+        if not core or core in wl or core in hashtag_tokens:
             continue
         # Implausibly long single token (mashed words)
         if len(core) > 14:

@@ -19,7 +19,7 @@ from ..agents.visual_spec_agent import VisualSpecAgent
 from .cinematic_engine import CinematicResult
 from .cinematic_engine import render_cinematic_open
 from .renderer import ASPECT_RATIOS, PLATFORM_RATIOS
-from .scenes import SceneConfig
+from .scenes import SceneConfig, _extract_last_frame_b64
 from . import ai_scene_builder
 from .dataset_sampler import sample_all_scenes as _sample_all_scenes
 
@@ -187,6 +187,7 @@ class VideoAgentRequest:
                                      # style/character consistency (Veo "ingredients")
     first_frame_b64: str = ""        # base64 image the video should START on
     last_frame_b64: str = ""         # base64 image the video should END on
+    init_frame_b64: str = ""         # SDEdit reference for temporal consistency (rolling prior)
 
 
 @dataclass
@@ -206,6 +207,10 @@ class VideoProduction:
     source: str = "ai_model"
     genre_detected: str = ""
     tone_used: str = ""
+    # ── Visual intent fields (from GenerationBrief) ──────────────────────
+    camera_hint: str = ""    # brief.camera_motion
+    lighting_hint: str = ""  # brief.lighting
+    style_hint: str = ""     # brief.visual_style
 
 
 # ── Dynamic scene-sequence builder ──────────────────────────────────────────
@@ -269,10 +274,11 @@ class VideoAgent:
         self.model = model
         self.script_agent = script_agent
         self.visual_spec_agent = visual_spec_agent
+        self._reference_frame: Optional[str] = None  # rolling SDEdit prior
 
     # ── Public API ──────────────────────────────────────────────────────────
 
-    def plan(self, req: VideoAgentRequest) -> VideoProduction:
+    def plan(self, req: VideoAgentRequest, brief=None) -> VideoProduction:
         """
         Run the AI model to build a full production plan.
 
@@ -282,6 +288,11 @@ class VideoAgent:
         sequences advance simultaneously on each decode step.  This avoids
         N × T forward passes (sequential) or thread contention / OOM
         (parallel threading).
+
+        ``brief`` is an optional GenerationBrief whose visual intent fields
+        (camera_motion, lighting, visual_style) are stored in the returned
+        VideoProduction so build_open_scenes() can pass them into SceneConfig
+        as camera_hint / lighting_hint / style_hint.
         """
         platform = req.platform.lower().replace(" ", "_")
         tone = req.tone.lower()
@@ -341,6 +352,18 @@ class VideoAgent:
                 animation="fade",
             )]
 
+        # Extract visual intent from brief (never-raise)
+        _camera_hint = ""
+        _lighting_hint = ""
+        _style_hint = ""
+        if brief is not None:
+            try:
+                _camera_hint = getattr(brief, "camera_motion", "") or ""
+                _lighting_hint = getattr(brief, "lighting", "") or ""
+                _style_hint = getattr(brief, "visual_style", "") or ""
+            except Exception:
+                pass
+
         return VideoProduction(
             platform=platform,
             aspect_ratio=ratio,
@@ -350,6 +373,9 @@ class VideoAgent:
             source=script_source,
             genre_detected=genre,
             tone_used=tone,
+            camera_hint=_camera_hint,
+            lighting_hint=_lighting_hint,
+            style_hint=_style_hint,
         )
 
     def build_open_scenes(
@@ -370,6 +396,11 @@ class VideoAgent:
         diffusion background pipeline conditions on.
         """
         scenes_data = [{"type": s.scene_type, "text": s.text} for s in prod.scenes]
+        # Visual intent hints from GenerationBrief: brief fields take effect when
+        # the direct request field is empty (req field wins if both present).
+        _camera = req.camera_motion or getattr(prod, "camera_hint", "") or ""
+        _lighting = req.lighting or getattr(prod, "lighting_hint", "") or ""
+        _style = getattr(prod, "style_hint", "") or ""
         return ai_scene_builder.build_scenes(
             scenes_data=scenes_data,
             idea=req.idea,
@@ -383,17 +414,19 @@ class VideoAgent:
             awareness=req.awareness,
             technique_dna=technique_dna,
             # ── Veo-parity controls forwarded from VideoAgentRequest ─────
-            camera_motion=req.camera_motion,
+            camera_motion=_camera,
             negative_prompt=req.negative_prompt,
             seed_override=req.seed,
             motion_intensity=req.motion_intensity,
-            lighting=req.lighting,
+            lighting=_lighting,
             color_temperature=req.color_temperature,
             fps=req.fps,
             composition=req.composition,
             reference_images=req.reference_images,
             first_frame_b64=req.first_frame_b64,
             last_frame_b64=req.last_frame_b64,
+            # ── Visual intent style hint (from brief.visual_style) ───────
+            style_hint=_style,
         )
 
     def render(self, req: VideoAgentRequest) -> CinematicResult:
@@ -401,7 +434,19 @@ class VideoAgent:
         production = self.plan(req)
         ratio = production.aspect_ratio or PLATFORM_RATIOS.get(production.platform, "9:16")
         width, height = ASPECT_RATIOS.get(ratio, (1080, 1920))
+
+        # ── Reference frame: seed from init_frame_b64 if provided ──────────
+        if req.init_frame_b64:
+            self._reference_frame = req.init_frame_b64
+
         scene_configs = self.build_open_scenes(req, production, width, height)
+
+        # ── Apply rolling SDEdit reference to scenes 2..N ─────────────────
+        if self._reference_frame and scene_configs:
+            for i, sc in enumerate(scene_configs):
+                if i > 0 and getattr(sc, "reference_b64", None) is None:
+                    sc.reference_b64 = self._reference_frame
+
         dna = ai_scene_builder.build_dna(req.idea, production.genre_detected, production.tone_used)
         transition = "fadeblack" if dna.darkness > 0.70 else "dissolve" if dna.energy < 0.50 else "fade"
         return render_cinematic_open(
@@ -413,6 +458,7 @@ class VideoAgent:
             transition=transition,
             transition_dur=0.5 if dna.energy > 0.70 else 0.8,
             label=f"ai:{production.genre_detected}:{production.tone_used}",
+            genre=production.genre_detected or req.genre,
         )
 
     # ── Internal helpers ────────────────────────────────────────────────────

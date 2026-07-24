@@ -2,11 +2,19 @@ import os from "os";
 import fs from "fs";
 import { Router, type IRouter, type Request, type Response } from "express";
 import { Agent, request as undiciRequest } from "undici";
+import rateLimit from "express-rate-limit";
 import {
   contentAwarenessService,
   type ContentGenerationMode,
 } from "../services/contentAwarenessService.js";
 import { isPythonRestarting } from "../server-state.js";
+import {
+  recordLatency,
+  recordRequest,
+  getP95LatencyMs,
+  getRequestsTotal,
+  getRequestsByRoute,
+} from "../metrics.js";
 
 const router: IRouter = Router();
 
@@ -79,6 +87,47 @@ function _cbRecordFailure(): void {
     );
   }
 }
+
+/** Returns the circuit breaker state string for the metrics endpoint. */
+function _cbState(): "closed" | "open" | "half-open" {
+  if (_cbOpenSince === null) return "closed";
+  if (Date.now() - _cbOpenSince >= CB_RECOVERY_MS) return "half-open";
+  return "open";
+}
+
+// ─── Per-route rate limiters ─────────────────────────────────────────────────
+// Tighter limits for expensive or security-sensitive routes.
+// The global 300 req/min limiter in app.ts still applies on top.
+
+/** 10 req/min — generation endpoints (expensive AI inference). */
+const _generationLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: 10,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  keyGenerator: (req) => req.ip ?? "unknown",
+  message: { error: "Generation rate limit exceeded. Max 10 requests/minute." },
+});
+
+/** 5 req/min — audio generation (most expensive). */
+const _audioLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: 5,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  keyGenerator: (req) => req.ip ?? "unknown",
+  message: { error: "Audio rate limit exceeded. Max 5 requests/minute." },
+});
+
+/** 120 req/min — read/status endpoints (keep loose for polling). */
+const _readLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: 120,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  keyGenerator: (req) => req.ip ?? "unknown",
+  message: { error: "Status rate limit exceeded. Max 120 requests/minute." },
+});
 
 // ─── Request hold queue ──────────────────────────────────────────────────────
 // When Python is restarting (crash or hang) the proxy holds incoming requests
@@ -313,6 +362,8 @@ async function proxyRequest(
 ): Promise<void> {
   const isGet = req.method === "GET" || req.method === "HEAD";
   const startTime = Date.now();
+  // Track per-route and total request counts
+  recordRequest(req.path ?? path);
 
   // Serve from cache for cacheable GETs
   if (isGet) {
@@ -372,9 +423,11 @@ async function proxyRequest(
       setCached(path, upstreamRes.statusCode, data);
     }
 
+    recordLatency(Date.now() - startTime);
     res.setHeader("X-Cache", "MISS");
     res.status(upstreamRes.statusCode).json(data);
   } catch (err) {
+    recordLatency(Date.now() - startTime);
     console.error(
       `[Proxy] Error proxying to ${path} (${Date.now() - startTime}ms):`,
       err,
@@ -1394,5 +1447,236 @@ router.get("/models/engagement/state", async (req, res) => {
 router.post("/train/feedback", async (req, res) => {
   await proxyRequest(req, res, "/api/train/feedback");
 });
+
+// ─── SSE Job Progress Streaming ──────────────────────────────────────────────
+// GET /api/jobs/:jobId/progress
+// Streams server-sent events for long-running jobs by polling the Python server
+// every 1.5 seconds. Closes when complete/failed or after 5 minutes.
+
+router.get("/jobs/:jobId/progress", async (req, res) => {
+  const { jobId } = req.params;
+  const SSE_POLL_MS = 1_500;
+  const SSE_TIMEOUT_MS = 5 * 60 * 1_000;
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+
+  let closed = false;
+  let intervalId: ReturnType<typeof setInterval> | null = null;
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+  function sendEvent(data: Record<string, unknown>): void {
+    if (!closed) {
+      try {
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+      } catch {
+        // client disconnected mid-write — ignore
+      }
+    }
+  }
+
+  function cleanup(): void {
+    if (closed) return;
+    closed = true;
+    if (intervalId !== null) clearInterval(intervalId);
+    if (timeoutId !== null) clearTimeout(timeoutId);
+    try {
+      res.end();
+    } catch {
+      // already ended
+    }
+  }
+
+  req.on("close", cleanup);
+
+  async function poll(): Promise<void> {
+    if (closed) return;
+    try {
+      // Try audio-job first, then video-job
+      const headers: Record<string, string> = {};
+      if (req.headers["x-admin-key"]) {
+        headers["X-Admin-Key"] = req.headers["x-admin-key"] as string;
+      } else if (req.headers["x-api-key"]) {
+        headers["X-Api-Key"] = req.headers["x-api-key"] as string;
+      } else if (_SERVER_FALLBACK_KEY) {
+        headers["X-Api-Key"] = _SERVER_FALLBACK_KEY;
+      }
+
+      // Try /api/audio-job/:jobId first (covers audio), then /api/video-job/:jobId
+      let jobData: Record<string, unknown> | null = null;
+      for (const pollPath of [
+        `/api/audio-job/${jobId}`,
+        `/api/video-job/${jobId}`,
+      ]) {
+        try {
+          const upRes = await undiciRequest(`${MODEL_API_BASE}${pollPath}`, {
+            method: "GET",
+            dispatcher: _keepAlivePool,
+            headers,
+            headersTimeout: 5_000,
+            bodyTimeout: 5_000,
+          });
+          if (upRes.statusCode === 200) {
+            const text = await upRes.body.text();
+            try {
+              jobData = JSON.parse(text) as Record<string, unknown>;
+            } catch {
+              await upRes.body.dump();
+            }
+            break;
+          } else {
+            await upRes.body.dump();
+          }
+        } catch {
+          // try next path
+        }
+      }
+
+      if (!jobData) {
+        sendEvent({ progress: 0, status: "pending", stage: "queued" });
+        return;
+      }
+
+      const status = jobData["status"] as string | undefined;
+      const progress =
+        typeof jobData["progress"] === "number" ? jobData["progress"] :
+        status === "done" ? 100 : 0;
+
+      sendEvent({
+        progress,
+        status: status ?? "pending",
+        stage: (jobData["stage"] as string | undefined) ?? status ?? "pending",
+        ...(jobData["url"] ? { url: jobData["url"] } : {}),
+        ...(jobData["error"] ? { error: jobData["error"] } : {}),
+      });
+
+      if (status === "done" || status === "complete" || status === "error" || status === "cancelled") {
+        cleanup();
+      }
+    } catch (err) {
+      // Non-fatal poll error — keep trying unless closed
+      sendEvent({ progress: 0, status: "pending", stage: "polling_error", detail: String(err).slice(0, 200) });
+    }
+  }
+
+  // Start polling
+  await poll();
+  intervalId = setInterval(() => { void poll(); }, SSE_POLL_MS);
+
+  // Hard timeout after 5 minutes
+  timeoutId = setTimeout(() => {
+    sendEvent({ progress: 0, status: "failed", stage: "timeout", error: "Job progress stream timed out after 5 minutes" });
+    cleanup();
+  }, SSE_TIMEOUT_MS);
+});
+
+// ─── Job Cancel ──────────────────────────────────────────────────────────────
+// POST /api/jobs/:jobId/cancel → proxies to Python DELETE /api/jobs/:jobId
+
+router.post("/jobs/:jobId/cancel", async (req, res) => {
+  const { jobId } = req.params;
+  try {
+    const headers: Record<string, string> = {};
+    if (req.headers["x-admin-key"]) {
+      headers["X-Admin-Key"] = req.headers["x-admin-key"] as string;
+    } else if (req.headers["x-api-key"]) {
+      headers["X-Api-Key"] = req.headers["x-api-key"] as string;
+    } else if (_SERVER_FALLBACK_KEY) {
+      headers["X-Api-Key"] = _SERVER_FALLBACK_KEY;
+    }
+    // Try audio-job delete first, then video-job
+    let responded = false;
+    for (const delPath of [
+      `/api/video-job/${jobId}`,
+      `/api/audio-job/${jobId}`,
+    ]) {
+      try {
+        const upRes = await undiciRequest(`${MODEL_API_BASE}${delPath}`, {
+          method: "DELETE",
+          dispatcher: _keepAlivePool,
+          headers,
+          headersTimeout: 5_000,
+          bodyTimeout: 5_000,
+        });
+        const text = await upRes.body.text();
+        let data: unknown;
+        try { data = JSON.parse(text); } catch { data = { detail: text.slice(0, 300) }; }
+        res.status(upRes.statusCode).json(data);
+        responded = true;
+        break;
+      } catch {
+        // try next
+      }
+    }
+    if (!responded) {
+      res.status(404).json({ error: "Job not found or cannot be cancelled" });
+    }
+  } catch (err) {
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Cancel failed", detail: String(err) });
+    }
+  }
+});
+
+// ─── Stem & MIDI Download Proxy ───────────────────────────────────────────────
+// GET /api/audio/:jobId/stems → proxies to Python GET /api/audio/:jobId/stems
+// GET /api/audio/:jobId/midi  → proxies to Python GET /api/audio/:jobId/midi
+
+router.get("/audio/:jobId/stems", _audioLimiter, async (req, res) => {
+  await proxyRequest(req, res, `/api/audio/${req.params.jobId}/stems`);
+});
+
+router.get("/audio/:jobId/midi", _audioLimiter, async (req, res) => {
+  await proxyBinaryStream(req, res, `/api/audio/${req.params.jobId}/midi`);
+});
+
+// ─── Observability metrics ───────────────────────────────────────────────────
+// GET /api/metrics — no auth required for internal scraping
+
+router.get("/metrics", async (_req, res) => {
+  try {
+    const pythonRestarting = isPythonRestarting();
+    const cbStatus = _cbState();
+    const pythonStatus: "up" | "down" | "restarting" =
+      pythonRestarting ? "restarting" :
+      cbStatus === "open" ? "down" : "up";
+
+    res.json({
+      uptime_s: process.uptime(),
+      requests_total: getRequestsTotal(),
+      requests_by_route: getRequestsByRoute(),
+      python_status: pythonStatus,
+      circuit_breaker: cbStatus,
+      p95_latency_ms: getP95LatencyMs(),
+    });
+  } catch (err) {
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Metrics unavailable", detail: String(err) });
+    }
+  }
+});
+
+// ─── Apply rate limiters to generation routes ────────────────────────────────
+// Note: these use router.use() with path prefixes so they match all methods.
+// They are placed at the end so they don't interfere with route registration order
+// above. express-rate-limit applies per-IP within the route's own window.
+
+// /api/system/* and /api/health* — loose limit for polling
+router.use("/system/", _readLimiter);
+router.use("/health", _readLimiter);
+router.use("/api/health", _readLimiter);
+
+// /api/generate/audio and /api/audio/* — tightest limit
+router.use("/generate/audio", _audioLimiter);
+router.use("/audio/", _audioLimiter);
+
+// /api/generate/*, /api/video/*, /api/campaign/* — 10 req/min
+router.use("/generate/", _generationLimiter);
+router.use("/video/", _generationLimiter);
+router.use("/campaign/", _generationLimiter);
+router.use("/generate-video", _generationLimiter);
 
 export default router;

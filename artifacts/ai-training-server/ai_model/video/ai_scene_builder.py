@@ -311,6 +311,8 @@ def build_scenes(
                                                    # character consistency conditioning
     first_frame_b64: str = "",        # base64 image the video should START on
     last_frame_b64: str = "",         # base64 image the video should END on
+    # ── Visual intent fields from GenerationBrief ─────────────────────────
+    style_hint: str = "",             # brief.visual_style / cinematography token
 ) -> List[SceneConfig]:
     """
     Build a list of SceneConfig objects from content DNA.
@@ -387,6 +389,59 @@ def build_scenes(
     _fps = fps if fps in (8, 16, 24, 30) else 24
 
     palette = derive_palette(dna)
+
+    # ── lighting_hint palette bias (from GenerationBrief.lighting) ──────────
+    # Shift the derived palette's hue / value channels to match the requested
+    # lighting intent.  Never-raise: a bad value leaves the palette unchanged.
+    if lighting:
+        try:
+            import colorsys as _cs_bias
+
+            def _bias_hex(hex_color: str, h_shift: float = 0.0, v_scale: float = 1.0) -> str:
+                c = hex_color.lstrip("0x")
+                r, g, b = int(c[0:2], 16) / 255, int(c[2:4], 16) / 255, int(c[4:6], 16) / 255
+                h, s, v = _cs_bias.rgb_to_hsv(r, g, b)
+                h = (h + h_shift / 360.0) % 1.0
+                v = _clamp(v * v_scale)
+                r2, g2, b2 = _cs_bias.hsv_to_rgb(h, s, v)
+                return f"0x{int(r2*255):02x}{int(g2*255):02x}{int(b2*255):02x}"
+
+            _lt = lighting.lower()
+            if _lt in ("warm", "golden_hour"):
+                # warm → shift H channel +10° toward orange/amber
+                palette = Palette(
+                    bg1=_bias_hex(palette.bg1, h_shift=+10),
+                    bg2=_bias_hex(palette.bg2, h_shift=+10),
+                    text_primary=palette.text_primary,
+                    text_secondary=palette.text_secondary,
+                    accent=_bias_hex(palette.accent, h_shift=+10),
+                    color_grade=palette.color_grade,
+                )
+            elif _lt in ("cool", "neon", "night"):
+                # cool/neon → shift toward blue (-20°)
+                _hshift = -20 if _lt == "cool" else 0  # neon keeps hue, blue stays
+                _vs = 1.0 if _lt != "neon" else 1.05
+                palette = Palette(
+                    bg1=_bias_hex(palette.bg1, h_shift=_hshift, v_scale=_vs),
+                    bg2=_bias_hex(palette.bg2, h_shift=_hshift, v_scale=_vs),
+                    text_primary=palette.text_primary,
+                    text_secondary=palette.text_secondary,
+                    accent=_bias_hex(palette.accent, h_shift=_hshift),
+                    color_grade=palette.color_grade,
+                )
+            elif _lt in ("dark", "dramatic", "cinematic"):
+                # dark → reduce V (value/brightness) channel by 20%
+                palette = Palette(
+                    bg1=_bias_hex(palette.bg1, v_scale=0.80),
+                    bg2=_bias_hex(palette.bg2, v_scale=0.80),
+                    text_primary=palette.text_primary,
+                    text_secondary=palette.text_secondary,
+                    accent=palette.accent,
+                    color_grade=palette.color_grade,
+                )
+        except Exception:
+            pass  # never let lighting bias break scene generation
+
     base_bg_type = _choose_bg_type(dna.energy, dna.darkness, dna.seed)
 
     # For large scene counts we cycle through bg types for visual dynamism
@@ -574,7 +629,7 @@ def build_scenes(
 
         _has_veo_cond = bool(
             awareness or camera_motion or negative_prompt or lighting
-            or composition or _init_b64 or _refs
+            or composition or _init_b64 or _refs or style_hint
         )
         _diffusion_meta: Dict = {
             "idea": idea,
@@ -597,6 +652,10 @@ def build_scenes(
             "composition":      composition or "",
             # SDEdit prior reads init_frame_b64 and denoises FROM the image
             "init_frame_b64":   _init_b64,
+            # ── Visual intent hints from GenerationBrief ─────────────────
+            "camera_hint":      camera_motion or "",   # same as camera_motion (via brief)
+            "lighting_hint":    lighting or "",
+            "style_hint":       style_hint or "",
         } if _has_veo_cond else {}
 
         cfg = SceneConfig(
@@ -621,6 +680,10 @@ def build_scenes(
             camera_motion=camera_motion or "",
             negative_prompt=negative_prompt or "",
             fps=_fps,
+            # Visual intent hints from GenerationBrief
+            camera_hint=camera_motion or "",
+            lighting_hint=lighting or "",
+            style_hint=style_hint or "",
         )
         configs.append(cfg)
 

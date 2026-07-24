@@ -1,5 +1,8 @@
 from __future__ import annotations
+import base64
+import io
 import os
+import subprocess
 import sys
 import time
 import uuid
@@ -119,6 +122,12 @@ class SceneConfig:
     camera_motion: str = ""      # pan_left/zoom_in/static/auto/… (metadata + conditioning)
     negative_prompt: str = ""    # forwarded to diffusion pipeline
     fps: int = 24                # output frame rate (8/16/24/30)
+    # ── Visual intent hint fields (from GenerationBrief) ───────────────────
+    camera_hint: str = ""        # from brief.camera_motion
+    lighting_hint: str = ""      # from brief.lighting (warm/cool/dark/neon/…)
+    style_hint: str = ""         # from brief.visual_style / cinematography
+    # ── Temporal consistency / SDEdit reference ─────────────────────────────
+    reference_b64: Optional[str] = None  # base64 PNG; used as SDEdit prior for diffusion
 
 
 def _build_text_filter(te: TextElement, scene_dur: float) -> List[str]:
@@ -227,7 +236,7 @@ def _np_plasma(c1: tuple, c2: tuple, w: int, h: int, style: str = "plasma"):
     return np.array(Image.fromarray(arr).resize((w, h), Image.BILINEAR))
 
 
-def _pil_bg_frame(scene: SceneConfig, width: int, height: int) -> str:
+def _pil_bg_frame(scene: SceneConfig, width: int, height: int) -> tuple:
     """
     Generate a static background PNG using PIL + NumPy.
 
@@ -236,7 +245,13 @@ def _pil_bg_frame(scene: SceneConfig, width: int, height: int) -> str:
          scene.diffusion_meta.  Falls through silently on any error.
       2. Procedural gradient / plasma / aurora background (always available).
       3. RCGS retrieval conditioning — grounds frame in real assets.
-      4. Film grain baked in via NumPy.
+      4. RTA VRC colour grade applied directly on the NumPy array (before save).
+      5. Film grain baked in via NumPy.
+      6. Save only once; return (bg_path, png_bytes) for pipe-to-ffmpeg.
+
+    Returns:
+      (bg_path: str, png_bytes: bytes | None)
+      png_bytes is the raw PNG payload for stdin-pipe, or None on error.
     """
     import numpy as np
     from PIL import Image
@@ -250,6 +265,7 @@ def _pil_bg_frame(scene: SceneConfig, width: int, height: int) -> str:
     if dmeta is not None:
         try:
             from .diffusion.maxcore_diffusion import get_diffusion_frame
+            _ref = getattr(scene, "reference_b64", None)
             diff_frame = get_diffusion_frame(
                 idea=dmeta.get("idea", ""),
                 platform=dmeta.get("platform", "tiktok"),
@@ -258,6 +274,7 @@ def _pil_bg_frame(scene: SceneConfig, width: int, height: int) -> str:
                 width=width,
                 height=height,
                 context=dmeta,
+                reference_b64=_ref,
             )
             if diff_frame is not None and diff_frame.shape == (height, width, 3):
                 arr = diff_frame
@@ -291,14 +308,34 @@ def _pil_bg_frame(scene: SceneConfig, width: int, height: int) -> str:
         except Exception:
             pass
 
+    # ── Step 4: RTA VRC colour grade on array (BEFORE save — one I/O round-trip)
+    _vrc_applied = False
+    if scene.color_grade and os.environ.get("RTA_VIDEO_GRADE", "1") != "0":
+        try:
+            from ai_model import rta as _rta
+            arr = _rta.api.grade_video_frame(arr, grade=scene.color_grade)
+            _vrc_applied = True
+        except Exception as _vrc_err:
+            print(f"[RTA] VRC grade failed, using ffmpeg grade: {_vrc_err}")
+            _vrc_applied = False
+
     grain = getattr(scene, "film_grain_amount", 0)
     if grain > 0:
         std = max(1, int(grain * 1.5))
         noise = np.random.randint(-std, std + 1, arr.shape, dtype=np.int16)
         arr = np.clip(arr.astype(np.int16) + noise, 0, 255).astype(np.uint8)
 
-    Image.fromarray(arr).save(bg_path, format="PNG")
-    return bg_path
+    # ── Step 5: Encode to PNG bytes (in-memory) and save once ─────────────────
+    try:
+        buf = io.BytesIO()
+        Image.fromarray(arr).save(buf, format="PNG")
+        png_bytes = buf.getvalue()
+        # Write to disk only as fallback for ffmpeg -i path
+        with open(bg_path, "wb") as _f:
+            _f.write(png_bytes)
+        return bg_path, png_bytes, _vrc_applied
+    except Exception:
+        return bg_path, None, _vrc_applied
 
 
 # ── Scene rendering ────────────────────────────────────────────────────────────
@@ -321,13 +358,17 @@ def _render_pil_based(
     """
     Render one scene:
       1. Generate background PNG via PIL+NumPy (fast, no per-pixel ffmpeg geq).
-      2. Encode with ffmpeg using the PNG as a looped still + drawtext overlay.
+         RTA VRC grade is applied on the array BEFORE saving (single I/O write).
+      2. Pipe the PNG bytes to ffmpeg via stdin (avoids temp-file re-read).
+         Falls back to disk path if the pipe approach fails.
     Falls back to a solid-colour render if PIL fails.
     """
     _t0 = time.time()
     bg_png: Optional[str] = None
+    png_bytes: Optional[bytes] = None
+    _vrc_applied = False
     try:
-        bg_png = _pil_bg_frame(scene, width, height)
+        bg_png, png_bytes, _vrc_applied = _pil_bg_frame(scene, width, height)
     except Exception:
         pass
     _t_bg = time.time() - _t0
@@ -335,27 +376,8 @@ def _render_pil_based(
     if not bg_png or not os.path.exists(bg_png):
         return _render_fallback(scene, width, height, dur, out_path)
 
-    # ── RTA-1 VRC colour grade (Digital-GPU node-based grade) ───────────────
-    # Applied to the background still itself via the RTA fabric (lift/gamma/gain
-    # + creative colour matrix as a GEMM on the self-contained Digital GPU),
-    # replacing the ad-hoc ffmpeg grade filter. Explicit fallback to the ffmpeg
-    # grade preset if RTA is unavailable, so colour work never silently drops.
-    _t0 = time.time()
-    _vrc_applied = False
-    if scene.color_grade and os.environ.get("RTA_VIDEO_GRADE", "1") != "0":
-        try:
-            import numpy as _np
-            from PIL import Image as _Image
-            from ai_model import rta as _rta
-            _arr = _np.asarray(_Image.open(bg_png).convert("RGB"))
-            _graded = _rta.api.grade_video_frame(_arr, grade=scene.color_grade)
-            _Image.fromarray(_graded).save(bg_png, format="PNG")
-            _vrc_applied = True
-        except Exception as _vrc_err:
-            print(f"[RTA] VRC grade failed, using ffmpeg grade: {_vrc_err}")
-            _vrc_applied = False
-
-    _t_grade = time.time() - _t0
+    # Grade timing — grade already applied on array inside _pil_bg_frame
+    _t_grade = 0.0
 
     vf_parts: List[str] = []
 
@@ -387,38 +409,71 @@ def _render_pil_based(
 
     vf = ",".join(vf_parts) if vf_parts else "null"
 
-    cmd = [
-        "ffmpeg", "-y",
-        "-loop", "1", "-framerate", str(scene.fps), "-i", bg_png,
-        "-vf", vf,
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
-        "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-        "-t", str(dur), out_path,
-    ]
-
-    try:
-        _t0 = time.time()
-        # niceness=0: FFmpeg here wraps a pre-generated PNG into H264 — the
-        # heavy work already ran on the Digital GPU (diffusion, VRC grading).
-        # Applying nice -n 10 would slow the encode without benefiting GPU ops.
-        result = run_ffmpeg(cmd, timeout=20, niceness=0)
-        print(
-            f"[VideoRender][Timing] scene bg={_t_bg:.1f}s grade={_t_grade:.1f}s "
-            f"encode={time.time() - _t0:.1f}s dur={dur:.1f}s {width}x{height}",
-            flush=True,
-        )
-        _safe_remove(bg_png)
-        if result.returncode != 0:
-            print(
-                f"[VideoRender][ERROR] ffmpeg PIL render failed (rc={result.returncode}):\n{result.stderr[-800:]}",
-                file=sys.stderr,
+    # ── Try stdin pipe first (avoids disk re-read; only for in-memory PNG) ──
+    # 1920×1080 PNG ≈ 6 MB raw, well within the 50 MB safety threshold.
+    _pipe_ok = False
+    _encode_t0 = time.time()
+    if png_bytes is not None and len(png_bytes) < 50 * 1024 * 1024:
+        try:
+            pipe_cmd = [
+                "ffmpeg", "-y",
+                "-loop", "1", "-framerate", str(scene.fps),
+                "-f", "image2pipe", "-vcodec", "png", "-i", "pipe:0",
+                "-vf", vf,
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
+                "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+                "-t", str(dur), out_path,
+            ]
+            proc = subprocess.Popen(
+                pipe_cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
+            _stdout, _stderr = proc.communicate(input=png_bytes, timeout=20)
+            if proc.returncode == 0:
+                _pipe_ok = True
+            else:
+                print(
+                    f"[VideoRender][WARN] ffmpeg pipe render failed (rc={proc.returncode}), "
+                    f"falling back to disk: {_stderr[-400:].decode('utf-8', errors='replace')}",
+                    file=sys.stderr,
+                )
+        except Exception as _pipe_exc:
+            print(f"[VideoRender][WARN] pipe approach failed ({_pipe_exc}), falling back to disk", file=sys.stderr)
+
+    if not _pipe_ok:
+        # Disk fallback
+        cmd = [
+            "ffmpeg", "-y",
+            "-loop", "1", "-framerate", str(scene.fps), "-i", bg_png,
+            "-vf", vf,
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            "-t", str(dur), out_path,
+        ]
+        try:
+            result = run_ffmpeg(cmd, timeout=20, niceness=0)
+            if result.returncode != 0:
+                print(
+                    f"[VideoRender][ERROR] ffmpeg PIL render failed (rc={result.returncode}):\n{result.stderr[-800:]}",
+                    file=sys.stderr,
+                )
+                _safe_remove(bg_png)
+                return _render_fallback(scene, width, height, dur, out_path)
+        except Exception as exc:
+            print(f"[VideoRender][ERROR] _render_pil_based exception: {exc}", file=sys.stderr)
+            _safe_remove(bg_png)
             return _render_fallback(scene, width, height, dur, out_path)
-        return out_path
-    except Exception as exc:
-        print(f"[VideoRender][ERROR] _render_pil_based exception: {exc}", file=sys.stderr)
-        _safe_remove(bg_png)
-        return _render_fallback(scene, width, height, dur, out_path)
+
+    print(
+        f"[VideoRender][Timing] scene bg={_t_bg:.1f}s grade={_t_grade:.1f}s "
+        f"encode={time.time() - _encode_t0:.1f}s dur={dur:.1f}s {width}x{height} "
+        f"pipe={'yes' if _pipe_ok else 'disk'}",
+        flush=True,
+    )
+    _safe_remove(bg_png)
+    return out_path
 
 
 def _render_fallback(
@@ -475,7 +530,137 @@ def cleanup_temp(paths: List[str]):
         _safe_remove(p)
 
 
+def _extract_last_frame_b64(clip_path: str) -> Optional[str]:
+    """Extract the last frame of a video clip as a base64-encoded PNG.
+
+    Runs ffmpeg with sseof=-0.1 to grab the final frame and pipe it to stdout.
+    Never raises — returns None on any error.
+    """
+    try:
+        cmd = [
+            "ffmpeg", "-y",
+            "-sseof", "-0.1", "-i", clip_path,
+            "-vframes", "1",
+            "-f", "image2pipe", "-vcodec", "png", "pipe:1",
+        ]
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        png_data, _ = proc.communicate(timeout=10)
+        if proc.returncode != 0 or not png_data:
+            return None
+        return base64.b64encode(png_data).decode("ascii")
+    except Exception:
+        return None
+
+
 # ── Scene compositing ─────────────────────────────────────────────────────────
+
+def _get_clip_duration(clip_path: str) -> float:
+    """Get the duration of a video clip via ffprobe. Returns 0.0 on failure."""
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                clip_path,
+            ],
+            capture_output=True, text=True, timeout=8,
+        )
+        return float(proc.stdout.strip())
+    except Exception:
+        return 0.0
+
+
+def _xfade_transition_for_genre(genre: str) -> str:
+    """Map genre to an xfade transition type."""
+    g = genre.lower()
+    if any(k in g for k in ("trap", "drill", "phonk")):
+        return "wipeleft"
+    if any(k in g for k in ("lofi", "lo_fi", "lo-fi", "jazz", "rnb", "r&b")):
+        return "dissolve"
+    if "cinematic" in g:
+        return "circleopen"
+    return "fade"
+
+
+def _composite_xfade(
+    scene_paths: List[str],
+    output_path: str,
+    transition: str,
+    transition_dur: float,
+    audio_path: Optional[str],
+    genre: str,
+) -> bool:
+    """
+    Build an N-clip xfade chain using filter_complex.
+
+    For N inputs with xfade between each pair:
+      [0:v][1:v]xfade=transition=X:duration=D:offset=<end0-D>[v01];
+      [v01][2:v]xfade=transition=X:duration=D:offset=<cum_offset>[v012];
+      ...
+    Falls back to concat on any failure.
+    """
+    n = len(scene_paths)
+    if n < 2:
+        return False
+
+    xfade_type = _xfade_transition_for_genre(genre) if genre else "fade"
+    td = max(0.1, min(float(transition_dur), 1.0))
+
+    # Get durations for offset calculation
+    durations: List[float] = []
+    for p in scene_paths:
+        d = _get_clip_duration(p)
+        if d <= 0.0:
+            # Can't compute offsets without durations — fail to concat fallback
+            return False
+        durations.append(d)
+
+    # Build filter_complex
+    # Each xfade offset is cumulative: sum(durations[0..i]) - (i+1)*td
+    inputs: List[str] = []
+    for p in scene_paths:
+        inputs += ["-i", p]
+
+    filter_parts: List[str] = []
+    cumulative = 0.0
+    prev_label = "[0:v]"
+
+    for i in range(n - 1):
+        cumulative += durations[i]
+        offset = max(0.0, cumulative - td * (i + 1))
+        out_label = f"[v{''.join(str(x) for x in range(i+2))}]" if i < n - 2 else "[vout]"
+        filter_parts.append(
+            f"{prev_label}[{i+1}:v]xfade=transition={xfade_type}"
+            f":duration={td:.3f}:offset={offset:.3f}{out_label}"
+        )
+        prev_label = out_label
+
+    filter_complex = ";".join(filter_parts)
+
+    cmd = ["ffmpeg", "-y"]
+    cmd += inputs
+    cmd += ["-filter_complex", filter_complex, "-map", "[vout]"]
+
+    if audio_path and os.path.exists(audio_path):
+        cmd += ["-i", audio_path, "-c:a", "aac", "-b:a", "128k", "-shortest"]
+
+    cmd += [
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
+        "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+        output_path,
+    ]
+
+    try:
+        result = run_ffmpeg(cmd, timeout=60, niceness=0)
+        return result.returncode == 0
+    except Exception:
+        return False
+
 
 def composite_scenes(
     scene_paths: List[str],
@@ -483,12 +668,14 @@ def composite_scenes(
     transition: str = "fade",
     transition_dur: float = 0.5,
     audio_path: Optional[str] = None,
+    genre: str = "",
 ) -> bool:
     """
     Concatenate rendered scene clips into one MP4.
-    Uses a simple concat demuxer for speed; transitions are applied via
-    xfade when there are exactly 2 clips (generalising further is left as
-    an enhancement — concat is already visually clean).
+
+    For N ≥ 2 clips, attempts xfade filter_complex transitions between each pair
+    (transition type selected from genre). Falls back to concat demuxer if xfade
+    fails for any reason.
     """
     if not scene_paths:
         return False
@@ -501,6 +688,19 @@ def composite_scenes(
         except Exception:
             return False
 
+    # ── Try xfade filter_complex for N clips ──────────────────────────────────
+    xfade_ok = False
+    try:
+        xfade_ok = _composite_xfade(
+            scene_paths, output_path, transition, transition_dur, audio_path, genre
+        )
+    except Exception:
+        xfade_ok = False
+
+    if xfade_ok and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+        return True
+
+    # ── Concat demuxer fallback ───────────────────────────────────────────────
     concat_list = os.path.join(TEMP_DIR, f"concat_{uuid.uuid4().hex[:8]}.txt")
     os.makedirs(TEMP_DIR, exist_ok=True)
 

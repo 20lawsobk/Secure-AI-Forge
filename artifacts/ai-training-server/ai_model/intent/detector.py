@@ -533,6 +533,105 @@ _STOPWORDS = {
 }
 
 # ---------------------------------------------------------------------------
+# Tempo feel lexicon
+# ---------------------------------------------------------------------------
+
+_TEMPO_FEEL_LEXICON: Dict[str, List[str]] = {
+    "halftime":   ["half time", "halftime", "slow feel", "half-time"],
+    "doubletime": ["double time", "doubletime", "double-time", "2x"],
+    "swing":      ["swing", "swung", "shuffle", "bouncy feel", "behind the beat"],
+    "triplet":    ["triplet", "trap triplet", "three-feel", "waltz"],
+    "straight":   ["straight", "on the grid", "quantized", "robotic"],
+}
+
+
+def _detect_tempo_feel(blob: str) -> Optional[Tuple[str, float]]:
+    """Return (feel, confidence) or None. Never-raise."""
+    try:
+        hits: Dict[str, int] = {}
+        for feel, phrases in _TEMPO_FEEL_LEXICON.items():
+            for phrase in phrases:
+                if phrase in blob:
+                    hits[feel] = hits.get(feel, 0) + len(phrase.split())
+        if not hits:
+            return None
+        best = max(hits, key=lambda k: hits[k])
+        total = sum(hits.values()) or 1
+        confidence = min(0.95, 0.55 + hits[best] / (total + 2.0))
+        return best, confidence
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Vocal style lexicon
+# ---------------------------------------------------------------------------
+
+_VOCAL_STYLE_LEXICON: Dict[str, List[str]] = {
+    "male":     ["male vocal", "male voice", "male singer", "male rapper",
+                 "deep voice", "baritone", "tenor"],
+    "female":   ["female vocal", "female voice", "female singer", "female rapper",
+                 "soprano", "alto", "feminine voice"],
+    "autotune": ["autotune", "auto-tune", "auto tune", "pitch corrected",
+                 "pitched up", "pitched down", "heavy autotune", "t-pain effect"],
+    "whisper":  ["whisper", "breathy", "soft spoken", "asmr", "intimate vocal",
+                 "hushed"],
+    "melodic":  ["melodic", "melodic rap", "melodic flow", "singing rap",
+                 "sung vocals", "harmonies", "harmony"],
+    "rap":      ["rap vocal", "rapping", "rapper", "mc", "bars",
+                 "spitting bars", "lyrical"],
+    "none":     ["no vocals", "instrumental", "no singing", "no lyrics",
+                 "beat only", "no voice"],
+}
+
+
+def _detect_vocal_style(blob: str) -> Optional[Tuple[str, float]]:
+    """Return (vocal_style, confidence) or None. Never-raise."""
+    try:
+        hits: Dict[str, int] = {}
+        for style, phrases in _VOCAL_STYLE_LEXICON.items():
+            for phrase in phrases:
+                if phrase in blob:
+                    hits[style] = hits.get(style, 0) + len(phrase.split())
+        if not hits:
+            return None
+        best = max(hits, key=lambda k: hits[k])
+        total = sum(hits.values()) or 1
+        confidence = min(0.95, 0.50 + hits[best] / (total + 2.0))
+        return best, confidence
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Arrangement density lexicon
+# ---------------------------------------------------------------------------
+
+_DENSITY_LEXICON: Dict[str, List[str]] = {
+    "minimal":    ["sparse", "stripped", "bare", "minimal", "just", "only"],
+    "full":       ["full", "layered", "lush", "rich", "thick",
+                   "wall of sound", "orchestral", "cinematic"],
+}
+
+
+def _detect_density(blob: str) -> Optional[Tuple[str, float]]:
+    """Return (density, confidence) or None. Never-raise."""
+    try:
+        hits: Dict[str, int] = {}
+        for density, phrases in _DENSITY_LEXICON.items():
+            for phrase in phrases:
+                if phrase in blob:
+                    hits[density] = hits.get(density, 0) + len(phrase.split())
+        if not hits:
+            return None
+        best = max(hits, key=lambda k: hits[k])
+        total = sum(hits.values()) or 1
+        confidence = min(0.95, 0.50 + hits[best] / (total + 2.0))
+        return best, confidence
+    except Exception:
+        return None
+
+# ---------------------------------------------------------------------------
 # Public dataclass
 # ---------------------------------------------------------------------------
 
@@ -568,6 +667,18 @@ class IntentSignals:
     topics:            List[str]       = field(default_factory=list)
     keywords:          List[str]       = field(default_factory=list)
     negative_signals:  List[str]       = field(default_factory=list)
+
+    # Tempo feel
+    tempo_feel:            Optional[str]   = None    # "halftime"|"doubletime"|"swing"|"triplet"|"straight"
+    tempo_feel_confidence: float           = 0.0
+
+    # Vocal style
+    vocal_style:           Optional[str]   = None    # "male"|"female"|"autotune"|"whisper"|"melodic"|"rap"|"none"
+    vocal_confidence:      float           = 0.0
+
+    # Arrangement density
+    density:               Optional[str]   = None    # "minimal"|"standard"|"full"|"orchestral"
+    density_confidence:    float           = 0.0
 
     # Reference
     reference_artist:  Optional[str]   = None
@@ -644,6 +755,27 @@ class IntentSignals:
         if self.reference_artist:
             lines.append(f"[INTENT] reference_artist={self.reference_artist}")
 
+        # ── Tempo feel ───────────────────────────────────────────────
+        if self.tempo_feel:
+            lines.append(
+                f"[INTENT] tempo_feel={self.tempo_feel} "
+                f"tempo_feel_confidence={self.tempo_feel_confidence:.2f}"
+            )
+
+        # ── Vocal style ──────────────────────────────────────────────
+        if self.vocal_style:
+            lines.append(
+                f"[INTENT] vocal_style={self.vocal_style} "
+                f"vocal_confidence={self.vocal_confidence:.2f}"
+            )
+
+        # ── Arrangement density ───────────────────────────────────────
+        if self.density:
+            lines.append(
+                f"[INTENT] density={self.density} "
+                f"density_confidence={self.density_confidence:.2f}"
+            )
+
         return lines
 
     # -------------------------------------------------------------------
@@ -675,6 +807,135 @@ class IntentSignals:
         if self.goal and self.goal_confidence >= 0.5:
             kw["goal"] = self.goal
         return kw
+
+
+# ---------------------------------------------------------------------------
+# Audio-based intent detection
+# ---------------------------------------------------------------------------
+
+_PITCH_CLASSES_DETECT = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+
+def detect_from_audio(audio_bytes: bytes, sr: int = 22050) -> "IntentSignals":
+    """Detect BPM and musical key from raw audio bytes.
+
+    1. Decode audio bytes via digital_gpu_stft (no librosa dependency).
+    2. BPM from onset envelope autocorrelation (numpy only).
+    3. Key from 12-bin chromagram peak (DFT-based).
+
+    Returns an IntentSignals with tempo_bpm and key populated.
+    Never raises — returns an empty IntentSignals on any error.
+    """
+    try:
+        import numpy as np
+        # Decode bytes to float32 PCM
+        try:
+            import io as _io
+            import wave as _wave
+            with _wave.open(_io.BytesIO(audio_bytes)) as wf:
+                n_frames = wf.getnframes()
+                n_ch = wf.getnchannels()
+                raw = wf.readframes(n_frames)
+                pcm = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+                if n_ch > 1:
+                    pcm = pcm.reshape(-1, n_ch).mean(axis=1)
+                sr = wf.getframerate()
+        except Exception:
+            # Fallback: treat bytes as raw float32 mono
+            try:
+                pcm = np.frombuffer(audio_bytes, dtype=np.float32).copy()
+            except Exception:
+                return IntentSignals()
+
+        if pcm.size == 0:
+            return IntentSignals()
+
+        # Normalise
+        peak = float(np.max(np.abs(pcm)))
+        if peak > 1e-6:
+            pcm = pcm / peak
+
+        # ── BPM via onset envelope autocorrelation ─────────────────────────
+        bpm_detected: Optional[float] = None
+        try:
+            from ai_model.audio.digital_gpu_synth import digital_gpu_stft
+            n_fft = 2048
+            hop = 512
+            Sr, Si = digital_gpu_stft(pcm, n_fft=n_fft, hop_length=hop)
+            mag = np.sqrt(Sr ** 2 + Si ** 2)
+            # Onset strength: sum of positive spectral flux across bands
+            flux = np.diff(mag, axis=1)
+            flux = np.maximum(flux, 0.0).sum(axis=0)
+            # Normalize
+            fx = float(np.max(flux))
+            if fx > 1e-8:
+                flux = flux / fx
+            # Autocorrelation over the onset envelope
+            n_auto = len(flux)
+            if n_auto > 4:
+                ac = np.correlate(flux, flux, mode="full")[n_auto - 1:]
+                # BPM range: 60–220 BPM → period in frames
+                fps = sr / hop
+                lo_period = int(fps * 60.0 / 220.0)
+                hi_period = int(fps * 60.0 / 60.0)
+                lo_period = max(1, lo_period)
+                hi_period = min(hi_period, n_auto - 1)
+                if hi_period > lo_period:
+                    sub = ac[lo_period:hi_period + 1]
+                    best_lag = int(np.argmax(sub)) + lo_period
+                    bpm_raw = fps * 60.0 / float(best_lag)
+                    # Normalise to 60-220 range
+                    while bpm_raw < 60.0:
+                        bpm_raw *= 2.0
+                    while bpm_raw > 220.0:
+                        bpm_raw /= 2.0
+                    bpm_detected = round(bpm_raw, 1)
+        except Exception:
+            pass
+
+        # ── Key via 12-bin chromagram ──────────────────────────────────────
+        key_detected: Optional[str] = None
+        try:
+            from ai_model.audio.digital_gpu_synth import digital_gpu_stft
+            n_fft = 4096
+            hop = 1024
+            Sr, Si = digital_gpu_stft(pcm, n_fft=n_fft, hop_length=hop)
+            mag = np.sqrt(Sr ** 2 + Si ** 2)
+            n_bins = mag.shape[0]
+            freqs = np.linspace(0, sr / 2.0, n_bins, dtype=np.float32)
+            # Map FFT bins to chroma bins (12 semitones, A=440Hz reference)
+            chroma = np.zeros(12, dtype=np.float64)
+            for bi in range(n_bins):
+                f = float(freqs[bi])
+                if f < 27.5:
+                    continue
+                midi = 69.0 + 12.0 * np.log2(f / 440.0)
+                chroma_bin = int(round(midi)) % 12
+                chroma[chroma_bin] += float(np.mean(mag[bi]))
+            chroma_sum = float(chroma.sum())
+            if chroma_sum > 1e-8:
+                chroma /= chroma_sum
+            peak_bin = int(np.argmax(chroma))
+            # Simple major/minor heuristic: compare relative weights of
+            # major-third (4 semitones up) and minor-third (3 semitones up)
+            major_third = chroma[(peak_bin + 4) % 12]
+            minor_third = chroma[(peak_bin + 3) % 12]
+            mode = "major" if major_third >= minor_third else "minor"
+            key_detected = f"{_PITCH_CLASSES_DETECT[peak_bin]} {mode}"
+        except Exception:
+            pass
+
+        if bpm_detected is None and key_detected is None:
+            return IntentSignals()
+
+        return IntentSignals(
+            tempo_bpm=bpm_detected,
+            key=key_detected,
+            confidence=0.70,
+            source="audio",
+        )
+    except Exception:
+        return IntentSignals()
 
 
 # ---------------------------------------------------------------------------
@@ -763,6 +1024,13 @@ def _detect_impl(
     energy, energy_conf = energy_result if energy_result else (None, 0.0)
     bpm                 = _detect_bpm(blob)
     key                 = _detect_key(blob)
+    # New signals (A, B, F)
+    _tempo_feel_result  = _detect_tempo_feel(blob)
+    tempo_feel, tempo_feel_conf = _tempo_feel_result if _tempo_feel_result else (None, 0.0)
+    _vocal_result       = _detect_vocal_style(blob)
+    vocal_style, vocal_conf = _vocal_result if _vocal_result else (None, 0.0)
+    _density_result     = _detect_density(blob)
+    density, density_conf = _density_result if _density_result else (None, 0.0)
 
     # ── 2. Structural pass ────────────────────────────────────────────────
     negative_signals = _detect_negations(blob)
@@ -818,14 +1086,31 @@ def _detect_impl(
         genre, mood, energy, tone, bpm, key,
         lighting, camera_motion, color_temperature,
         bool(visual_styles), bool(platform_hints), goal,
+        tempo_feel, vocal_style, density,
     ] if v)
     confidence = min(0.98, 0.30 + confident_signals * 0.065)
 
-    # Promote confidence when description is long and specific
-    if len(description) > 100:
+    # ── E. Clarity-based confidence scoring (replaces wordiness boost) ────
+    # Bonus when top genre signal has NO competing aliases (unambiguous intent).
+    try:
+        _genre_hits: Dict[str, int] = {}
+        for _alias, _canon in _GENRE_ALIASES.items():
+            if _phrase_in(_alias, blob):
+                _genre_hits[_canon] = _genre_hits.get(_canon, 0) + 1
+        if genre and len(_genre_hits) == 1:
+            # Only one canonical genre fired — no competing alternatives
+            confidence = min(0.98, confidence + 0.10)
+        elif genre and len(_genre_hits) > 1:
+            # Penalise for each extra alias beyond the winner
+            _extra_aliases = len(_genre_hits) - 1
+            confidence = max(0.0, confidence - 0.05 * _extra_aliases)
+    except Exception:
+        pass
+
+    # Bonus when the original description is short (user was precise / explicit)
+    _word_count = len(description.split()) if description else 0
+    if 0 < _word_count < 6:
         confidence = min(0.98, confidence + 0.08)
-    if len(description) > 250:
-        confidence = min(0.98, confidence + 0.05)
 
     # ── 6. Keywords (topics minus known genre/mood noise) ─────────────────
     genre_words = set((genre or "").replace("_", " ").split())
@@ -837,27 +1122,33 @@ def _detect_impl(
     ][:6]
 
     return IntentSignals(
-        genre              = genre,
-        genre_confidence   = genre_conf,
-        mood               = mood,
-        mood_confidence    = mood_conf,
-        energy             = energy,
-        energy_confidence  = energy_conf,
-        tone               = tone,
-        tempo_bpm          = bpm,
-        key                = key,
-        lighting           = lighting,
-        camera_motion      = camera_motion,
-        color_temperature  = color_temperature,
-        visual_styles      = visual_styles,
-        platform_hints     = platform_hints,
-        goal               = goal,
-        goal_confidence    = goal_conf,
-        topics             = topics[:6],
-        keywords           = keywords,
-        negative_signals   = negative_signals,
-        reference_artist   = reference_artist,
-        confidence         = confidence,
-        source             = source,
-        raw_text           = raw_text,
+        genre                  = genre,
+        genre_confidence       = genre_conf,
+        mood                   = mood,
+        mood_confidence        = mood_conf,
+        energy                 = energy,
+        energy_confidence      = energy_conf,
+        tone                   = tone,
+        tempo_bpm              = bpm,
+        key                    = key,
+        tempo_feel             = tempo_feel,
+        tempo_feel_confidence  = tempo_feel_conf,
+        vocal_style            = vocal_style,
+        vocal_confidence       = vocal_conf,
+        density                = density,
+        density_confidence     = density_conf,
+        lighting               = lighting,
+        camera_motion          = camera_motion,
+        color_temperature      = color_temperature,
+        visual_styles          = visual_styles,
+        platform_hints         = platform_hints,
+        goal                   = goal,
+        goal_confidence        = goal_conf,
+        topics                 = topics[:6],
+        keywords               = keywords,
+        negative_signals       = negative_signals,
+        reference_artist       = reference_artist,
+        confidence             = confidence,
+        source                 = source,
+        raw_text               = raw_text,
     )
