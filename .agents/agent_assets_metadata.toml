@@ -18,3 +18,9 @@ id = "XiBqqk305EMXFAGoClc6V"
 uri = "file://charttopper_A_minor_140bpm_trap_3min.wav"
 type = "audio"
 title = "Chart-Topper Beat — A Minor / 140 BPM / Melodic Trap (3:00)"
+
+[[outputs]]
+id = "d-6hL4URrD4IIIIxg0Ehl"
+uri = "file://charttopper_A_minor_140bpm_trap_3min_v2.wav"
+type = "audio"
+title = "Chart-Topper Beat v2 — A Minor / 140 BPM / Melodic Trap (3:00) — Drums Fixed"

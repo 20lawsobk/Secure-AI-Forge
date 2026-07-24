@@ -364,7 +364,7 @@ class DrumKit:
         n = int(decay_s * 2.0 * self.sr)
         # Sub layer: exponential pitch sweep (80Hz → sub_freq)
         sub = self.k.freq_sweep_sin(80.0, 14.0, float(self.sr), n)
-        sub_env = self.k.exp_decay(5.0, decay_s * 2.0, n)
+        sub_env = self.k.exp_decay(5.0 / self.sr, decay_s * 2.0, n)
         self.k.inplace_mul(sub, sub_env)
 
         # Body transient: mid sine burst (90Hz)
@@ -373,13 +373,13 @@ class DrumKit:
         body_freqs = np.array([90.0, 180.0], dtype=np.float32)
         body_amps  = np.array([0.6,  0.3 ], dtype=np.float32) * float(punch)
         self.k.additive_synth(body_freqs, body_amps, float(self.sr), body_buf)
-        body_env = self.k.exp_decay(25.0, body_len / self.sr, body_len)
+        body_env = self.k.exp_decay(25.0 / self.sr, body_len / self.sr, body_len)
         self.k.inplace_mul(body_buf, body_env)
 
         # Click transient: 2kHz noise burst for attack definition
         click_len = min(n, int(0.008 * self.sr))
         click = self.k.white_noise(0xBABECAFE, click_len)
-        click_env = self.k.exp_decay(250.0, click_len / self.sr, click_len)
+        click_env = self.k.exp_decay(250.0 / self.sr, click_len / self.sr, click_len)
         self.k.inplace_mul(click, click_env)
         # HP filter the click to remove muddiness
         hpf = self.k.hpf_coeffs(1000.0, 0.7, float(self.sr))
@@ -436,12 +436,12 @@ class DrumKit:
             np.array([200.0, 280.0], dtype=np.float32),
             np.array([0.5, 0.3], dtype=np.float32) * float(vel),
             float(self.sr), tone_buf)
-        tone_env = self.k.exp_decay(18.0, 0.20, n)
+        tone_env = self.k.exp_decay(18.0 / self.sr, 0.20, n)
         self.k.inplace_mul(tone_buf, tone_env)
 
         # Noise layer (snappy)
         noise = self.k.white_noise(0xDEAD, n)
-        noise_env = self.k.exp_decay(12.0, 0.20, n)
+        noise_env = self.k.exp_decay(12.0 / self.sr, 0.20, n)
         self.k.inplace_mul(noise, noise_env)
         # Band-pass noise: HPF at 600Hz, LPF at 8kHz
         hp  = self.k.hpf_coeffs(600.0, 0.7, float(self.sr))
@@ -463,7 +463,7 @@ class DrumKit:
         burst_len = int(0.01 * self.sr)
         for offset in (0, int(0.008*self.sr), int(0.016*self.sr)):
             burst = self.k.white_noise(0xCAFE ^ offset, burst_len)
-            burst_env = self.k.exp_decay(80.0, burst_len/self.sr, burst_len)
+            burst_env = self.k.exp_decay(80.0 / self.sr, burst_len/self.sr, burst_len)
             self.k.inplace_mul(burst, burst_env)
             end = min(offset + burst_len, n)
             out[offset:end] += burst[:end-offset]
@@ -477,22 +477,22 @@ class DrumKit:
     def hat_closed(self, vel: float = 1.0) -> np.ndarray:
         n = int(0.025 * self.sr)
         noise = self.k.white_noise(0xF00D, n)
-        env   = self.k.exp_decay(150.0, 0.025, n)
+        env   = self.k.exp_decay(150.0 / self.sr, 0.025, n)
         self.k.inplace_mul(noise, env)
         hp = self.k.hpf_coeffs(6000.0, 0.7, float(self.sr))
         st = np.zeros(2, np.float32)
         noise = self.k.biquad(hp, noise, st)
-        return noise * float(vel) * 0.35
+        return noise * float(vel) * 0.80
 
     def hat_open(self, vel: float = 1.0, decay_s: float = 0.18) -> np.ndarray:
         n = int(decay_s * self.sr)
         noise = self.k.white_noise(0xBEEF, n)
-        env   = self.k.exp_decay(8.0, decay_s, n)
+        env   = self.k.exp_decay(8.0 / self.sr, decay_s, n)
         self.k.inplace_mul(noise, env)
         hp = self.k.hpf_coeffs(6000.0, 0.6, float(self.sr))
         st = np.zeros(2, np.float32)
         noise = self.k.biquad(hp, noise, st)
-        return noise * float(vel) * 0.40
+        return noise * float(vel) * 0.85
 
 
 class BassVoice:
@@ -553,7 +553,7 @@ def apply_reverb(x: np.ndarray, kern: NativeKernels, sr: int,
     try:
         ir_len = int(sr * room_size * 2.5)
         ir     = kern.white_noise(seed, ir_len).astype(np.float64)
-        env    = kern.exp_decay(5.5 / max(room_size, 0.01),
+        env    = kern.exp_decay(5.5 / max(room_size, 0.01) / sr,
                                 room_size * 2.5, ir_len).astype(np.float64)
         ir    *= env
         # Pre-delay (8ms) and stereo diffusion

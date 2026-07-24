@@ -49,6 +49,15 @@ genre-specific drum patterns, bass lines, pad chords, lead arp, reverb, compress
 - `_SECTIONS` — per-genre arrangement templates (name, bars, elements, filter_pct, energy)
 - Sections scale to fill `duration_sec` automatically
 
+## Critical bug class — exp_decay rate units
+`kern.exp_decay(rate, duration, n)` computes `exp(-rate * i)` where `i` is the **sample index**,
+NOT `exp(-rate * t)` where t is seconds. All call sites in DrumKit and apply_reverb must pass
+`rate_per_sec / sample_rate` as the first argument, not `rate_per_sec` directly.
+- Wrong: `kern.exp_decay(5.0, 0.5, n)` → collapses to zero after sample 2
+- Right:  `kern.exp_decay(5.0 / sr, 0.5, n)` → natural 0.5s decay
+This bug caused all drum envelopes to fire for exactly one sample (inaudible after that) and
+made the reverb IR a Dirac delta (no reverb). Fixed at every call site in DrumKit + apply_reverb.
+
 ## Key decisions
 - PolyBLEP saw (not sine): no aliasing, sits in mix like a real synth (Serum/Massive)
 - Filter cutoff automation: 600Hz closed in intro → 8kHz open in drop — gives the sweep
