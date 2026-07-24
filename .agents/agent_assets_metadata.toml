@@ -24,3 +24,9 @@ id = "d-6hL4URrD4IIIIxg0Ehl"
 uri = "file://charttopper_A_minor_140bpm_trap_3min_v2.wav"
 type = "audio"
 title = "Chart-Topper Beat v2 — A Minor / 140 BPM / Melodic Trap (3:00) — Drums Fixed"
+
+[[outputs]]
+id = "L3HMLIUTGqIMBIZw47SGP"
+uri = "file://suno_spec_Fsharp_minor_138bpm_cinematic_trap.wav"
+type = "audio"
+title = "Suno-Spec Beat — F# Minor / 138 BPM / Cinematic Trap (3:00)"

@@ -174,7 +174,9 @@ CHORD_PROGS: Dict[str, List[Tuple[int, str]]] = {
     "jazz":      [(0,"maj7"), (2,"min7"),  (7,"dom7"),  (0,"maj7")],
     "pop":       [(0,"maj"),  (7,"maj"),   (9,"min"),   (5,"maj")],
     "latin":     [(0,"min"),  (5,"min"),   (7,"maj"),   (5,"min")],
-    "default":   [(0,"min7"), (-3,"maj7"), (-5,"maj"),  (-2,"dom7")],
+    "default":          [(0,"min7"), (-3,"maj7"), (-5,"maj"),  (-2,"dom7")],
+    # F# minor cinematic: i → bVII → bIII(lift) → v  — emotionally unstoppable
+    "cinematic_trap":   [(0,"min7"), (-2,"maj"),  (3,"maj7"), (-5,"min7")],
 }
 
 # 16-step drum patterns (1=hit, 0=rest, per 16th note)
@@ -235,6 +237,15 @@ _D = {
         "clap":  [0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0],
         "808":   [0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0],
     },
+    # Heavy syncopated kick, ghost-snare, dense 8th-note hats
+    "cinematic_trap": {
+        "kick":  [1,0,0,0, 0,0,0,1, 0,1,0,0, 1,0,0,0],
+        "snare": [0,0,0,0, 1,0,0,0, 0,0,1,0, 1,0,0,0],
+        "hat_c": [1,0,1,0, 1,0,1,0, 1,0,1,0, 1,0,1,0],
+        "hat_o": [0,0,0,0, 0,1,0,0, 0,0,0,0, 0,1,0,0],
+        "clap":  [0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0],
+        "808":   [1,0,0,0, 0,0,0,0, 0,0,1,0, 0,0,0,0],
+    },
 }
 # Bass patterns: (scale_degree_index, gate_in_16ths) per 16 steps; -1 = rest
 _BASS = {
@@ -250,8 +261,11 @@ _BASS = {
                   (0,4),(-1,0),(-1,0),(2,2), (3,2),(4,2),(-1,0),(-1,0)],
     "lofi":      [(0,8),(-1,0),(-1,0),(-1,0), (-1,0),(-1,0),(-1,0),(-1,0),
                   (4,6),(-1,0),(-1,0),(-1,0), (3,4),(-1,0),(-1,0),(-1,0)],
-    "default":   [(0,4),(-1,0),(-1,0),(-1,0), (4,2),(-1,0),(2,2),(-1,0),
-                  (0,4),(-1,0),(-1,0),(-1,0), (3,2),(-1,0),(4,2),(-1,0)],
+    "default":        [(0,4),(-1,0),(-1,0),(-1,0), (4,2),(-1,0),(2,2),(-1,0),
+                       (0,4),(-1,0),(-1,0),(-1,0), (3,2),(-1,0),(4,2),(-1,0)],
+    # Long sliding 808 notes — cinematic sub movement
+    "cinematic_trap": [(0,8),(-1,0),(-1,0),(-1,0), (-1,0),(-1,0),(-3,4),(-1,0),
+                       (0,10),(-1,0),(-1,0),(-1,0), (-1,0),(-1,0),(-1,0),(-1,0)],
 }
 
 # Arrangement sections: (name, bars, elements, filter_pct, energy)
@@ -274,11 +288,23 @@ _SECTIONS = {
                   ("breakdown",4,"C",0.3,0.45), ("verse2",8,"KSHBC",0.6,0.7),
                   ("prechorus2",4,"KSHBCR",0.8,0.9), ("chorus2",8,"KSHBCL",1.0,1.0),
                   ("outro",4,"KH",0.4,0.5)],
+    # Suno-spec layout: intro → hook → verse → prechorus → hook2 → outro
+    # T=triplet hats active in hook sections
+    "cinematic_trap": [
+        ("intro",     4, "KH",        0.15, 0.45),
+        ("hook",      8, "KSH8TBCL",  1.00, 1.00),
+        ("verse",     8, "KSH8BC",    0.65, 0.75),
+        ("prechorus", 4, "KSH8TBCR",  0.82, 0.90),
+        ("hook2",     8, "KSH8TBCL",  1.00, 1.00),
+        ("outro",     4, "KH",        0.28, 0.38),
+    ],
 }
 
 
 def _genre_key(genre: str) -> str:
     g = genre.lower().strip()
+    if "cinematic" in g:          # cinematic_trap / cinematic hip-hop etc.
+        return "cinematic_trap"
     for k in ("trap","drill","phonk","afrobeats","amapiano","lofi","jazz","pop","latin"):
         if k in g:
             return k
@@ -315,12 +341,12 @@ class SynthVoice:
         release: float = 0.25,
         drive: float = 1.6,
         amp: float = 1.0,
+        glide_from_freq: Optional[float] = None,
     ) -> np.ndarray:
         if n <= 0 or freq <= 0:
             return np.zeros(max(n, 0), dtype=np.float32)
 
         n_osc = max(1, int(n_unison))
-        # Spread oscillators evenly across ±detune_cents
         if n_osc == 1:
             detune_factors = np.array([1.0], dtype=np.float32)
         else:
@@ -333,21 +359,37 @@ class SynthVoice:
         taper /= taper.sum()
         amps_arr = (taper * float(amp)).astype(np.float32)
 
-        # PolyBLEP saw oscillators (Digital GPU)
-        out, _ = self.k.saw_wave(freqs_arr, amps_arr, float(self.sr), n)
+        # ── Portamento glide (optional) ──────────────────────────────────────
+        # Render in 64-sample chunks with linearly interpolating freq, threading
+        # saw_wave phases for click-free audio at buffer boundaries.
+        if glide_from_freq and glide_from_freq > 0 and glide_from_freq != freq:
+            glide_n = min(int(0.040 * self.sr), n)   # 40ms glide window
+            out = np.zeros(n, dtype=np.float32)
+            phases: Optional[np.ndarray] = None
+            chunk = 64
+            for ci in range(0, glide_n, chunk):
+                cend = min(ci + chunk, glide_n)
+                sz   = cend - ci
+                t    = ci / max(glide_n - 1, 1)
+                f_i  = glide_from_freq + (freq - glide_from_freq) * t
+                f_arr = (np.float32(f_i) * detune_factors).astype(np.float32)
+                seg, phases = self.k.saw_wave(f_arr, amps_arr, float(self.sr), sz, phases)
+                out[ci:cend] = seg
+            # body — remaining samples at target freq with phase continuity
+            if glide_n < n:
+                body, _ = self.k.saw_wave(freqs_arr, amps_arr, float(self.sr),
+                                          n - glide_n, phases)
+                out[glide_n:] = body
+        else:
+            out, _ = self.k.saw_wave(freqs_arr, amps_arr, float(self.sr), n)
 
-        # Soft saturation — adds even harmonics, warmth
-        out = self.k.soft_sat(out, drive=float(drive))
-
-        # Biquad LPF
+        # Soft saturation → LPF → ADSR
+        out    = self.k.soft_sat(out, drive=float(drive))
         coeffs = self.k.lpf_coeffs(cutoff, resonance, float(self.sr))
         state  = np.zeros(2, dtype=np.float32)
         out    = self.k.biquad(coeffs, out, state)
-
-        # ADSR envelope
-        env = self.k.adsr(attack, decay, sustain, release, gate_s, float(self.sr), n)
+        env    = self.k.adsr(attack, decay, sustain, release, gate_s, float(self.sr), n)
         self.k.inplace_mul(out, env)
-
         return out
 
 
@@ -574,6 +616,41 @@ def apply_reverb(x: np.ndarray, kern: NativeKernels, sr: int,
         return x   # never-raise
 
 
+def apply_glitch_transition(
+    mix_L: np.ndarray, mix_R: np.ndarray,
+    boundary_samples: List[int], bar_len: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Micro-glitch stutter at section boundaries — futuristic transition flair.
+
+    Blends a short repeated slice just before each section drop, creating the
+    characteristic stutter cut that signals a new section is incoming.
+    Never raises — falls through to unmodified mix on any error.
+    """
+    try:
+        n       = len(mix_L)
+        slice_n = max(1, bar_len // 8)      # 1/8-bar slice ≈ 68ms @ 138 BPM
+        for pos in boundary_samples:
+            src_s = pos - slice_n
+            if src_s < 0 or pos + slice_n * 3 >= n:
+                continue
+            src_L = mix_L[src_s:pos].copy()
+            src_R = mix_R[src_s:pos].copy()
+            # Three blended reps immediately after the boundary
+            for rep in range(3):
+                dst_s = pos + rep * slice_n
+                dst_e = dst_s + slice_n
+                if dst_e > n:
+                    break
+                blend = float(0.55 - rep * 0.13)        # 0.55 → 0.42 → 0.29
+                mix_L[dst_s:dst_e] = (mix_L[dst_s:dst_e] * (1.0 - blend)
+                                      + src_L * blend)
+                mix_R[dst_s:dst_e] = (mix_R[dst_s:dst_e] * (1.0 - blend)
+                                      + src_R * blend)
+    except Exception:
+        pass
+    return mix_L, mix_R
+
+
 def apply_compressor(x: np.ndarray, kern: NativeKernels, sr: int,
                      threshold_db: float = -18.0, ratio: float = 4.0,
                      attack_ms: float = 5.0, release_ms: float = 80.0,
@@ -698,7 +775,10 @@ def render_full_track(
 
     # ── Pre-render drum one-shots ─────────────────────────────────────────────
     # Genre-specific parameters
-    if _genre in ("trap", "drill"):
+    if _genre == "cinematic_trap":
+        kick_buf  = drums.kick(decay_s=0.35, sub_freq=40.0, punch=1.3)  # deep sub, max punch
+        snare_buf = drums.snare(vel=1.0, snappy=0.75)
+    elif _genre in ("trap", "drill"):
         kick_buf  = drums.kick(decay_s=0.30, sub_freq=45.0, punch=1.1)
         snare_buf = drums.snare(vel=1.0, snappy=0.65)
     elif _genre == "phonk":
@@ -742,11 +822,18 @@ def render_full_track(
         cur += sec[1]
     total_bars = cur
 
+    # Section boundary positions (samples) — used for glitch transitions
+    boundary_samples: List[int] = [
+        s * bar_len for (s, e, _sec) in schedule[1:] if s > 0
+    ]
+
     def _section_at(bar: int):
         for (s, e, sec) in schedule:
             if s <= bar < e:
                 return sec
         return sections[-1]
+
+    prev_lead_freq: Optional[float] = None   # for portamento glide bar-to-bar
 
     for bar in range(total_bars):
         bar_pos = bar * bar_len
@@ -758,14 +845,15 @@ def render_full_track(
         chord_i  = (bar // max(1, chord_bars // chord_bars)) % chord_bars
         chord_semi, chord_quality = prog[bar % chord_bars]
 
-        has_kick  = "K" in elems
-        has_snare = "S" in elems
-        has_hat   = "H" in elems
-        has_808   = "8" in elems
-        has_bass  = "B" in elems
-        has_chord = "C" in elems
-        has_lead  = "L" in elems
-        has_riser = "R" in elems
+        has_kick        = "K" in elems
+        has_snare       = "S" in elems
+        has_hat         = "H" in elems
+        has_808         = "8" in elems
+        has_bass        = "B" in elems
+        has_chord       = "C" in elems
+        has_lead        = "L" in elems
+        has_riser       = "R" in elems
+        has_triplet_hat = "T" in elems   # triplet hi-hat rolls
 
         # ── Filter cutoff driven by section (closed=600Hz, open=8000Hz) ───
         cutoff_hz = 600.0 + (8000.0 - 600.0) * filter_pct
@@ -793,19 +881,28 @@ def render_full_track(
             if has_hat:
                 if dp["hat_o"][step]:
                     gain = energy * vel_var * 0.55
-                    # open hat panned centre
                     _stamp(hat_o_buf, step_pos, gain, gain)
                 elif dp["hat_c"][step]:
                     gain = energy * vel_var * 0.45
-                    # closed hat panned slightly right
                     _stamp(hat_c_buf, step_pos, gain * 0.7, gain)
+
+            # ── Triplet hi-hat rolls (T flag) — 2nd + 3rd triplet of each beat ──
+            if has_triplet_hat and step % 4 == 0:
+                tri_step = int(step_len * 4 / 3)   # 1/3 beat in samples
+                for tri in (1, 2):
+                    tri_pos = step_pos + tri * tri_step
+                    tri_vel = energy * (0.38 + rng.random() * 0.15)
+                    # Pan alternates L/R for airy, wide hat feel
+                    pan = 0.55 + (tri % 2) * 0.35
+                    _stamp(hat_c_buf, tri_pos, tri_vel * (1.0 - pan * 0.3), tri_vel * pan)
 
         # ── 808 bass (trap-style sub on grid) ────────────────────────────
         if has_808 and dp["808"][0]:
             chord_root_freq = root_freq * (2.0 ** (chord_semi / 12.0)) * 0.5
             for step in range(16):
                 if dp["808"][step]:
-                    gate_s = step_sec * 6
+                    # Cinematic trap: long gliding 808 tail
+                    gate_s = step_sec * (14 if _genre == "cinematic_trap" else 6)
                     buf_808 = drums.bass_808(chord_root_freq * 0.5, gate_s)
                     step_pos = bar_pos + step * step_len
                     gain = energy * 0.80
@@ -885,9 +982,10 @@ def render_full_track(
                     cutoff=min(cutoff_hz * 1.2, 12000.0), resonance=0.9,
                     detune_cents=5.0, n_unison=3,
                     attack=0.004, decay=0.08, sustain=0.45, release=0.12,
-                    drive=1.8, amp=0.4)
+                    drive=1.8, amp=0.4,
+                    glide_from_freq=prev_lead_freq)   # portamento
+                prev_lead_freq = freq_l
                 lpos = bar_pos + int(n_i * step_len * 2)
-                # Lead panned: alternates slightly L/R for movement
                 pan_l = 0.9 if n_i % 2 == 0 else 0.6
                 pan_r = 0.6 if n_i % 2 == 0 else 0.9
                 _stamp(lead_buf, lpos, pan_l * energy, pan_r * energy)
@@ -931,8 +1029,13 @@ def render_full_track(
                               threshold_db=-18.0, ratio=3.5,
                               attack_ms=6.0, release_ms=80.0, makeup_db=4.0)
 
-    # M/S stereo widening
-    mix_L, mix_R = apply_ms_width(mix_L, mix_R, width=1.3)
+    # M/S stereo widening — cinematic_trap gets extra width for stadium feel
+    ms_width = 1.6 if _genre == "cinematic_trap" else 1.3
+    mix_L, mix_R = apply_ms_width(mix_L, mix_R, width=ms_width)
+
+    # Micro-glitch transitions at section boundaries (cinematic_trap only)
+    if _genre == "cinematic_trap" and boundary_samples:
+        mix_L, mix_R = apply_glitch_transition(mix_L, mix_R, boundary_samples, bar_len)
 
     # Fade-in (first 0.5s) and fade-out (last 2s)
     fade_in  = int(0.5 * sample_rate)
