@@ -81,3 +81,16 @@ Proxy-only mode triggers whenever MODEL_API_PORT is unset. The production `serve
 ## Prod flapping root cause (healthchecks)
 - Platform healthchecks GET "/", "/api", "/uploads" and RESTART the VM on 5xx. Any Python boot/restart window used to 500 these → VM kill → minutes-long model reload → flap loop. app.ts now serves always-200 fast-paths for those exact paths (+ /healthz, SPA fallback never 500s, global error middleware). Keep healthcheck paths independent of Python.
 - uploads/ janitor (server.py, hourly, 24h TTL + 2GB cap, audio_/video_/scene_/stem_/tmp_ prefixes only) prevents VM disk-fill — disk-full surfaced as mid-render ffmpeg failures.
+
+## PRODUCTION double-owner (fixed July 2026)
+Both artifacts' `[services.production].run` in their `.replit-artifact/artifact.toml`
+were the SAME command (`pnpm --filter @workspace/api-server run serve`). The serve
+script sets MODEL_API_PORT, so BOTH prod instances thought they owned Python. The
+ownership probe waits only 6s but Python takes 15-30s to open its port → both spawned
+server.py → permanent contention; the losing instance held/retried every proxied
+request forever (this is what made MaxBooster fail against prod "every time").
+**Fix:** ai-dashboard artifact prod run is now
+`DISABLE_PYTHON_SPAWN=1 pnpm --filter @workspace/api-server run serve` (proxy-only;
+serves dashboard + proxies /api, never spawns). Only the api-server artifact owns 9878
+in prod. Direct edits to artifact.toml are blocked — write a sibling temp file and
+`mv` it over via shell. Takes effect only on republish.

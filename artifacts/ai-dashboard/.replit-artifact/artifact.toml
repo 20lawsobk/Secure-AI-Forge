@@ -23,7 +23,12 @@ BASE_PATH = "/"
 
 [services.production]
 build = "pnpm install && uv sync && pnpm --filter @workspace/api-server run build && BASE_PATH=/ pnpm --filter @workspace/ai-dashboard run build"
-run = "pnpm --filter @workspace/api-server run serve"
+# DISABLE_PYTHON_SPAWN=1: this instance serves the dashboard + proxies /api,
+# but must NEVER spawn/own the Python model server. Only the api-server
+# artifact owns port 9878 — with two owners, both race at boot (Python takes
+# >6s to open its port, so each thinks it's down and spawns its own copy),
+# causing permanent lock contention and MaxBooster requests failing.
+run = "DISABLE_PYTHON_SPAWN=1 pnpm --filter @workspace/api-server run serve"
 
 [services.production.health.startup]
 path = "/api/healthz"
