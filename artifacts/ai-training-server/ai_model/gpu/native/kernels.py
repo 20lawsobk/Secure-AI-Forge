@@ -72,13 +72,172 @@ static inline float fast_sinf_poly(float x) {
     const float TWO_PI     = 6.28318530718f;
     x -= TWO_PI * roundf(x * INV_TWO_PI);   /* reduce to (-π, π] */
     float x2 = x * x;
-    /* Horner: x*(1 - x²/6*(1 - x²/20*(1 - x²/42))) */
     return x * (1.0f - x2 * (0.16666667f
                 - x2 * (0.00833333f
                 - x2 * 0.00019841269f)));
 }
 
-/* ── Audio synthesis kernels ─────────────────────────────────────────────── */
+/* cos via identity: cos(x) = sin(x + π/2), same accuracy. */
+static inline float fast_cosf_poly(float x) {
+    return fast_sinf_poly(x + 1.57079632679f);
+}
+
+/* Clamp a float to [lo, hi] — maps to a cmov on x86. */
+static inline float clampf(float x, float lo, float hi) {
+    return x < lo ? lo : (x > hi ? hi : x);
+}
+
+/* ── Professional audio synthesis kernels ────────────────────────────────── */
+
+/* PolyBLEP bandlimited sawtooth — no aliasing up to Nyquist.
+   Accumulates n_osc oscillators into out[] (already-initialised buffer).
+   phases_in[o] = initial phase in [0,1); phases_out[o] = final phase.
+   Inner per-sample branches compile to cmov on x86 (no branch misprediction). */
+void saw_wave(const float* freqs, const float* amps,
+              const float* phases_in, float* phases_out,
+              int n_osc, float sample_rate,
+              float* out, size_t n) {
+    for (int o = 0; o < n_osc; ++o) {
+        float freq  = freqs[o];
+        float amp   = amps[o];
+        float dt    = freq / sample_rate;
+        float phase = phases_in ? phases_in[o] : 0.0f;
+        for (size_t i = 0; i < n; ++i) {
+            float saw = 2.0f * phase - 1.0f;
+            /* PolyBLEP correction near discontinuity */
+            if (phase < dt) {
+                float t = phase / dt;
+                saw -= (t + t - t * t - 1.0f);
+            } else if (phase > 1.0f - dt) {
+                float t = (phase - 1.0f) / dt;
+                saw -= (t * t + t + t + 1.0f);
+            }
+            out[i] += amp * saw;
+            phase += dt;
+            if (phase >= 1.0f) phase -= 1.0f;
+        }
+        if (phases_out) phases_out[o] = phase;
+    }
+}
+
+/* Transposed-form II biquad IIR filter — stable, minimal noise.
+   state[0..1] is initialised to zero on first call and updated in place.
+   Safe to reuse across buffer calls for continuous filtering. */
+void biquad_filter(float b0, float b1, float b2, float a1, float a2,
+                   const float* x, float* y, float* state, size_t n) {
+    float s1 = state[0], s2 = state[1];
+    for (size_t i = 0; i < n; ++i) {
+        float v = b0 * x[i] + s1;
+        s1 = b1 * x[i] - a1 * v + s2;
+        s2 = b2 * x[i] - a2 * v;
+        y[i] = v;
+    }
+    state[0] = s1; state[1] = s2;
+}
+
+/* Compute biquad LPF coefficients (RBJ cookbook) using our fast polynomials.
+   Outputs b0,b1,b2,a1,a2 ready for biquad_filter(). */
+void compute_lpf_coeffs(float cutoff_hz, float q, float sample_rate,
+                         float* b0, float* b1, float* b2,
+                         float* a1, float* a2) {
+    float w0     = 6.28318530718f * clampf(cutoff_hz, 20.0f, sample_rate * 0.499f) / sample_rate;
+    float cosw0  = fast_cosf_poly(w0);
+    float sinw0  = fabsf(fast_sinf_poly(w0));
+    float alpha  = sinw0 / (2.0f * fmaxf(q, 0.1f));
+    float a0inv  = 1.0f / (1.0f + alpha);
+    *b1 = (1.0f - cosw0) * a0inv;
+    *b0 = *b1 * 0.5f;
+    *b2 = *b0;
+    *a1 = -2.0f * cosw0 * a0inv;
+    *a2 = (1.0f - alpha) * a0inv;
+}
+
+/* Compute biquad HPF coefficients */
+void compute_hpf_coeffs(float cutoff_hz, float q, float sample_rate,
+                         float* b0, float* b1, float* b2,
+                         float* a1, float* a2) {
+    float w0    = 6.28318530718f * clampf(cutoff_hz, 20.0f, sample_rate * 0.499f) / sample_rate;
+    float cosw0 = fast_cosf_poly(w0);
+    float sinw0 = fabsf(fast_sinf_poly(w0));
+    float alpha = sinw0 / (2.0f * fmaxf(q, 0.1f));
+    float a0inv = 1.0f / (1.0f + alpha);
+    *b0 =  (1.0f + cosw0) * 0.5f * a0inv;
+    *b1 = -(1.0f + cosw0) * a0inv;
+    *b2 = *b0;
+    *a1 = -2.0f * cosw0 * a0inv;
+    *a2 = (1.0f - alpha) * a0inv;
+}
+
+/* Sample-accurate ADSR envelope.
+   gate_s = note-on duration; total buffer n may include release tail. */
+void adsr_envelope(float attack_s, float decay_s, float sustain,
+                   float release_s, float gate_s, float sample_rate,
+                   float* out, size_t n) {
+    size_t a_end = (size_t)(attack_s  * sample_rate);
+    size_t d_end = a_end + (size_t)(decay_s * sample_rate);
+    size_t g_end = (size_t)(gate_s   * sample_rate);
+    if (g_end > n) g_end = n;
+    float inv_a   = a_end > 0 ? 1.0f / (float)a_end : 1.0f;
+    float inv_d   = d_end > a_end ? 1.0f / (float)(d_end - a_end) : 1.0f;
+    float rel_len = release_s * sample_rate + 1.0f;
+    sustain = clampf(sustain, 0.0f, 1.0f);
+    for (size_t i = 0; i < n; ++i) {
+        float v;
+        if      (i < a_end) v = (float)i * inv_a;
+        else if (i < d_end) v = 1.0f - (1.0f - sustain) * (float)(i - a_end) * inv_d;
+        else if (i < g_end) v = sustain;
+        else { float r = (float)(i - g_end) / rel_len; v = sustain * fmaxf(1.0f - r, 0.0f); }
+        out[i] = v;
+    }
+}
+
+/* Tanh waveshaper — soft harmonic saturation. drive > 1 adds warmth. */
+void soft_sat(float drive, const float* x, float* y, size_t n) {
+    #pragma GCC ivdep
+    for (size_t i = 0; i < n; ++i) y[i] = fast_tanhf(drive * x[i]);
+}
+
+/* Soft-knee brick-wall limiter.  Modifies x in-place.
+   Knee begins at 0.85; peak is always ≤ 1.0. */
+void soft_limit(float* x, size_t n) {
+    #pragma GCC ivdep
+    for (size_t i = 0; i < n; ++i) {
+        float v = x[i], a = fabsf(v);
+        if (a > 0.85f) {
+            float over = a - 0.85f;
+            a = 0.85f + over / (1.0f + over / 0.15f);  /* algebraic knee */
+            x[i] = (v > 0) ? a : -a;
+        }
+    }
+}
+
+/* RMS compressor gain-smoothing kernel.
+   rms[i] = pre-computed RMS envelope (same length n).
+   gain[i] = computed gain curve, ready to multiply into signal.
+   threshold, attack_c, release_c are per-sample coefficients. */
+void compress_gain(float threshold, float ratio_inv_m1,
+                   float attack_c, float release_c,
+                   const float* rms, float* gain, size_t n) {
+    float g = 1.0f;
+    for (size_t i = 0; i < n; ++i) {
+        float r = rms[i];
+        float target = (r > threshold && r > 0.0f)
+            ? fast_expf(ratio_inv_m1 * (logf(r) - logf(threshold)))
+            : 1.0f;
+        float coef = (target < g) ? attack_c : release_c;
+        g = coef * g + (1.0f - coef) * target;
+        gain[i] = clampf(g, 0.0f, 1.0f);
+    }
+}
+
+/* Mix two buffers: out[i] = a*x[i] + b*y[i] */
+void mix2(float a, const float* x, float b, const float* y,
+          float* out, size_t n) {
+    #pragma GCC ivdep
+    for (size_t i = 0; i < n; ++i) out[i] = a * x[i] + b * y[i];
+}
+
+/* ── Basic additive synthesis kernels ────────────────────────────────────── */
 
 /* Additive synthesis: out[t] += sum_h(amps[h] * sin(2π*freqs[h]*t/sr))
    Outer loop over harmonics keeps the inner time-domain loop long and
@@ -290,12 +449,22 @@ class NativeKernels:
             "layernorm_rows":  [fp, fp, fp, fp, f, sz, sz],
             "gelu_backward":   [fp, fp, fp, sz],
             "silu_backward":   [fp, fp, fp, sz],
-            # ── audio synthesis kernels ──────────────────────────────────
-            "additive_synth":  [fp, fp, i32, f, fp, sz],
-            "exp_decay":       [f, f, fp, sz],
-            "freq_sweep_sin":  [f, f, f, fp, sz],
-            "white_noise":     [ui, fp, sz],
-            "inplace_mul":     [fp, fp, sz],
+            # ── professional audio synthesis kernels ──────────────────────
+            "additive_synth":     [fp, fp, i32, f, fp, sz],
+            "exp_decay":          [f, f, fp, sz],
+            "freq_sweep_sin":     [f, f, f, fp, sz],
+            "white_noise":        [ui, fp, sz],
+            "inplace_mul":        [fp, fp, sz],
+            # new v2 kernels
+            "saw_wave":           [fp, fp, fp, fp, i32, f, fp, sz],
+            "biquad_filter":      [f, f, f, f, f, fp, fp, fp, sz],
+            "compute_lpf_coeffs": [f, f, f, fp, fp, fp, fp, fp],
+            "compute_hpf_coeffs": [f, f, f, fp, fp, fp, fp, fp],
+            "adsr_envelope":      [f, f, f, f, f, f, fp, sz],
+            "soft_sat":           [f, fp, fp, sz],
+            "soft_limit":         [fp, sz],
+            "compress_gain":      [f, f, f, f, fp, fp, sz],
+            "mix2":               [f, fp, f, fp, fp, sz],
         }
         for name, argtypes in sigs.items():
             fn = getattr(self._lib, name)
@@ -511,6 +680,218 @@ class NativeKernels:
             self.stats["native"] += 1
         else:
             out *= scale
+            self.stats["fallback"] += 1
+        return out
+
+    # ── Professional audio: oscillators ──────────────────────────────────────
+
+    def saw_wave(self, freqs, amps, sample_rate: float, n: int,
+                 phases_in=None) -> Tuple[np.ndarray, np.ndarray]:
+        """Bandlimited polyBLEP sawtooth, accumulated into a fresh float32 buffer.
+
+        Returns (out, phases_out) where phases_out[o] is the final phase of
+        each oscillator — pass back as phases_in on the next call for seamless
+        continuation (no clicks at buffer boundaries).
+
+        Unlike pure-sine additive_synth, this generates real-world saw timbre
+        that sits in a mix and can be shaped with the biquad filter.
+        """
+        freqs = self._f32(np.asarray(freqs).ravel())
+        amps  = self._f32(np.asarray(amps).ravel())
+        n_osc = int(freqs.size)
+        if phases_in is None:
+            phases_in_arr = np.zeros(n_osc, dtype=np.float32)
+        else:
+            phases_in_arr = self._f32(np.asarray(phases_in).ravel())
+        phases_out = np.zeros(n_osc, dtype=np.float32)
+        out = np.zeros(n, dtype=np.float32)
+        if self.available and n_osc > 0 and n > 0:
+            self._lib.saw_wave(
+                self._ptr(freqs), self._ptr(amps),
+                self._ptr(phases_in_arr), self._ptr(phases_out),
+                n_osc, float(sample_rate), self._ptr(out), n)
+            self.stats["native"] += 1
+        else:
+            t = np.arange(n, dtype=np.float32) / np.float32(sample_rate)
+            for i, (freq, amp) in enumerate(zip(freqs.tolist(), amps.tolist())):
+                phi = float(phases_in_arr[i]) if phases_in_arr is not None else 0.0
+                # naive saw fallback (aliased but correct amplitude)
+                out += amp * (2.0 * ((freq * t + phi) % 1.0) - 1.0).astype(np.float32)
+                phases_out[i] = float((freq * t[-1] / sample_rate + phi) % 1.0) if n > 0 else phi
+            self.stats["fallback"] += 1
+        return out, phases_out
+
+    # ── Professional audio: filter ────────────────────────────────────────────
+
+    def lpf_coeffs(self, cutoff_hz: float, q: float,
+                   sample_rate: float) -> Tuple[float, float, float, float, float]:
+        """Compute RBJ low-pass filter biquad coefficients (b0,b1,b2,a1,a2)."""
+        import ctypes as _ct
+        b0 = _ct.c_float(0.0); b1 = _ct.c_float(0.0); b2 = _ct.c_float(0.0)
+        a1 = _ct.c_float(0.0); a2 = _ct.c_float(0.0)
+        if self.available:
+            self._lib.compute_lpf_coeffs(
+                float(cutoff_hz), float(q), float(sample_rate),
+                _ct.byref(b0), _ct.byref(b1), _ct.byref(b2),
+                _ct.byref(a1), _ct.byref(a2))
+            self.stats["native"] += 1
+        else:
+            import math
+            w0 = 2*math.pi*max(20, min(cutoff_hz, sample_rate*0.499))/sample_rate
+            alpha = math.sin(w0)/(2*max(q, 0.1))
+            a0i = 1/(1+alpha)
+            b0.value = float((1-math.cos(w0))*0.5*a0i)
+            b1.value = float((1-math.cos(w0))*a0i)
+            b2.value = b0.value
+            a1.value = float(-2*math.cos(w0)*a0i)
+            a2.value = float((1-alpha)*a0i)
+            self.stats["fallback"] += 1
+        return b0.value, b1.value, b2.value, a1.value, a2.value
+
+    def hpf_coeffs(self, cutoff_hz: float, q: float,
+                   sample_rate: float) -> Tuple[float, float, float, float, float]:
+        """Compute high-pass filter biquad coefficients."""
+        import ctypes as _ct
+        b0 = _ct.c_float(0.0); b1 = _ct.c_float(0.0); b2 = _ct.c_float(0.0)
+        a1 = _ct.c_float(0.0); a2 = _ct.c_float(0.0)
+        if self.available:
+            self._lib.compute_hpf_coeffs(
+                float(cutoff_hz), float(q), float(sample_rate),
+                _ct.byref(b0), _ct.byref(b1), _ct.byref(b2),
+                _ct.byref(a1), _ct.byref(a2))
+            self.stats["native"] += 1
+        else:
+            import math
+            w0 = 2*math.pi*max(20, min(cutoff_hz, sample_rate*0.499))/sample_rate
+            alpha = math.sin(w0)/(2*max(q, 0.1))
+            a0i = 1/(1+alpha)
+            b0.value = float((1+math.cos(w0))*0.5*a0i)
+            b1.value = float(-(1+math.cos(w0))*a0i)
+            b2.value = b0.value
+            a1.value = float(-2*math.cos(w0)*a0i)
+            a2.value = float((1-alpha)*a0i)
+            self.stats["fallback"] += 1
+        return b0.value, b1.value, b2.value, a1.value, a2.value
+
+    def biquad(self, coeffs: Tuple[float,float,float,float,float],
+               x: np.ndarray, state: np.ndarray) -> np.ndarray:
+        """Apply a biquad IIR filter in-place.  state is a float32[2] that
+        persists across calls for seamless buffer-to-buffer filtering."""
+        b0, b1, b2, a1, a2 = coeffs
+        x     = np.ascontiguousarray(x,     dtype=np.float32)
+        state = np.ascontiguousarray(state, dtype=np.float32)
+        y = np.empty_like(x)
+        if self.available and x.size > 0:
+            self._lib.biquad_filter(
+                float(b0), float(b1), float(b2), float(a1), float(a2),
+                self._ptr(x), self._ptr(y), self._ptr(state), x.size)
+            self.stats["native"] += 1
+        else:
+            s1, s2 = float(state[0]), float(state[1])
+            y_py = np.empty_like(x)
+            for i in range(len(x)):
+                v = b0*x[i] + s1
+                s1 = b1*x[i] - a1*v + s2
+                s2 = b2*x[i] - a2*v
+                y_py[i] = v
+            y = y_py
+            state[0], state[1] = s1, s2
+            self.stats["fallback"] += 1
+        return y
+
+    # ── Professional audio: envelopes / dynamics ──────────────────────────────
+
+    def adsr(self, attack_s: float, decay_s: float, sustain: float,
+             release_s: float, gate_s: float, sample_rate: float,
+             n: int) -> np.ndarray:
+        """Sample-accurate ADSR envelope.  n may exceed gate_s*sr to include
+        the release tail.  Returns float32 array in [0, 1]."""
+        out = np.empty(n, dtype=np.float32)
+        if self.available and n > 0:
+            self._lib.adsr_envelope(
+                float(attack_s), float(decay_s), float(sustain),
+                float(release_s), float(gate_s), float(sample_rate),
+                self._ptr(out), n)
+            self.stats["native"] += 1
+        else:
+            a = int(attack_s * sample_rate)
+            d = int(decay_s  * sample_rate)
+            g = min(int(gate_s * sample_rate), n)
+            for i in range(n):
+                if   i < a: v = i / max(a, 1)
+                elif i < a+d: v = 1.0 - (1.0-sustain)*(i-a)/max(d,1)
+                elif i < g:   v = sustain
+                else:
+                    r = (i-g)/(release_s*sample_rate+1)
+                    v = sustain * max(1.0-r, 0.0)
+                out[i] = v
+            self.stats["fallback"] += 1
+        return out
+
+    def soft_sat(self, x: np.ndarray, drive: float = 2.0) -> np.ndarray:
+        """Tanh waveshaper — adds harmonics and warmth without hard clipping."""
+        x = np.ascontiguousarray(x, dtype=np.float32)
+        y = np.empty_like(x)
+        if self.available and x.size > 0:
+            self._lib.soft_sat(float(drive), self._ptr(x), self._ptr(y), x.size)
+            self.stats["native"] += 1
+        else:
+            y[:] = np.tanh(drive * x)
+            self.stats["fallback"] += 1
+        return y
+
+    def soft_limit(self, x: np.ndarray) -> np.ndarray:
+        """Soft-knee brick-wall limiter — peak always ≤ 1.0, in-place."""
+        x = np.ascontiguousarray(x, dtype=np.float32)
+        if self.available and x.size > 0:
+            self._lib.soft_limit(self._ptr(x), x.size)
+            self.stats["native"] += 1
+        else:
+            mask = np.abs(x) > 0.85
+            over = np.abs(x[mask]) - 0.85
+            x[mask] = np.sign(x[mask]) * (0.85 + over / (1.0 + over / 0.15))
+            self.stats["fallback"] += 1
+        return x
+
+    def compress_gain(self, rms: np.ndarray, threshold: float, ratio: float,
+                      attack_ms: float, release_ms: float,
+                      sample_rate: float) -> np.ndarray:
+        """Compute per-sample compressor gain curve from an RMS envelope.
+        Returns float32 gain array ready to multiply into the signal."""
+        rms = self._f32(np.asarray(rms).ravel())
+        gain = np.empty_like(rms)
+        ratio_inv_m1 = 1.0/max(ratio, 1.001) - 1.0
+        attack_c  = float(np.exp(-1.0 / (attack_ms  * 0.001 * sample_rate)))
+        release_c = float(np.exp(-1.0 / (release_ms * 0.001 * sample_rate)))
+        thr = float(threshold)
+        if self.available and rms.size > 0:
+            self._lib.compress_gain(
+                thr, float(ratio_inv_m1),
+                attack_c, release_c,
+                self._ptr(rms), self._ptr(gain), rms.size)
+            self.stats["native"] += 1
+        else:
+            g = 1.0
+            for i in range(len(rms)):
+                r = float(rms[i])
+                target = (r/thr)**(ratio_inv_m1) if r > thr > 0 else 1.0
+                g = attack_c*g + (1-attack_c)*target if target < g else release_c*g + (1-release_c)*target
+                gain[i] = max(0.0, min(g, 1.0))
+            self.stats["fallback"] += 1
+        return gain
+
+    def mix2(self, x: np.ndarray, a: float,
+             y: np.ndarray, b: float) -> np.ndarray:
+        """out[i] = a*x[i] + b*y[i] — vectorised mix."""
+        x = np.ascontiguousarray(x, dtype=np.float32)
+        y = np.ascontiguousarray(y, dtype=np.float32)
+        out = np.empty_like(x)
+        if self.available and x.size > 0 and x.shape == y.shape:
+            self._lib.mix2(float(a), self._ptr(x), float(b),
+                           self._ptr(y), self._ptr(out), x.size)
+            self.stats["native"] += 1
+        else:
+            out[:] = float(a)*x + float(b)*y
             self.stats["fallback"] += 1
         return out
 

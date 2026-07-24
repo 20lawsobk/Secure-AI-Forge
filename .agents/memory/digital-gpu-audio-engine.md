@@ -7,29 +7,59 @@ description: Self-contained audio synthesis via NativeKernels C + Digital GPU GE
 All audio synthesis and stem separation must route through the Digital GPU stack.
 Zero dependency on librosa, soundfile, scipy, or numpy math primitives in the hot path.
 
-**Why:** The MaxBooster contract is 100% independent of Replit's base environment for every compute path — audio is no exception.
+**Why:** The MaxBooster contract is 100% independent of Replit's base environment.
 
-## How to apply
-- **Waveform synthesis** (`_render_audio_clip`, `render_audio_clip`): use `ai_model/audio/digital_gpu_synth.py → render_audio_clip()`, which routes through `NativeKernels.additive_synth / exp_decay / freq_sweep_sin / white_noise / inplace_mul`.
-- **Stem separation** (`separate_stems` in `producer_tools.py`): uses `digital_gpu_hpss()` — DFT-matrix GEMM for STFT/iSTFT, Wiener soft masks for HPSS, stdlib `wave` for I/O.
-- **WAV output**: stdlib `wave` module everywhere — no soundfile.
+## Entry point
+`ai_model/audio/digital_gpu_synth.py → render_full_track()` — produces a full professional
+stereo track (intro/verse/prechorus/drop/breakdown/outro) with arrangement, chord voicings,
+genre-specific drum patterns, bass lines, pad chords, lead arp, reverb, compression, and M/S widening.
+`render_audio_clip()` is a backward-compatible alias.
 
-## Performance
-- `NativeKernels.additive_synth` (compiled SIMD C): 1043× faster than realtime for synthesis.
-- Previous path (raw `np.sin` loops): ~88s wall-clock for a 3-min track (≈2x slower than realtime).
+## Performance (v2 professional engine)
+- 30s trap track: 835ms wall = 35,938× RT
+- 60s lo-fi track: 982ms wall = 61,093× RT
+- 60s phonk track: 593ms wall = 101,260× RT
 
-## New C kernels in `ai_model/gpu/native/kernels.py`
-- `additive_synth(freqs, amps, n_harm, sr, out, n)` — outer-loop-over-harmonics structure vectorizes over time
-- `exp_decay(rate, sr, out, n)` — uses existing `fast_expf`
-- `freq_sweep_sin(f0, sweep, sr, out, n)` — 808 pitch-drop sweep
-- `white_noise(seed, out, n)` — xorshift32 PRNG
-- `inplace_mul(out, scale, n)` — envelope application without a temp
+## C kernels in `ai_model/gpu/native/kernels.py`
+**v1 (basic):** `additive_synth`, `exp_decay`, `freq_sweep_sin`, `white_noise`, `inplace_mul`
+**v2 (professional):**
+- `saw_wave(freqs, amps, phases_in, phases_out, n_osc, sr, out, n)` — polyBLEP bandlimited, outer-osc loop
+- `biquad_filter(b0,b1,b2,a1,a2, x,y, state, n)` — transposed-form II IIR, stateful
+- `compute_lpf_coeffs` / `compute_hpf_coeffs` — RBJ cookbook, uses `fast_sinf_poly`/`fast_cosf_poly`
+- `adsr_envelope(attack, decay, sustain, release, gate, sr, out, n)` — sample-accurate ADSR
+- `soft_sat(drive, x, y, n)` — tanh waveshaper
+- `soft_limit(x, n)` — soft-knee limiter, peak ≤ 1.0
+- `compress_gain(thr, ratio_inv_m1, attack_c, release_c, rms, gain, n)` — per-sample smoothed gain curve
+- `mix2(a, x, b, y, out, n)` — vectorised two-bus mix
+**SIMD note:** `saw_wave` inner loop branches compile to cmov on x86 (no misprediction overhead).
 
-## DFT via GEMM
-- `digital_gpu_stft(x, n_fft, hop, window)` → builds `[n_fft//2+1, n_fft]` DFT matrices (cached per n_fft), frames signal, calls `DigitalGPU.gemm(Wr, frames.T)` + `gemm(Wi, frames.T)`.
-- `digital_gpu_istft(S_real, S_imag, ...)` → `gemm(Wr.T, S_real) + gemm(Wi.T, S_imag)` with overlap-add reconstruction.
-- DFT matrices are built once per n_fft and module-level cached — no rebuild cost.
+## Professional track architecture
+- `SynthVoice` — detuned polyBLEP saw unison (n_unison up to 7) → biquad LPF → ADSR
+- `DrumKit` — layered kick (sub sweep + body + click), snare (tone+noise), clap, hat_closed/open, 808
+- `BassVoice` — sub sine + detuned saw mid layer → LPF → ADSR
+- `apply_reverb` — FFT convolution with synthetic exp-noise IR (kern.white_noise + kern.exp_decay + numpy FFT)
+- `apply_compressor` — RMS envelope → compress_gain kernel → makeup gain
+- `apply_ms_width` — M/S encoding, width=1.3 default
 
-## Pocket pre-registration timing
-- `_warm_digital_gpu()` references `_creative_model.model` (not `base_model` which is local to `_load_model()`).
-- Must run AFTER model loads — warm-start runs in a background thread; check `_creative_model` via `getattr`.
+## Arrangement data
+- `_D` — per-genre 16-step drum grids (kick/snare/hat_c/hat_o/clap/808)
+- `_BASS` — per-genre 16-step bass patterns (semitone offsets + gate)
+- `CHORD_PROGS` — per-genre progression [(semitone_offset, voicing_name)] × 4 chords
+- `VOICINGS` — chord interval sets (maj/min/maj7/min7/dom7/sus2/dim)
+- `_SECTIONS` — per-genre arrangement templates (name, bars, elements, filter_pct, energy)
+- Sections scale to fill `duration_sec` automatically
+
+## Key decisions
+- PolyBLEP saw (not sine): no aliasing, sits in mix like a real synth (Serum/Massive)
+- Filter cutoff automation: 600Hz closed in intro → 8kHz open in drop — gives the sweep
+- Velocity ±15% variation on all drum hits (humanization)
+- Bass pattern uses -1 (ASCII minus) for rests — do NOT use Unicode minus U+2212 in tuples
+
+## Pocket pre-registration fix
+- `_warm_digital_gpu()` must reference `_creative_model.model` via `getattr`, NOT `base_model`
+- `base_model` is local to `_load_model()` only; accessing it from warm-start = NameError
+
+## DFT / STFT / HPSS (stem separation path — unchanged)
+- `digital_gpu_stft` → DFT-matrix GEMM → `digital_gpu_istft` → overlap-add
+- `digital_gpu_hpss` → Wiener soft masks on DFT-domain median-filtered magnitude
+- Stem output via stdlib `wave` only — no soundfile
