@@ -8,6 +8,7 @@ import {
   type ContentGenerationMode,
 } from "../services/contentAwarenessService.js";
 import { isPythonRestarting } from "../server-state.js";
+import { runActivation, getKeepaliveStatus } from "../keepalive.js";
 import {
   recordLatency,
   recordRequest,
@@ -1180,6 +1181,31 @@ router.get("/system/readiness", async (_req, res) => {
 // Native Node.js endpoint — NOT proxied to Python.  Returns the last keepalive
 // cycle result written by the primary cluster process so MaxBooster clients
 // can verify all Digital GPU + platform endpoints are being kept warm.
+
+// Manual activation trigger: fires a full warm pass (all residency
+// endpoints + deep-warm inference) immediately. The same pass runs
+// automatically on boot, on heartbeat recovery after an outage, and on
+// wake-from-sleep — this endpoint just lets a client force it on demand.
+let _lastManualActivateAt = 0;
+router.post("/activate", async (req, res) => {
+  // If an admin key is configured, require it — activation is an expensive
+  // trigger (full residency sweep + deep-warm inference pass).
+  const adminKey = process.env.ADMIN_KEY ?? "";
+  if (adminKey && req.get("X-Admin-Key") !== adminKey) {
+    res.status(401).json({ error: "unauthorized" });
+    return;
+  }
+  // Per-process throttle on top of the cross-process lock-file coalesce in
+  // runActivation — prevents warm-pass amplification from repeated calls.
+  const now = Date.now();
+  if (now - _lastManualActivateAt < 10_000) {
+    res.status(429).json({ error: "activation throttled — try again in a few seconds" });
+    return;
+  }
+  _lastManualActivateAt = now;
+  const result = await runActivation("manual");
+  res.json({ ...result, keepalive: getKeepaliveStatus() });
+});
 
 router.get("/keepalive/status", (_req, res) => {
   try {

@@ -629,7 +629,11 @@ const audioWorker = {
     if (slots.length === 0) {
       // No per-slot spec — generate one track and return it.
       const url = await renderAudioJob(genre, maxDuration, awareness ?? undefined);
-      if (!url) return [];
+      if (!url) {
+        throw new Error(
+          `audio generation failed (genre=${genre}, duration=${maxDuration}s): job errored or timed out`,
+        );
+      }
       return [
         {
           id: randomUUID(),
@@ -653,19 +657,42 @@ const audioWorker = {
       ),
     );
 
-    return settled
-      .filter(
-        (r): r is PromiseFulfilledResult<{ url: string; slot: { id: string; platform: string } }> =>
-          r.status === "fulfilled" && r.value.url !== null,
-      )
-      .map(({ value: { url, slot } }) => ({
-        id: randomUUID(),
-        modality: "audio" as OutputModality,
-        payload: url,
-        platform: slot.platform as Platform,
-        slotId: slot.id,
-        metadata: { genre, duration: maxDuration },
-      }));
+    const successes: Array<{ url: string; slot: { id: string; platform: string } }> = [];
+    const failedSlotIds: string[] = [];
+    settled.forEach((r, i) => {
+      if (r.status === "fulfilled" && r.value.url !== null) {
+        successes.push(r.value as { url: string; slot: { id: string; platform: string } });
+      } else {
+        failedSlotIds.push(slots[i]?.id ?? `slot-${i}`);
+      }
+    });
+
+    // All slots failed → explicit error, never a silent empty success.
+    if (successes.length === 0) {
+      throw new Error(
+        `audio generation failed for all ${slots.length} slots (genre=${genre}): jobs errored or timed out`,
+      );
+    }
+    // Partial failure → surface it loudly in logs and in asset metadata so
+    // callers can detect dropped slots instead of assuming full success.
+    if (failedSlotIds.length > 0) {
+      console.warn(
+        `[multimodal] audioWorker partial failure — ${failedSlotIds.length}/${slots.length} slots dropped: ${failedSlotIds.join(", ")}`,
+      );
+    }
+
+    return successes.map(({ url, slot }) => ({
+      id: randomUUID(),
+      modality: "audio" as OutputModality,
+      payload: url,
+      platform: slot.platform as Platform,
+      slotId: slot.id,
+      metadata: {
+        genre,
+        duration: maxDuration,
+        ...(failedSlotIds.length > 0 ? { partialFailure: true, failedSlots: failedSlotIds } : {}),
+      },
+    }));
   },
 };
 

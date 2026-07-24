@@ -1,4 +1,5 @@
 import fs from "fs";
+import cluster from "cluster";
 import { Agent, request as undiciRequest } from "undici";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -123,6 +124,76 @@ let _lastDeepWarmAt: string | null = null;
 let _lastDeepWarmOk: boolean | null = null;
 let _nextDeepWarmAt = Date.now() + DEEP_WARM_INTERVAL_MS;
 
+// ─── Activation / reactivation state ─────────────────────────────────────────
+// "Activation" = a full warm pass (residency sweep + deep-warm) fired
+// immediately rather than waiting for the next scheduled interval.
+// Fired automatically: on boot, on heartbeat recovery after an outage, and
+// on wake-from-sleep (detected via timer-gap). Also exposed for manual
+// triggering via POST /api/activate.
+let _activationCount = 0;
+let _lastActivationAt: string | null = null;
+let _lastActivationReason: string | null = null;
+let _activationInFlight = false;
+let _lastHeartbeatWallClock = Date.now();
+
+// If the gap between two heartbeats exceeds this, the process was suspended
+// (VM sleep, host pause, heavy swap) — timers don't fire while asleep, so a
+// large gap is a reliable wake signal.
+const SLEEP_GAP_MS = HEARTBEAT_INTERVAL_MS * 5; // 15 s
+
+/**
+ * Run a full activation pass: all residency endpoints + deep-warm inference,
+ * concurrently, right now. Never throws. Coalesces concurrent callers —
+ * if an activation is already in flight, records the request and returns.
+ */
+// Cross-process activation coalescing: workers and the primary each have
+// their own module state, so an in-process flag alone can't prevent several
+// cluster processes from firing simultaneous warm passes. A shared lock file
+// with a freshness window provides a cheap global coalesce.
+const ACTIVATION_LOCK_FILE = "/tmp/maxcore-activation.lock";
+const ACTIVATION_COALESCE_MS = 15_000;
+
+function _globalActivationFresh(): boolean {
+  try {
+    const st = fs.statSync(ACTIVATION_LOCK_FILE);
+    return Date.now() - st.mtimeMs < ACTIVATION_COALESCE_MS;
+  } catch {
+    return false;
+  }
+}
+
+export async function runActivation(reason: string): Promise<Record<string, unknown>> {
+  _activationCount++;
+  _lastActivationReason = reason;
+  _lastActivationAt = new Date().toISOString();
+
+  if (_activationInFlight || _globalActivationFresh()) {
+    console.log(`[Keepalive] Activation requested (${reason}) — already in flight/fresh, coalescing`);
+    return { activated: true, coalesced: true, reason, at: _lastActivationAt };
+  }
+  try {
+    fs.writeFileSync(ACTIVATION_LOCK_FILE, JSON.stringify({ pid: process.pid, reason, at: _lastActivationAt }), "utf8");
+  } catch { /* best-effort lock */ }
+
+  _activationInFlight = true;
+  console.log(`[Keepalive] ⚡ Activation #${_activationCount} (${reason}) — firing residency sweep + deep-warm`);
+  try {
+    await Promise.all([
+      runResidencySweep().catch(() => {}),
+      runDeepWarm().catch(() => {}),
+    ]);
+  } finally {
+    _activationInFlight = false;
+  }
+  return {
+    activated: true,
+    coalesced: false,
+    reason,
+    at: _lastActivationAt,
+    activationCount: _activationCount,
+  };
+}
+
 // Per-endpoint health from the last residency sweep
 const _endpointHealth = new Map<string, boolean>(
   PING_PATHS.map((p) => [p, true]),
@@ -143,6 +214,21 @@ function _headers(): Record<string, string> {
 
 async function runHeartbeat(): Promise<void> {
   _heartbeatCount++;
+
+  // Wake-from-sleep detection: timers don't fire while the process/VM is
+  // suspended, so an abnormally large gap between heartbeats means we just
+  // woke up. Reactivate immediately — caches, KV state, and GPU residency
+  // are stale after a suspend.
+  const now = Date.now();
+  const gap = now - _lastHeartbeatWallClock;
+  _lastHeartbeatWallClock = now;
+  if (gap > SLEEP_GAP_MS && _heartbeatCount > 1) {
+    console.warn(
+      `[Keepalive] Detected ${Math.round(gap / 1000)}s heartbeat gap — process was suspended/asleep. Reactivating…`,
+    );
+    runActivation("wake-from-sleep").catch(() => {});
+  }
+
   try {
     const { statusCode, body } = await undiciRequest(
       `${MODEL_API_BASE}/health`,
@@ -159,7 +245,11 @@ async function runHeartbeat(): Promise<void> {
     if (!ok && _heartbeatOk) {
       console.warn(`[Keepalive] Heartbeat #${_heartbeatCount}: /health → ${statusCode} — Python may be struggling`);
     } else if (ok && !_heartbeatOk) {
-      console.log(`[Keepalive] Heartbeat #${_heartbeatCount}: /health recovered ✓`);
+      console.log(`[Keepalive] Heartbeat #${_heartbeatCount}: /health recovered ✓ — reactivating`);
+      // Automatic reactivation: the Python server just came back from an
+      // outage (crash-restart, hung-kill, or cold boot). Re-warm everything
+      // NOW instead of waiting up to 60s (sweep) / 5min (deep-warm).
+      runActivation("heartbeat-recovery").catch(() => {});
     }
     _heartbeatOk = ok;
     if (ok) _consecutiveHbFail = 0;
@@ -301,8 +391,21 @@ function _flushStatus(ok: number, fail: number): void {
         lastDeepWarmOk: _lastDeepWarmOk,
         nextDeepWarmAt: new Date(_nextDeepWarmAt).toISOString(),
       },
+      activation: {
+        count: _activationCount,
+        lastAt: _lastActivationAt,
+        lastReason: _lastActivationReason,
+        inFlight: _activationInFlight,
+        sleepGapThresholdMs: SLEEP_GAP_MS,
+      },
     };
-    fs.writeFileSync(STATUS_FILE, JSON.stringify(snapshot), "utf8");
+    // Single-writer + atomic: only the primary (which runs the keepalive
+    // loops) may write the snapshot, and it writes via temp+rename so
+    // readers never see a torn/partial JSON file.
+    if (!cluster.isPrimary) return;
+    const tmp = `${STATUS_FILE}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(snapshot), "utf8");
+    fs.renameSync(tmp, STATUS_FILE);
   } catch {
     // Non-fatal — status file is best-effort
   }
@@ -370,15 +473,13 @@ export function startKeepalive(): void {
     if (_running) scheduleHeartbeat();
   }, 500);
 
-  // First residency sweep: run immediately so GPU subsystems warm on boot,
-  // then schedule the recurring interval
-  runResidencySweep().then(() => {
+  // Automatic activation on boot: full residency sweep + deep-warm right
+  // away so GPU subsystems, caches, and the inference chain are hot before
+  // the first real request. Then schedule the recurring sweep interval.
+  runActivation("boot").then(() => {
     _nextDeepWarmAt = Date.now() + DEEP_WARM_INTERVAL_MS;
     if (_running) scheduleResidency();
   });
-
-  // First deep-warm: run in parallel with the first sweep (don't wait 5 min)
-  runDeepWarm().catch(() => {});
 }
 
 export function stopKeepalive(): void {
