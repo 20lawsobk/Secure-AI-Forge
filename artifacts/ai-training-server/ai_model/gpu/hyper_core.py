@@ -283,15 +283,41 @@ class HyperSIMDCore(SIMDCore):
         Tk = K.shape[1]
         if V.shape[1] != Tk:
             raise ShapeError(f"flash_attention: K length {Tk} != V length {V.shape[1]}")
-        scale = np.float32(1.0 / np.sqrt(D))
-        bs = max(1, min(int(block_size), Tk))
-        # Adaptive block widening for long sequences — halves Python loop count.
-        if Tk >= 256 and bs < 128:
-            bs = min(128, Tk)
 
         Qf: np.ndarray = np.ascontiguousarray(Q.astype(np.float32, copy=False))
         Kf: np.ndarray = np.ascontiguousarray(K.astype(np.float32, copy=False))
         Vf: np.ndarray = np.ascontiguousarray(V.astype(np.float32, copy=False))
+        scale = np.float32(1.0 / np.sqrt(D))
+
+        # ── Decode fast-path: Tq == 1 ─────────────────────────────────────────
+        # During every KV-cache decode step the query sequence length is exactly
+        # 1 — there is no tiling work to do.  Skip the Python tile loop entirely
+        # and dispatch two single batched GEMMs + one native SIMD softmax.
+        # This is the hot path called hundreds of times per generation.
+        if Tq == 1:
+            KT = np.ascontiguousarray(Kf.transpose(0, 2, 1))   # [B, D, Tk]
+            scores = self.batched_gemm(Qf, KT) * scale           # [B, 1, Tk]
+            if causal:
+                # With Tq=1, every key position ≤ 0 is visible (causal mask is
+                # trivially satisfied for the last query position).
+                pass
+            # Softmax over key dimension via native SIMD kernel
+            scores_2d = scores.reshape(B, Tk)
+            try:
+                probs_2d = self._native.softmax_rows(scores_2d)
+            except Exception:
+                e = np.exp(scores_2d - scores_2d.max(axis=-1, keepdims=True))
+                probs_2d = e / e.sum(axis=-1, keepdims=True)
+            probs = probs_2d.reshape(B, 1, Tk)
+            out = self.batched_gemm(probs, Vf)                   # [B, 1, D]
+            self._total_ops += 1
+            return out
+
+        # ── Prefill path: tiled online softmax (handles any Tq) ───────────────
+        bs = max(1, min(int(block_size), Tk))
+        # Adaptive block widening for long sequences — halves Python loop count.
+        if Tk >= 256 and bs < 128:
+            bs = min(128, Tk)
 
         O = np.zeros((B, Tq, D), dtype=np.float32)
         m = np.full((B, Tq), -np.inf, dtype=np.float32)
@@ -299,8 +325,6 @@ class HyperSIMDCore(SIMDCore):
 
         for start in range(0, Tk, bs):
             end = min(start + bs, Tk)
-            # Route both inner GEMMs through the GPU's batched_gemm kernel
-            # (TensorCoreUnit dispatch) rather than calling np.matmul directly.
             K_block_T = np.ascontiguousarray(Kf[:, start:end, :].transpose(0, 2, 1))
             scores = self.batched_gemm(Qf, K_block_T) * scale   # [B, Tq, blk]
             if causal:
@@ -492,6 +516,67 @@ class HyperSIMDCore(SIMDCore):
         out = self._native.silu(X.astype(np.float32, copy=False))
         self._total_ops += 1
         return out.reshape(X.shape)
+
+    # ── Fused linear + activation ────────────────────────────────────────────
+    # Each feedforward block calls linear (GEMM) then an activation function as
+    # two separate kernel dispatches.  These fused helpers collapse both into a
+    # single Python call — one GEMM dispatch followed immediately by an in-place
+    # native SIMD activation, with no intermediate Python allocation between
+    # them.  The output array of the GEMM is passed directly into the activation
+    # kernel, keeping the data hot in L2/L3 cache.
+
+    def linear_gelu(
+        self,
+        X: np.ndarray,
+        W: np.ndarray,
+        bias: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Fused matmul(X, Wᵀ) + optional bias + GeLU — single Python call."""
+        Xf = np.ascontiguousarray(X.astype(np.float32, copy=False))
+        Wf = np.ascontiguousarray(W.astype(np.float32, copy=False))
+        # GEMM: X @ Wᵀ  → [..., out_features]
+        out = self.tensor_core_gemm(Xf.reshape(-1, Xf.shape[-1]),
+                                    Wf.T).reshape(*Xf.shape[:-1], Wf.shape[0])
+        if bias is not None:
+            out += bias.astype(np.float32, copy=False)
+        # In-place native SIMD GeLU — data stays hot in cache
+        out_flat = self._native.gelu(np.ascontiguousarray(out.reshape(-1)))
+        self._total_ops += 2   # GEMM + activation
+        return out_flat.reshape(out.shape)
+
+    def linear_silu(
+        self,
+        X: np.ndarray,
+        W: np.ndarray,
+        bias: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Fused matmul(X, Wᵀ) + optional bias + SiLU — single Python call."""
+        Xf = np.ascontiguousarray(X.astype(np.float32, copy=False))
+        Wf = np.ascontiguousarray(W.astype(np.float32, copy=False))
+        out = self.tensor_core_gemm(Xf.reshape(-1, Xf.shape[-1]),
+                                    Wf.T).reshape(*Xf.shape[:-1], Wf.shape[0])
+        if bias is not None:
+            out += bias.astype(np.float32, copy=False)
+        out_flat = self._native.silu(np.ascontiguousarray(out.reshape(-1)))
+        self._total_ops += 2
+        return out_flat.reshape(out.shape)
+
+    def linear_relu(
+        self,
+        X: np.ndarray,
+        W: np.ndarray,
+        bias: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Fused matmul(X, Wᵀ) + optional bias + ReLU — single Python call."""
+        Xf = np.ascontiguousarray(X.astype(np.float32, copy=False))
+        Wf = np.ascontiguousarray(W.astype(np.float32, copy=False))
+        out = self.tensor_core_gemm(Xf.reshape(-1, Xf.shape[-1]),
+                                    Wf.T).reshape(*Xf.shape[:-1], Wf.shape[0])
+        if bias is not None:
+            out += bias.astype(np.float32, copy=False)
+        out_flat = np.maximum(out.reshape(-1), 0.0, dtype=np.float32)
+        self._total_ops += 2
+        return out_flat.reshape(out.shape)
 
     def grouped_gemm(
         self, A_list: List[np.ndarray], B_list: List[np.ndarray],

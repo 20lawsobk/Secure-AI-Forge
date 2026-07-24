@@ -1,24 +1,24 @@
 from __future__ import annotations
 import gc
+import hashlib
+import threading
+import time
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Union
 from .tokenizer import SimpleTokenizer, BPETokenizer
 
-# ── Digital GPU softmax singleton ─────────────────────────────────────────────
-# All softmax / log-softmax calls in sampling and beam search route through
-# HyperSIMDCore so they execute on the self-contained MaxCore stack instead of
-# Replit's CPU torch kernels.  The singleton is created lazily on first use.
+# ── Digital GPU core singleton ────────────────────────────────────────────────
+# All softmax / log-softmax calls route through HyperSIMDCore so they execute
+# on the self-contained MaxCore stack.  Singleton is created lazily once.
 _hyper_core = None
-_hyper_core_lock = None
+_hyper_core_lock = threading.Lock()
 
 def _get_hyper_core():
     """Return the module-level HyperSIMDCore singleton (thread-safe, lazy)."""
-    global _hyper_core, _hyper_core_lock
-    if _hyper_core_lock is None:
-        import threading
-        _hyper_core_lock = threading.Lock()
+    global _hyper_core
     if _hyper_core is not None:
         return _hyper_core
     with _hyper_core_lock:
@@ -33,17 +33,19 @@ def _get_hyper_core():
     return _hyper_core
 
 
+def _np_softmax(x: np.ndarray) -> np.ndarray:
+    """Numerically stable numpy softmax over the last axis (fallback)."""
+    x = x - x.max(axis=-1, keepdims=True)
+    e = np.exp(x)
+    return e / e.sum(axis=-1, keepdims=True)
+
+
 def _gpu_softmax(t: torch.Tensor, dim: int = -1) -> torch.Tensor:
-    """
-    Softmax via HyperSIMDCore (MaxCore digital GPU stack).
-    Falls back to F.softmax transparently if the core is unavailable.
-    Input/output: torch.Tensor (float32).
-    """
+    """Softmax via HyperSIMDCore. Falls back to F.softmax (never raises)."""
     core = _get_hyper_core()
     if core is None:
         return F.softmax(t, dim=dim)
     try:
-        import numpy as _np
         arr = t.detach().float().numpy()
         out = core.softmax(arr, axis=dim)
         return torch.from_numpy(out)
@@ -52,12 +54,84 @@ def _gpu_softmax(t: torch.Tensor, dim: int = -1) -> torch.Tensor:
 
 
 def _gpu_log_softmax(t: torch.Tensor, dim: int = -1) -> torch.Tensor:
-    """
-    Log-softmax via HyperSIMDCore.  Falls back to F.log_softmax.
-    """
+    """Log-softmax via HyperSIMDCore. Falls back to F.log_softmax (never raises)."""
     probs = _gpu_softmax(t, dim=dim)
-    # clamp to avoid log(0); -1e9 matches F.log_softmax behaviour on -inf inputs
     return torch.log(probs.clamp(min=1e-38))
+
+
+# ── In-process generation output cache (L1) ──────────────────────────────────
+# Sits in front of the pdim fleet-wide dedup (L2).  A cache hit returns in
+# microseconds — genuine sub-ms delivery for any repeated or seeded request.
+#
+# Design:
+#   • Thread-safe via a single lock (lock is only held for dict ops, never
+#     during model inference, so contention is negligible).
+#   • LRU eviction: the ordered dict moves a hit entry to the end; the oldest
+#     entry (front) is evicted when the cache is full.
+#   • Per-entry TTL: entries expire after _GEN_CACHE_TTL_S seconds so stale
+#     outputs don't persist across model checkpoints.
+
+_GEN_CACHE_MAX   = 512          # max entries (each ≤ a few KB of text)
+_GEN_CACHE_TTL_S = 120.0        # seconds before an entry is considered stale
+
+from collections import OrderedDict as _OD
+
+_gen_cache: _OD[str, tuple[float, str]] = _OD()   # key → (ts, text)
+_gen_cache_lock = threading.Lock()
+_gen_cache_hits  = 0
+_gen_cache_total = 0
+
+
+def _gen_cache_key(
+    prompt: str,
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    repetition_penalty: float,
+) -> str:
+    raw = f"{prompt}|{max_new_tokens}|{temperature:.4f}|{top_p:.4f}|{top_k}|{repetition_penalty:.4f}"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _gen_cache_get(key: str) -> str | None:
+    global _gen_cache_hits, _gen_cache_total
+    _gen_cache_total += 1
+    with _gen_cache_lock:
+        entry = _gen_cache.get(key)
+        if entry is None:
+            return None
+        ts, text = entry
+        if time.monotonic() - ts > _GEN_CACHE_TTL_S:
+            del _gen_cache[key]
+            return None
+        # LRU: move to end (most-recently used)
+        _gen_cache.move_to_end(key)
+        _gen_cache_hits += 1
+    return text
+
+
+def _gen_cache_put(key: str, text: str) -> None:
+    with _gen_cache_lock:
+        if key in _gen_cache:
+            _gen_cache.move_to_end(key)
+        _gen_cache[key] = (time.monotonic(), text)
+        # Evict oldest when over capacity
+        while len(_gen_cache) > _GEN_CACHE_MAX:
+            _gen_cache.popitem(last=False)
+
+
+def get_gen_cache_stats() -> dict:
+    with _gen_cache_lock:
+        size = len(_gen_cache)
+    total = _gen_cache_total
+    hits  = _gen_cache_hits
+    return {
+        "size": size, "capacity": _GEN_CACHE_MAX,
+        "hits": hits, "total": total,
+        "hit_rate": round(hits / total, 4) if total else 0.0,
+        "ttl_s": _GEN_CACHE_TTL_S,
+    }
 
 
 class CreativeModel:
@@ -118,6 +192,73 @@ class CreativeModel:
         logits[0, idx] = penalized
         return logits
 
+    def _sample_next_np(
+        self,
+        logits_np: np.ndarray,          # [1, vocab] float32 — already in numpy
+        temperature: float,
+        top_p: float,
+        top_k: int,
+    ) -> int:
+        """
+        Pure-numpy nucleus sampling — zero tensor↔numpy roundtrips.
+
+        Taking the logits as numpy at the boundary (once, in generate()) and
+        doing all filtering + softmax + sampling here eliminates the two
+        to_numpy / from_numpy calls that _gpu_softmax used to make on every
+        single decode step.  Returns the sampled token id as a plain int.
+        """
+        core = _get_hyper_core()
+        row = logits_np[0]                      # view, no copy
+
+        # Stage 8: mask hard-blocked tokens
+        bad_ids = self._safety_bad_ids()
+        if bad_ids:
+            row[bad_ids] = -np.inf
+
+        row /= max(temperature, 1e-8)
+
+        # Top-k: zero out everything below the k-th largest logit
+        if top_k > 0:
+            k = min(top_k, len(row))
+            # np.partition is O(V) vs O(V log V) sort — faster for large vocab
+            threshold = np.partition(row, -k)[-k]
+            row[row < threshold] = -np.inf
+
+        # Top-p nucleus
+        if 0.0 < top_p < 1.0:
+            order = np.argsort(-row)            # descending indices, O(V log V)
+            sorted_row = row[order]
+            if core is not None:
+                try:
+                    probs_s = core.softmax(sorted_row[None], axis=-1)[0]
+                except Exception:
+                    probs_s = _np_softmax(sorted_row[None])[0]
+            else:
+                probs_s = _np_softmax(sorted_row[None])[0]
+            cumulative = np.cumsum(probs_s)
+            # mask tokens whose cumulative prob exceeds top_p (keep the first)
+            mask = (cumulative - probs_s) > top_p
+            sorted_row[mask] = -np.inf
+            row[order] = sorted_row             # write back in-place
+
+        # Final softmax → sample
+        if core is not None:
+            try:
+                probs = core.softmax(logits_np, axis=-1)[0]
+            except Exception:
+                probs = _np_softmax(logits_np)[0]
+        else:
+            probs = _np_softmax(logits_np)[0]
+
+        probs = np.maximum(probs, 0.0)
+        total = probs.sum()
+        if total <= 0.0 or not np.isfinite(total):
+            probs = np.ones(len(probs), dtype=np.float32) / len(probs)
+        else:
+            probs /= total
+
+        return int(np.random.choice(len(probs), p=probs))
+
     def _sample_next(
         self,
         logits: torch.Tensor,
@@ -125,31 +266,12 @@ class CreativeModel:
         top_p: float,
         top_k: int,
     ) -> torch.Tensor:
-        """Apply temperature + top-k + nucleus sampling. Returns next token id [B, 1]."""
-        # ── Stage 8 constraint enforcement (during generation) ──────────────
-        # Mask hard-blocked tokens to -inf so the decoder can never emit them.
-        bad_ids = self._safety_bad_ids()
-        if bad_ids:
-            logits[:, bad_ids] = float('-inf')
-
-        logits = logits / max(temperature, 1e-8)
-
-        if top_k > 0:
-            top_k_vals, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-            logits[logits < top_k_vals[:, -1].unsqueeze(-1)] = float('-inf')
-
-        if 0.0 < top_p < 1.0:
-            sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-            # Route through MaxCore digital GPU softmax (not Replit CPU torch)
-            probs = _gpu_softmax(sorted_logits, dim=-1)
-            cumulative = torch.cumsum(probs, dim=-1)
-            mask = (cumulative - probs) > top_p
-            sorted_logits[mask] = float('-inf')
-            logits = sorted_logits.scatter(1, sorted_indices, sorted_logits)
-
-        # MaxCore digital GPU softmax — self-contained, no Replit CPU kernels
-        probs = _gpu_softmax(logits, dim=-1)
-        return torch.multinomial(probs, num_samples=1)
+        """Tensor-in / tensor-out wrapper kept for external callers (beam search etc.)."""
+        token_id = self._sample_next_np(
+            logits.detach().float().numpy().copy(),
+            temperature, top_p, top_k,
+        )
+        return torch.tensor([[token_id]], dtype=torch.long)
 
     # ── KV-cache sampling generation ──────────────────────────────────────────
 
@@ -168,20 +290,27 @@ class CreativeModel:
 
         Prefills the prompt in one batched forward pass, then generates
         each new token in O(1) time (single-position forward, no context
-        re-computation). Generation stops when the model emits <EOS> or
-        max_new_tokens is reached — no artificial cap otherwise.
+        re-computation).  Repeated calls with identical parameters are
+        served from the in-process L1 cache in microseconds (sub-ms).
         """
+        # ── L1 generation cache: sub-ms hit path ──────────────────────────────
+        cache_key = _gen_cache_key(
+            prompt, max_new_tokens, temperature, top_p, top_k, repetition_penalty
+        )
+        cached = _gen_cache_get(cache_key)
+        if cached is not None:
+            return cached
+
         ids = self.tokenizer.encode(prompt).ids
         if not ids:
             ids = [self.tokenizer.token_to_id("<BOS>")]
 
-        eos_id   = self.tokenizer.token_to_id("<EOS>")
-        pad_id   = self.tokenizer.token_to_id("<PAD>")
-        unk_id   = self.tokenizer.token_to_id("<UNK>")
+        eos_id      = self.tokenizer.token_to_id("<EOS>")
+        pad_id      = self.tokenizer.token_to_id("<PAD>")
+        unk_id      = self.tokenizer.token_to_id("<UNK>")
         special_ids = (pad_id, unk_id, eos_id)
-        max_ctx  = getattr(self.model, 'max_len', 1024)
+        max_ctx     = getattr(self.model, 'max_len', 1024)
 
-        # Truncate prompt if needed
         if len(ids) > max_ctx:
             ids = ids[-max_ctx:]
 
@@ -193,38 +322,52 @@ class CreativeModel:
             x_prompt = torch.tensor([ids], device=self.device)
             logits_all, kv_cache = self.model.prefill(x_prompt)
 
-            # Logits for the first token to generate (after the prompt)
-            next_logits = logits_all[:, -1, :].float().clone()  # [1, vocab]
+            # Extract first-token logits once as numpy — stays numpy through
+            # the entire decode loop to avoid per-token tensor roundtrips.
+            next_logits_np = logits_all[:, -1, :].float().numpy().copy()  # [1, V]
 
-            # ── Decode: O(1) per step via KV cache ────────────────────────────
+            # ── Decode: O(1) per step via KV cache, pure-numpy sampling ───────
             for step in range(max_new_tokens):
-                next_logits[:, pad_id] = float('-inf')
-                next_logits[:, unk_id] = float('-inf')
+                # Mask special tokens in-place (no tensor allocation)
+                next_logits_np[0, pad_id] = -np.inf
+                next_logits_np[0, unk_id] = -np.inf
                 if step < min_length:
-                    next_logits[:, eos_id] = float('-inf')
+                    next_logits_np[0, eos_id] = -np.inf
 
                 if generated_ids:
-                    next_logits = self._apply_repetition_penalty(
-                        next_logits, generated_ids[-64:], repetition_penalty, special_ids
+                    # Repetition penalty: still needs a torch tensor for the
+                    # vectorized gather — convert, penalise, convert back.
+                    lt = torch.from_numpy(next_logits_np)
+                    lt = self._apply_repetition_penalty(
+                        lt, generated_ids[-64:], repetition_penalty, special_ids
                     )
+                    next_logits_np = lt.numpy()
 
-                next_id   = self._sample_next(next_logits, temperature, top_p, top_k)
-                token_id  = int(next_id.item())
+                # Pure-numpy nucleus sampling — zero roundtrips inside
+                token_id = self._sample_next_np(
+                    next_logits_np.copy(), temperature, top_p, top_k
+                )
                 generated_ids.append(token_id)
 
                 if token_id == eos_id:
                     break
 
-                # Context window guard: drop oldest KV entries when full
+                # Context window guard
                 ctx_used = len(ids) + len(generated_ids)
                 if ctx_used >= max_ctx:
                     kv_cache = [(k[:, :, 1:, :], v[:, :, 1:, :]) for k, v in kv_cache]
 
                 # One-token forward with KV cache
-                logits_new, kv_cache = self.model.decode_one(next_id, kv_cache)
-                next_logits = logits_new[:, 0, :].float().clone()
+                next_id_t = torch.tensor([[token_id]], dtype=torch.long,
+                                         device=self.device)
+                logits_new, kv_cache = self.model.decode_one(next_id_t, kv_cache)
+                next_logits_np = logits_new[:, 0, :].float().numpy().copy()
 
-        return self.tokenizer.decode(ids + generated_ids)
+        result = self.tokenizer.decode(ids + generated_ids)
+
+        # Store in L1 cache for future sub-ms hits
+        _gen_cache_put(cache_key, result)
+        return result
 
     # ── Batched autoregressive generation ────────────────────────────────────
 

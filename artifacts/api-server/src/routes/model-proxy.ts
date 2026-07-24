@@ -986,6 +986,11 @@ router.get("/maxcore/pocket-accelerator/stats", async (req, res) => {
   await proxyRequest(req, res, "/api/maxcore/pocket-accelerator/stats");
 });
 
+// L1 generation output cache stats — sub-ms hit path sitting in front of pdim
+router.get("/gpu/gen-cache/stats", async (req, res) => {
+  await proxyRequest(req, res, "/api/gpu/gen-cache/stats");
+});
+
 // ─── Production warm-up endpoints ───────────────────────────────────────────
 
 // Trigger a Digital GPU inference warm pass (transformer → flash-attn → GEMM)

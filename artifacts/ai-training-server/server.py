@@ -2671,6 +2671,17 @@ async def api_pocket_multiply(req: PocketMultiplyRequest,
         "compute_backend": "digital_gpu",
     }
 
+@app.get("/api/gpu/gen-cache/stats")
+async def api_gen_cache_stats(key: dict = Depends(verify_api_key)):
+    """Live stats for the in-process L1 generation output cache.
+    Cache hits return in microseconds (genuine sub-ms) before any model
+    inference or pdim round-trip is attempted."""
+    try:
+        from ai_model.model.creative_model import get_gen_cache_stats
+        return {"success": True, "gen_cache": get_gen_cache_stats()}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
 @app.get("/api/maxcore/pocket-accelerator/stats")
 async def api_pocket_accelerator_stats(key: dict = Depends(verify_api_key)):
     """Live stats for the pocket accelerator wired into the Digital GPU GEMM
