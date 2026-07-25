@@ -5,6 +5,20 @@ description: Why only `Start application` should run; how redundant Python spawn
 
 # Workflow topology — single owner of the Python server
 
+## Production topology (post single-server merge)
+In production, the api-server artifact (8080) is the ONE real server — it serves the
+built dashboard statics AND all /api routes AND owns Python. The ai-dashboard artifact's
+production run is a featherweight static server (`artifacts/ai-dashboard/serve-static.mjs`,
+plain node http: dist/public + SPA fallback + /api,/uploads proxy to 8080, own /healthz).
+**Why:** two full Node cluster instances (each keepalive+deep-warm) doubled memory and
+warm-render load and froze the production VM mid-render (VM went totally silent — no
+logs from any process — external requests connect TLS but never answer).
+**How to apply:** never point a second artifact's prod run at the full api-server serve;
+`artifact.toml` cannot be edited directly with Edit — write the new TOML to a sibling
+file then `mv` it over via shell.
+Also: stopping the artifact api-server workflow kills 8080 if IT held the port — restart
+`Start application` afterwards to reclaim it.
+
 `Start application` is the ONLY workflow needed to run the whole app. Its api-server
 child (`pnpm --filter @workspace/api-server run dev`) unconditionally **child-spawns and
 auto-restarts** the Python AI server (`uv run python3 server.py`, port 9878) via

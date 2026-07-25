@@ -23,12 +23,12 @@ BASE_PATH = "/"
 
 [services.production]
 build = "pnpm install && uv sync && pnpm --filter @workspace/api-server run build && BASE_PATH=/ pnpm --filter @workspace/ai-dashboard run build"
-# DISABLE_PYTHON_SPAWN=1: this instance serves the dashboard + proxies /api,
-# but must NEVER spawn/own the Python model server. Only the api-server
-# artifact owns port 9878 — with two owners, both race at boot (Python takes
-# >6s to open its port, so each thinks it's down and spawns its own copy),
-# causing permanent lock contention and MaxBooster requests failing.
-run = "DISABLE_PYTHON_SPAWN=1 pnpm --filter @workspace/api-server run serve"
+# Featherweight static server only. The api-server artifact (port 8080) is
+# the ONE real server — it serves the built dashboard AND all /api routes,
+# and is the sole owner of the Python model server. Running a second full
+# api-server here doubled memory + keepalive/deep-warm load and froze the
+# production VM under render pressure.
+run = "PORT=3000 API_PORT=8080 node artifacts/ai-dashboard/serve-static.mjs"
 
 [services.production.health.startup]
-path = "/api/healthz"
+path = "/healthz"
