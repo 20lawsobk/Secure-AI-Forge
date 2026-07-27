@@ -26,3 +26,8 @@ description: How /api/generate/audio renders real audio and how the ARC spectral
 - Admin (B-Lawz) renders auto-push into mb:dataset:audio via `_fw_ingest_audio_render` (parity with _fw_ingest for text/video/image). Never-raise, admin-scope gated, sha256 content dedup, module-level index lock.
 - Derivation guard: renders whose source_sample is itself a flywheel entry are NOT re-ingested (prevents copy-of-copy decay). Index entries carry `source: "flywheel"` + `content_sha`.
 - Verified live: render → ingested idx N → next matching request selects idx N → no second ingest.
+
+## Audio job cancel + full-length warm pool
+- DELETE /api/audio-job/{id} exists (mirrors video): pending/processing→cancelled, done/error→purge mp3+stems+job record. Render thread + heartbeat both re-check for "cancelled" before writing status — keep those guards or cancel silently un-cancels.
+- AudioWarm COMBOS includes 180s entries after the 30s ones; full-length requests drop ~20s→<1s once warmed. 180s warms run sequentially in the background thread after readiness.
+- Node proxy: /files/stems/:jobId/:filename and POST /awareness/quality/harvest are explicitly allowlisted (harvest is admin-scoped server-side; 401 unauthenticated is correct, 404 means the proxy route is missing).

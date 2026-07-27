@@ -1659,6 +1659,20 @@ router.get("/audio/:jobId/midi", _audioLimiter, async (req, res) => {
   await proxyBinaryStream(req, res, `/api/audio/${req.params.jobId}/midi`);
 });
 
+// Individual stem WAV downloads — Python serves them from uploads/stems/<job>/
+router.get("/files/stems/:jobId/:filename", async (req, res) => {
+  await proxyBinaryStream(
+    req,
+    res,
+    `/api/files/stems/${encodeURIComponent(req.params.jobId)}/${encodeURIComponent(req.params.filename)}`,
+  );
+});
+
+// Trigger an awareness quality-harvest pass (research playbook refresh)
+router.post("/awareness/quality/harvest", async (req, res) => {
+  await proxyRequest(req, res, "/api/awareness/quality/harvest");
+});
+
 // ─── Observability metrics ───────────────────────────────────────────────────
 // GET /api/metrics — no auth required for internal scraping
 

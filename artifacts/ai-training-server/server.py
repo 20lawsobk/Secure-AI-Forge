@@ -1735,6 +1735,15 @@ def _warm_audio_pool() -> None:
         ("pop",        30),
         ("trap",       30),
         ("afrobeats",  30),
+        # Full-length tracks: pre-warmed AFTER all 30s combos so short requests
+        # go instant first. Each 180s render is ~20s of work, done sequentially
+        # in this background thread; once cached, full-length requests for
+        # these genres return in milliseconds instead of ~20 s.
+        ("electronic", 180),
+        ("hip-hop",    180),
+        ("pop",        180),
+        ("trap",       180),
+        ("afrobeats",  180),
     ]
     warmed = 0
     fake_job_prefix = "audiowarm"
@@ -9262,6 +9271,11 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
                     return  # terminal write in progress — never overwrite it
                 _elapsed = time.time() - _render_started
                 try:
+                    # Never overwrite a cancellation — DELETE /api/audio-job
+                    # may have marked the job cancelled between beats.
+                    _hb_cur = _job_read(job_id)
+                    if _hb_cur is not None and _hb_cur.get("status") == "cancelled":
+                        return
                     _job_update(job_id, {"status": "rendering",
                                          "elapsed_seconds": round(_elapsed, 1)})
                 except Exception:
@@ -9429,6 +9443,20 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         # final write so "done" can never be overwritten by a late heartbeat.
         _hb_stop.set()
         _hb_thread.join(timeout=5.0)
+        # Cancellation guard: if DELETE /api/audio-job marked the job cancelled
+        # while we were rendering, respect it — discard the output instead of
+        # overwriting the cancelled state with "done".
+        _cur = _job_read(job_id)
+        if _cur is not None and _cur.get("status") == "cancelled":
+            try:
+                _fname = Path(render.get("url", "")).name
+                if _fname:
+                    (_UPLOADS_PATH / _fname).unlink(missing_ok=True)
+            except Exception:
+                pass
+            print(f"[audio_render] job={job_id[:8]} cancelled mid-render — "
+                  f"output discarded", flush=True)
+            return
         _job_update(job_id, {
             "status":           "done",
             "url":              render["url"],
@@ -10510,6 +10538,47 @@ async def api_poll_audio_job(job_id: str, _key=Depends(require_scope("read"))):
     if job["status"] == "error":
         return {"status": "error", "error": job.get("error", "Unknown error")}
     return {"status": job["status"]}
+
+
+@app.delete("/api/audio-job/{job_id}")
+async def api_cancel_audio_job(job_id: str, _key=Depends(require_scope("generate"))):
+    """
+    Cancel a pending/processing audio job (marks it cancelled so the render
+    thread exits before writing output) or purge a finished/errored job and
+    delete its output file. Mirrors DELETE /api/video-job/{job_id} — the Node
+    proxy's /api/jobs/:jobId/cancel fan-out relies on this route existing.
+    """
+    job = _job_read(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    status = job.get("status")
+
+    if status in ("pending", "processing"):
+        _job_update(job_id, {"status": "cancelled"})
+        return {"ok": True, "action": "cancelled", "job_id": job_id}
+
+    if status in ("done", "error", "cancelled"):
+        url = job.get("url") or job.get("audio_url") or ""
+        fname = Path(url).name if url else ""
+        if fname:
+            try:
+                (_UPLOADS_PATH / fname).unlink(missing_ok=True)
+            except Exception:
+                pass
+        # Purge any per-job stems directory too.
+        try:
+            import shutil as _sh
+            _sh.rmtree(_UPLOADS_PATH / "stems" / job_id, ignore_errors=True)
+        except Exception:
+            pass
+        try:
+            os.unlink(_job_path(job_id))
+        except Exception:
+            pass
+        return {"ok": True, "action": "purged", "job_id": job_id}
+
+    return {"ok": True, "action": "no_op", "job_id": job_id}
 
 
 # ─── Audio stems endpoint ─────────────────────────────────────────────────────
