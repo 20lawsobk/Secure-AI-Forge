@@ -80,3 +80,8 @@ description: All optimizations layered for minimum-latency generation; constrain
 - `/api/gpu/prefix-kv/stats` — prefix KV cache hits/misses/hit_rate
 - `/api/gpu/replica-pool/stats` — replica count, round-robin position, hit rate
 - `/api/gpu/replica-pool/grow` (POST, admin) — grow pool to target replica count
+
+## Image L1 response cache + warm pools
+- /api/generate/image has an in-process L1 response cache (TTL 600s, bounded, key = canonical JSON of request fields + awareness digest). Hits validate backing PNGs exist (evict+re-render if deleted) and return deep copies. Renders are deterministic per inputs, so caching loses nothing.
+- Boot warmers: content (25 slots), audio (5 genres × 30s+180s), image (3 platforms). Image warm calls the handler directly via asyncio.run in a daemon thread — safe alongside uvicorn.
+- Cached image hits still measure ~500ms end-to-end through the Node proxy — remaining latency is proxy/cluster overhead, not Python.

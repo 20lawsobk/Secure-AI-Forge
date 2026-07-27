@@ -1520,6 +1520,9 @@ async def on_startup():
     audio_warm_thread = threading.Thread(target=_warm_audio_pool, daemon=True,
                                          name="audio-pool-warmer")
     audio_warm_thread.start()
+    image_warm_thread = threading.Thread(target=_warm_image_path, daemon=True,
+                                         name="image-path-warmer")
+    image_warm_thread.start()
     subsys_thread = threading.Thread(target=_warm_start_subsystems, daemon=True)
     subsys_thread.start()
 
@@ -1762,6 +1765,81 @@ def _warm_audio_pool() -> None:
 
     print(f"[AudioWarm] L1 audio cache pre-warmed {warmed}/{len(COMBOS)} combos",
           flush=True)
+
+
+# ── Image L1 response cache (in-process, TTL, bounded) ──────────────────────
+# Same idea as the audio L1 fast-path: identical /api/generate/image requests
+# are deterministic, so repeats are served from memory in sub-ms instead of
+# re-running VisualSpecAgent + PIL (~1.5 s). TTL keeps live-awareness drift
+# bounded; the key already includes the awareness digest so signal changes
+# bypass stale entries immediately.
+_IMAGE_L1_CACHE: dict = {}
+_IMAGE_L1_LOCK = threading.Lock()
+_IMAGE_L1_TTL_S = 600.0
+_IMAGE_L1_MAX = 256
+
+
+def _image_l1_get(key: str):
+    import time as _ct
+    with _IMAGE_L1_LOCK:
+        entry = _IMAGE_L1_CACHE.get(key)
+        if entry is None:
+            return None
+        ts, resp = entry
+        if _ct.time() - ts > _IMAGE_L1_TTL_S:
+            _IMAGE_L1_CACHE.pop(key, None)
+            return None
+        return resp
+
+
+def _image_l1_evict(key: str) -> None:
+    with _IMAGE_L1_LOCK:
+        _IMAGE_L1_CACHE.pop(key, None)
+
+
+def _image_l1_put(key: str, resp: dict) -> None:
+    import time as _ct
+    with _IMAGE_L1_LOCK:
+        if len(_IMAGE_L1_CACHE) >= _IMAGE_L1_MAX:
+            # Drop the oldest entry (insertion-ordered dict).
+            _IMAGE_L1_CACHE.pop(next(iter(_IMAGE_L1_CACHE)), None)
+        _IMAGE_L1_CACHE[key] = (_ct.time(), resp)
+
+
+def _warm_image_path() -> None:
+    """Pre-warm the image generation path (VisualSpecAgent + PIL renderer +
+    per-platform slot pipeline) so the first real image request skips lazy
+    initialisation.  One render per top platform; results land in the same
+    dedup cache namespace the live endpoint uses, so the common
+    "promotional image for <platform>" first hit is also served hot.
+    Never raises; runs in a daemon thread after the model is ready."""
+    import time as _iwt
+    import asyncio as _iaio
+    for _ in range(120):
+        if _model_ready:
+            break
+        _iwt.sleep(1)
+    else:
+        print("[ImageWarm] model not ready after 120 s — skipping", flush=True)
+        return
+
+    WARM_PLATFORMS = ("instagram", "tiktok", "youtube")
+    warmed = 0
+    for _plat in WARM_PLATFORMS:
+        try:
+            _req = ApiGenerateImageRequest(
+                prompt="new music drop",
+                intent="promotional",
+                slots=[{"id": "default", "platform": _plat,
+                        "purpose": "promotional"}],
+            )
+            _iaio.run(api_generate_image(_req, _key=None))
+            warmed += 1
+            print(f"[ImageWarm] pre-warmed platform={_plat!r}", flush=True)
+        except Exception as _iw_err:  # noqa: BLE001 — warm is best-effort
+            print(f"[ImageWarm] {_plat} skipped: {_iw_err}", flush=True)
+    print(f"[ImageWarm] image path pre-warmed {warmed}/{len(WARM_PLATFORMS)} "
+          f"platforms", flush=True)
 
 
 def _reconcile_audio_manifest(storage) -> None:
@@ -8120,6 +8198,52 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
     # colour / prompt, which the PIL render then consumes.
     _img_awareness = _merged_awareness_for(req)
 
+    # ── L1 response cache (mirrors the audio L1 fast-path) ────────────────
+    # The render is fully deterministic for identical inputs (seeds derive
+    # from topic/slot hashes), so identical requests re-compute the exact
+    # same PNG. Serve repeats from an in-process cache instead. The key
+    # includes the awareness digest so any change in live signals bypasses
+    # the cache (PDIM-cache rule: never cache over mutable external state).
+    import hashlib as _ihl
+    import json as _ijs
+    _key_material = {
+        "topic": str(topic), "intent": intent, "artist": artist_name,
+        "style_tags": sorted(map(str, style_tags)),
+        "slots": [
+            {"id": s, "platform": s, "purpose": None} if isinstance(s, str)
+            else {"id": s.get("id"), "platform": s.get("platform"),
+                  "purpose": s.get("purpose")}
+            for s in raw_slots
+        ],
+        "genre": req.genre, "mood": req.mood, "bpm": req.bpm, "key": req.key,
+        "engine": req.render_engine, "render_text": req.render_text,
+        "awareness": _ihl.sha256(
+            _ijs.dumps(_img_awareness, sort_keys=True, default=str).encode()
+        ).hexdigest(),
+    }
+    _l1_key = _ihl.sha256(
+        _ijs.dumps(_key_material, sort_keys=True, default=str).encode()
+    ).hexdigest()
+    _l1_hit = _image_l1_get(_l1_key)
+    if _l1_hit is not None:
+        # Never serve a cached URL whose PNG vanished — validate the backing
+        # files still exist; if any is gone, evict and re-render.
+        try:
+            from ai_model.image.image_engine import _UPLOADS_DIR as _IMG_DIR
+            for _o in _l1_hit.get("outputs", []):
+                _u = _o.get("url") or ""
+                if _u and not (_IMG_DIR / Path(_u).name).exists():
+                    raise FileNotFoundError(_u)
+        except Exception:
+            _image_l1_evict(_l1_key)
+            _l1_hit = None
+    if _l1_hit is not None:
+        import copy as _icp
+        _resp = _icp.deepcopy(_l1_hit)  # no nested aliasing across hits
+        _resp["processing_time_ms"] = round((_t.time() - start) * 1000, 1)
+        _resp["cache"] = "l1"
+        return _resp
+
     outputs = []
     brief = None  # last-built brief, surfaced at top level for back-compat
     for slot in raw_slots:
@@ -8316,7 +8440,7 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
 
     # Top-level aliases the MaxBooster client reads (url / image_url / path)
     first_url = next((o.get("url") for o in outputs if o.get("url")), None)
-    return {
+    _resp = {
         "outputs": outputs,
         "url":       first_url,
         "image_url": first_url,
@@ -8325,6 +8449,11 @@ async def api_generate_image(req: ApiGenerateImageRequest, _key=Depends(require_
         "ai_disclosure": brief.ai_disclosure if brief else False,
         "processing_time_ms": round((_t.time() - start) * 1000, 1),
     }
+    # Cache only fully-rendered responses (every slot produced a real file) —
+    # engine-not-ready fallbacks must never be pinned into the fast path.
+    if outputs and all(o.get("url") for o in outputs):
+        _image_l1_put(_l1_key, _resp)
+    return _resp
 
 
 def _render_audio_clip(job_id: str, bpm: float, key: str,
