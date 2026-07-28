@@ -108,3 +108,6 @@ request forever (this is what made MaxBooster fail against prod "every time").
 serves dashboard + proxies /api, never spawns). Only the api-server artifact owns 9878
 in prod. Direct edits to artifact.toml are blocked — write a sibling temp file and
 `mv` it over via shell. Takes effect only on republish.
+
+## VM deployment readiness = externalPort 80 mapping
+A VM publish health-checks the app behind external port 80. If `.replit` [[ports]] maps externalPort 80 to a port nothing listens on (a stray auto-added mapping, e.g. 8081), the build succeeds, the VM boots, then "Waiting for deployment to be ready" times out ~8min and the publish fails with NO runtime logs. Fix: map localPort 8080 → externalPort 80 (via verifyAndReplaceDotReplit — .replit is not directly editable). Registry "failed to push referrer manifest" 500s can be non-fatal noise when the image manifest itself pushed.
