@@ -37,6 +37,10 @@
    - [All quality checkers](#93-all-quality-checkers)
 10. [Key design decisions & non-obvious rules](#10-key-design-decisions--non-obvious-rules)
 11. [Recreating from scratch — step-by-step](#11-recreating-from-scratch--step-by-step)
+12. [Digital GPU system — complete documentation](#12-digital-gpu-system--complete-documentation)
+13. [Audio delivery: stems, caching & the fast path](#13-audio-delivery-stems-caching--the-fast-path)
+14. [Performance characteristics & operations runbook](#14-performance-characteristics--operations-runbook)
+15. [Complete system wiring — instant re-setup guide](#15-complete-system-wiring--instant-re-setup-guide)
 
 ---
 
@@ -1204,7 +1208,7 @@ Priority order based on what unlocks everything else:
 
 ---
 
-*Documentation generated July 13, 2026. Reflects the codebase as of 104/104 quality test pass.*
+*Documentation generated July 13, 2026; Sections 13–15 and the proxy route table updated July 28, 2026. Reflects the codebase as of 104/104 quality test pass.*
 
 ---
 
@@ -2202,3 +2206,188 @@ footprint can crash the Python process mid-job.
   view; after a respawn, resubmit — the job registry is in-process.
 - Long poll loops in the shell must stay under the 5-minute exec cap; split
   batches.
+
+---
+
+## 15. Complete System Wiring — Instant Re-Setup Guide
+
+> Everything needed to stand this system up from a bare clone in one pass:
+> the monorepo layout, every config file that wires layers together, the exact
+> boot chain, port map, env contract, and verification checklist.
+
+### 15.1 Monorepo layout (pnpm workspace)
+
+`pnpm-workspace.yaml` declares the packages:
+
+```
+packages:
+  - artifacts/*        # runnable apps
+  - lib/*              # shared libraries
+  - lib/integrations/*
+  - scripts
+```
+
+| Package | Name | Role |
+|---|---|---|
+| `artifacts/ai-dashboard` | `@workspace/ai-dashboard` | React 19 + Vite 7 frontend (port 5000) |
+| `artifacts/api-server` | `@workspace/api-server` | Express 5 proxy + Python lifecycle owner (port 8080) |
+| `artifacts/ai-training-server` | (Python, not a pnpm pkg) | FastAPI AI engine (port 9878, healthz 9879) |
+| `artifacts/mockup-sandbox` | `@workspace/mockup-sandbox` | Canvas component preview (design-time only) |
+| `lib/db` | `@workspace/db` | Drizzle ORM schema + client (source of truth: `lib/db/src/schema/`) |
+| `lib/api-spec` | — | `openapi.yaml` API contract |
+| `lib/api-zod` | `@workspace/api-zod` | Zod schemas shared by server/client |
+| `lib/api-client-react` | — | Generated TS client for the dashboard |
+
+Root `package.json` scripts:
+- `build:production` → builds api-server (esbuild → `dist/index.mjs`) then dashboard (`BASE_PATH=/`, output `artifacts/ai-dashboard/dist/public`)
+- `start` → `pnpm --filter @workspace/api-server run serve` (production)
+- `typecheck` → project-references build for libs, then per-artifact typecheck
+- `preinstall` guard forces pnpm (rejects npm/yarn).
+- Shared dependency versions live in the pnpm `catalog:` in `pnpm-workspace.yaml`.
+
+### 15.2 The boot chain (dev)
+
+One workflow starts everything — `Start application` in `.replit`:
+
+```bash
+[ ! -d node_modules ] && pnpm install
+cd artifacts/ai-training-server && [ ! -f .venv/pyvenv.cfg ] && uv sync --no-dev
+cd ../..
+PORT=8080 MODEL_API_PORT=9878 pnpm --filter @workspace/api-server run dev \
+  & PORT=5000 BASE_PATH=/ API_PORT=8080 pnpm --filter @workspace/ai-dashboard run dev
+```
+
+What happens, in order:
+
+1. **pnpm install** (skipped if `node_modules` exists) and **uv sync** for the
+   Python venv (skipped if `.venv/pyvenv.cfg` exists).
+2. **api-server** (`src/index.ts`) boots as a Node **cluster**: the primary
+   forks workers (respawned on exit), workers share the :8080 listener.
+3. The api-server process that sees `MODEL_API_PORT` set becomes the **Python
+   owner**: `src/python-server.ts` spawns `uv run python3 server.py` as a
+   child, monitors health (`:9878/health`, liveness `:9879/healthz`), and
+   restarts it with exponential backoff. **If `MODEL_API_PORT` is unset the
+   server runs in monitoring-only mode and never owns a Python process** —
+   this is the root cause of 503s when the env is wrong.
+4. **ai-dashboard** Vite dev server binds :5000 with `allowedHosts: true`
+   (required for the Replit preview iframe) and proxies `^/api/` and
+   `^/uploads/` → `http://localhost:${API_PORT}` (8080). No CORS anywhere.
+5. Python `server.py` boots FastAPI on :9878, starts the healthz liveness
+   thread on :9879, auto-seeds the `api_keys` table, connects to pdim storage
+   (falls back to local SQLite `data/local_kv.db` transparently), and loads
+   the model/kernels lazily.
+
+Request path in dev:
+```
+Browser → :5000 (Vite) → proxy → :8080 (Express allowlist, model-proxy.ts)
+        → undici long-timeout Agent → :9878 (FastAPI) → Digital GPU stack
+```
+
+### 15.3 The boot chain (production deployment)
+
+`.replit [deployment]`:
+```
+deploymentTarget = "vm"
+build = pnpm run build:production
+run   = PORT=8080 MODEL_API_PORT=9878 NODE_CLUSTER_WORKERS=2 pnpm start
+```
+
+In production there is **no Vite**: the built api-server serves the dashboard
+SPA from `dist/public` directly on the single external port. The `serve`
+script defaults `PORT=8080 MODEL_API_PORT=9878` — **MODEL_API_PORT must be
+set in the prod run command or no process owns Python and every model route
+503s** (this bit us once; it is now baked into both `serve` and the run
+command).
+
+### 15.4 Port map
+
+| Port | Owner | External |
+|---|---|---|
+| 5000 | Vite dashboard (dev) / preview pane | 5000 |
+| 8080 | Express api-server (cluster, SO_REUSEPORT) | 8080 |
+| 9878 | Python FastAPI (model API) | 3002 |
+| 9879 | Python healthz liveness thread (hung-detection probe target) | 3001 |
+| 3000 / 3999 | mockup sandbox / misc | 3000 / 3003 |
+| 8081 | reserved | 80 |
+
+### 15.5 Environment contract
+
+Set in `.replit [userenv.shared]` (non-secret config, already committed):
+`STORAGE_INSTANCE`, `ADMIN_KEY`, `STORAGE_HTTP_URL`, `STORAGE_CONNECTION_URL`,
+`STORAGE_BEARER_TOKEN`, `AI_TRAINING_KEY_PROD`, `AI_DYNAMIC_BATCHING=1`,
+`RTA_AUDIO_SPECTRAL=1`.
+
+Replit Secrets (never in source): `SESSION_SECRET` (server exits at startup if
+missing), `DATABASE_URL` (managed Postgres). Optional: `TAVILY_API_KEY`,
+`EXA_API_KEY` (awareness enrichment; RSS-only without them).
+
+Wiring env vars (set by workflow/run commands, not stored):
+`PORT`, `MODEL_API_PORT`, `API_PORT`, `BASE_PATH`, `NODE_CLUSTER_WORKERS`.
+
+### 15.6 System (Nix) dependencies
+
+`.replit [nix].packages` — required for audio/video/image paths:
+`ffmpeg-full`, `espeak-ng` (voice-over), `libsndfile`, `freetype`, `libjpeg`,
+`libwebp`, `libtiff`, `openjpeg`, `lcms2`, `libimagequant`, `zlib`, `xsimd`,
+`glibcLocales`, `pkg-config`, `tcl`, `tk`, `libxcrypt`.
+Python deps are locked in `artifacts/ai-training-server/pyproject.toml` +
+`uv.lock` (torch pinned to the CPU wheel index `pytorch-cpu`).
+
+### 15.7 Cross-layer contracts (the glue)
+
+1. **Proxy allowlist** — `model-proxy.ts` is an explicit per-route table
+   (Section 5). Every new Python endpoint needs a matching handler or the
+   dashboard 404s. Binary payloads (video files, stem WAVs) go through
+   `proxyBinaryStream`; JSON through `proxyRequest`.
+2. **Long-timeout undici Agent** — Node→Python fetches use a dedicated Agent
+   with extended header/body timeouts; a bare `fetch` (300 s default) aborts
+   valid long generations. Express `server.timeout = 0`.
+3. **Auth** — dashboard→Node uses session auth (`SESSION_SECRET`);
+   Node→Python and direct admin calls use `X-Api-Key` (`AI_TRAINING_KEY_PROD`
+   seeded into the `api_keys` table on first boot); pdim storage uses
+   `STORAGE_BEARER_TOKEN`; Bearer auth also accepted on generation endpoints.
+4. **DB** — Drizzle schema in `lib/db/src/schema/` is the single source of
+   truth. Apply with `pnpm --filter @workspace/db push` (or `push-force`).
+   Python reads the same Postgres via `psycopg2` + `DATABASE_URL`.
+5. **Storage waterfall** — Python storage client tries pdim HTTP → Redis →
+   local SQLite; every layer is optional, the system boots with all of them
+   down.
+6. **Self-healing** — Node watchdog owns Python restarts (exponential
+   backoff, `:9879` liveness probe with a 25 s budget so GC pauses don't
+   cause false kills). No caller-visible timeouts: jobs retry-until-success
+   with heartbeats.
+7. **Uploads** — generated files land in `artifacts/ai-training-server/uploads/`
+   (stems under `uploads/stems/<job_id>/`); served by Python, streamed
+   through Node, proxied by Vite under `/uploads/` and `/api/files/...`.
+
+### 15.8 Instant re-setup checklist (fresh clone → running)
+
+```bash
+# 0. Prereqs provided by .replit modules: nodejs-20, python-3.11, web + Nix pkgs
+# 1. Secrets: set SESSION_SECRET and DATABASE_URL (create Replit Postgres)
+# 2. Install & boot — the workflow does everything:
+#    Run the "Start application" workflow (installs pnpm deps + uv venv on
+#    first boot, ~30-60 s extra the first time)
+# 3. DB schema:
+pnpm --filter @workspace/db push
+# 4. Verify the chain, outside-in:
+curl -s localhost:9878/health         # Python direct        → {"status":"ok"}
+curl -s localhost:9879/healthz        # liveness thread      → 200
+curl -s localhost:8080/api/health     # Node proxy           → 200
+curl -s -o /dev/null -w '%{http_code}' localhost:5000/   # dashboard → 200
+# 5. Seed the audio dataset (admin key from userenv):
+curl -X POST localhost:9878/storage/datasets/audio/seed -H "X-Api-Key: $AI_TRAINING_KEY_PROD"
+# 6. Quality gate:
+cd artifacts/ai-training-server && python3 tests/test_w6_90m.py --quality-only
+#    Expected: all quality checks pass (104/104 at last full run)
+```
+
+Rules to keep it healthy:
+- Run **only** `Start application` (Section 14.2 runbook if artifact
+  workflows sneak back in).
+- Python edits ⇒ full workflow restart (import caching).
+- New Python route ⇒ matching allowlist entry in `model-proxy.ts`.
+- Schema change ⇒ `db push` in dev, and against prod per the deployment flow.
+- GitHub remote: `origin = github.com/20lawsobk/Secure-AI-Forge`. Verify which
+  commit the remote holds before importing elsewhere — the remote and
+  workspace have diverged before (fused vs reverted lineage).
