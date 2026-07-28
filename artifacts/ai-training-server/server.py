@@ -9501,7 +9501,7 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
         _fmt_probe   = (req.format or "mp3").lower()
         _lufs_probe  = None   # fast-path only for default loudness
         _stems_probe = bool(req.stems)
-        if _lufs_probe is None and not _stems_probe:
+        if _lufs_probe is None:
             with _AUDIO_RENDER_CACHE_LOCK:
                 _fp_hit: "dict | None" = None
                 for _fp_g in _preferred_genres_handler:
@@ -9513,7 +9513,18 @@ async def api_generate_audio(req: ApiGenerateAudioRequest, _key=Depends(require_
                         break
             if _fp_hit is not None:
                 _fp_name = str(_fp_hit.get("url") or "").rsplit("/", 1)[-1]
-                if _fp_name and (_UPLOADS_PATH / _fp_name).exists():
+                # Stems requests only qualify when the cached entry carries a
+                # complete set of stem files that still exist on disk — the
+                # genre key already encodes the stems flag, so a stems=True
+                # probe can only match a stems=True render.
+                _fp_stems_ok = True
+                if _stems_probe:
+                    _fp_stem_urls = _fp_hit.get("stems") or {}
+                    _fp_stems_ok = bool(_fp_stem_urls) and all(
+                        (_UPLOADS_PATH / str(_u).rsplit("/", 1)[-1]).exists()
+                        for _u in _fp_stem_urls.values()
+                    )
+                if _fp_name and _fp_stems_ok and (_UPLOADS_PATH / _fp_name).exists():
                     _job_update(job_id, {
                         "status":        "done",
                         "url":           _fp_hit.get("url"),
@@ -10576,11 +10587,23 @@ async def api_audio_stems(job_id: str, _key=Depends(require_scope("read"))):
 @app.get("/api/files/stems/{job_id}/{filename}")
 async def api_serve_stem_file(job_id: str, filename: str, _key=Depends(require_scope("read"))):
     """Download an individual stem WAV file."""
-    # Sanitise filename to prevent path traversal
+    # Sanitise inputs to prevent path traversal: job_id and filename must be
+    # simple names (no separators, no dot-segments), and the resolved path
+    # must be strictly inside uploads/stems/<job_id>/ (relative_to, not a
+    # string-prefix check, which sibling dirs like "uploads_bak" would pass).
+    import re as _re_stem
+    if not _re_stem.fullmatch(r"[A-Za-z0-9._-]+", job_id) or job_id in (".", ".."):
+        raise HTTPException(status_code=400, detail="Invalid path")
     safe_name = Path(filename).name
-    stem_path = (_UPLOADS_PATH / "stems" / job_id / safe_name).resolve()
-    uploads_resolved = _UPLOADS_PATH.resolve()
-    if not str(stem_path).startswith(str(uploads_resolved)):
+    if (safe_name != filename or not safe_name
+            or not _re_stem.fullmatch(r"[A-Za-z0-9._-]+", safe_name)
+            or safe_name in (".", "..")):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    stems_root = (_UPLOADS_PATH / "stems").resolve()
+    stem_path = (stems_root / job_id / safe_name).resolve()
+    try:
+        stem_path.relative_to(stems_root / job_id)
+    except ValueError:
         raise HTTPException(status_code=400, detail="Invalid path")
     if not stem_path.exists():
         raise HTTPException(status_code=404, detail="Stem file not found")

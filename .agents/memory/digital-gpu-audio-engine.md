@@ -72,3 +72,10 @@ made the reverb IR a Dirac delta (no reverb). Fixed at every call site in DrumKi
 - `digital_gpu_stft` → DFT-matrix GEMM → `digital_gpu_istft` → overlap-add
 - `digital_gpu_hpss` → Wiener soft masks on DFT-domain median-filtered magnitude
 - Stem output via stdlib `wave` only — no soundfile
+
+## Tensor↔numpy boundary in STFT/iSTFT
+DigitalGPU.gemm returns a MaxCore Tensor (has `.numpy()`, NO `.astype`). Any numpy consumer (overlap-add, `.astype`) must unwrap via a `_gemm_np()`-style helper right at the gemm call. Symptom of missing unwrap: `[Producer] stems skipped: 'Tensor' object has no attribute 'astype'` — stems silently empty `{}` while the job still reports done.
+**Why:** the stem/HPSS path is never-raise, so this crash hides as a one-line WARN; check the log for "stems skipped" whenever stems come back empty.
+
+## Audio fast-path cache and stems
+The handler genre-key fast-path probe must NOT exclude stems=true requests — the cache entries already encode the stems flag and carry stem URLs. Gate hits on every stem file existing on disk (like the main-file check). Without this, repeat stems requests full-re-render (~20s instead of ms) because flywheel ingestion grows the dataset and shifts chunk selection between identical requests.

@@ -37,6 +37,18 @@ _DFT_CACHE: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
 _DFT_LOCK  = threading.Lock()
 
 
+def _gemm_np(x) -> np.ndarray:
+    """Coerce a DigitalGPU gemm result (MaxCore Tensor or ndarray) to ndarray.
+
+    DigitalGPU.gemm returns a MaxCore ``Tensor`` (which has ``.numpy()`` but no
+    ``.astype``); the STFT/iSTFT math below is plain numpy, so unwrap here.
+    """
+    n = getattr(x, "numpy", None)
+    if callable(n):
+        return np.asarray(n())
+    return np.asarray(x)
+
+
 def _dft_matrices(n_fft: int) -> Tuple[np.ndarray, np.ndarray]:
     cached = _DFT_CACHE.get(n_fft)
     if cached:
@@ -76,8 +88,8 @@ def digital_gpu_stft(x, n_fft=2048, hop_length=None, window=None):
     try:
         from ai_model.maxcore.api import DigitalGPU
         gpu    = DigitalGPU()
-        S_real = gpu.gemm(Wr, frames.T)
-        S_imag = gpu.gemm(Wi, frames.T)
+        S_real = _gemm_np(gpu.gemm(Wr, frames.T))
+        S_imag = _gemm_np(gpu.gemm(Wi, frames.T))
     except Exception:
         S_real = Wr @ frames.T
         S_imag = Wi @ frames.T
@@ -94,7 +106,8 @@ def digital_gpu_istft(S_real, S_imag, hop_length=None, length=None, window=None)
     try:
         from ai_model.maxcore.api import DigitalGPU
         gpu    = DigitalGPU()
-        frames = (gpu.gemm(Wr.T, S_real) + gpu.gemm(Wi.T, S_imag)) / np.float32(n_fft)
+        frames = (_gemm_np(gpu.gemm(Wr.T, S_real)) +
+                  _gemm_np(gpu.gemm(Wi.T, S_imag))) / np.float32(n_fft)
     except Exception:
         frames = (Wr.T @ S_real + Wi.T @ S_imag) / np.float32(n_fft)
     out_len = length or (n_frames * hop + n_fft)

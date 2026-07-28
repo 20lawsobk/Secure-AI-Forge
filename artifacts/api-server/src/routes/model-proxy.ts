@@ -1659,6 +1659,17 @@ router.get("/audio/:jobId/midi", _audioLimiter, async (req, res) => {
   await proxyBinaryStream(req, res, `/api/audio/${req.params.jobId}/midi`);
 });
 
+// GET /api/files/stems/:jobId/:filename → proxies the individual stem WAV
+// download that Python serves at the same path (stem URLs in audio-job
+// results point here; without this route the dashboard 404s on download).
+router.get("/files/stems/:jobId/:filename", _audioLimiter, async (req, res) => {
+  await proxyBinaryStream(
+    req,
+    res,
+    `/api/files/stems/${encodeURIComponent(req.params.jobId)}/${encodeURIComponent(req.params.filename)}`,
+  );
+});
+
 // ─── Observability metrics ───────────────────────────────────────────────────
 // GET /api/metrics — no auth required for internal scraping
 
