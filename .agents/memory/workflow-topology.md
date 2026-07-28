@@ -111,3 +111,6 @@ in prod. Direct edits to artifact.toml are blocked — write a sibling temp file
 
 ## VM deployment readiness = externalPort 80 mapping
 A VM publish health-checks the app behind external port 80. If `.replit` [[ports]] maps externalPort 80 to a port nothing listens on (a stray auto-added mapping, e.g. 8081), the build succeeds, the VM boots, then "Waiting for deployment to be ready" times out ~8min and the publish fails with NO runtime logs. Fix: map localPort 8080 → externalPort 80 (via verifyAndReplaceDotReplit — .replit is not directly editable). Registry "failed to push referrer manifest" 500s can be non-fatal noise when the image manifest itself pushed.
+
+## Deploy VM sizing vs boot warm-ups
+Prod VM can be e2-small (0.5 vCPU / 2 GB) — check machineConfiguration in getDeploymentBuild. Python model (~900MB) + Node cluster + heavy boot warms (180s audio renders) OOM the container → health check never passes → 11-min "waiting for ready" failure with NO runtime logs. Fixes: warm pools gate on _total_ram_gb() (<3.5GB skips 180s combos), prod run uses NODE_CLUSTER_WORKERS=1. Registry "retry request ... 500 / failed to push referrer manifest" lines are Replit-uploader noise, always non-fatal when "Pushed image manifest" succeeded.

@@ -1711,6 +1711,15 @@ def _warm_content_cache() -> None:
     print(f"[CacheWarm] Pre-warmed {warmed}/{total} content slots into PDIM cache")
 
 
+def _total_ram_gb() -> float:
+    """Total physical RAM in GiB — used to scale boot warm-up work to the
+    machine (deploy VMs can be as small as 2 GB). Never raises."""
+    try:
+        return (os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")) / (1024 ** 3)
+    except Exception:
+        return 8.0  # assume roomy when unknown
+
+
 def _warm_audio_pool() -> None:
     """Pre-generate audio for common genre/BPM combos so L1 cache is hot
     before the first user request arrives.  Runs in a daemon thread after
@@ -1748,6 +1757,16 @@ def _warm_audio_pool() -> None:
         ("trap",       180),
         ("afrobeats",  180),
     ]
+    # Small-machine guard: full-length (180s) pre-renders spike memory hard
+    # during HPSS/mastering. On constrained deploy VMs (< ~3.5 GB total RAM)
+    # they can OOM the container during boot and kill the health check, so
+    # keep only the 30s combos there — 180s requests still work, they just
+    # render on first demand instead of pre-warmed.
+    if _total_ram_gb() < 3.5:
+        COMBOS = [c for c in COMBOS if c[1] <= 30]
+        print(f"[AudioWarm] low-memory machine ({_total_ram_gb():.1f} GB) — "
+              f"skipping 180s pre-warm, keeping {len(COMBOS)} short combos",
+              flush=True)
     warmed = 0
     fake_job_prefix = "audiowarm"
     for genre, dur in COMBOS:

@@ -12,7 +12,7 @@ id = "artifacts/mockup-sandbox"
 [deployment]
 deploymentTarget = "vm"
 build = ["pnpm", "run", "build:production"]
-run = ["bash", "-c", "PORT=8080 MODEL_API_PORT=9878 NODE_CLUSTER_WORKERS=2 pnpm start"]
+run = ["bash", "-c", "PORT=8080 MODEL_API_PORT=9878 NODE_CLUSTER_WORKERS=1 pnpm start"]
 
 [workflows]
 runButton = "Project"
