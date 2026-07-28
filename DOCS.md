@@ -229,6 +229,18 @@ dashboard will receive a 404.
 | `/storage/*` | `/storage/*` | GET + POST |
 | `/boostsheets` | `/boostsheets` | GET |
 | `/dashboard/stats` | `/dashboard/stats` | GET |
+| `/audio-job/:jobId` | `/api/audio-job/:jobId` | GET |
+| `/video-job/:jobId` (+ `/download`, `/file`, `/video`, `/preview/:sceneIdx`) | same | GET |
+| `/audio/:jobId/stems` | `/api/audio/:jobId/stems` | GET (rate-limited) |
+| `/audio/:jobId/midi` | `/api/audio/:jobId/midi` | GET (rate-limited) |
+| `/files/stems/:jobId/:filename` | `/api/files/stems/:jobId/:filename` | GET binary stream (rate-limited) — stem WAV download |
+| `/jobs/:jobId/progress`, `/jobs/:jobId/cancel` | audio-job first, then video-job | GET / POST |
+
+**Intentionally NOT proxied** (admin/internal only, callable directly on the
+Python port with admin auth): training-data seeding beyond
+`/storage/datasets/audio/seed`, `awareness/quality/harvest`, and other
+internal maintenance endpoints. `pocket-multiply` is exposed but is an
+internal compute utility, not a dashboard feature.
 
 ---
 
@@ -2025,3 +2037,168 @@ These rules were learned through iteration and must be preserved in any rebuild:
 12. **Silicon is side-channel, not execution.** `silicon.add_estimated_cycles()`
     must be called inside a `try/except`. If it raises, real compute must
     continue unaffected.
+
+---
+
+## 13. Audio Delivery: Stems, Caching & the Fast Path
+
+### 13.1 Stem separation pipeline
+
+`POST /api/generate/audio` with `"stems": true` produces, alongside the main
+track, three isolated stems — **drums / bass / melody** — as 44.1 kHz stereo
+WAV files.
+
+Flow (all inside `artifacts/ai-training-server`):
+
+1. `server.py` audio render block calls `separate_stems()` in
+   `ai_model/audio/producer_tools.py`.
+2. Separation is HPSS-style (harmonic/percussive + band split), built on
+   STFT/iSTFT in `ai_model/audio/digital_gpu_synth.py`.
+3. **All heavy math runs on the Digital GPU**: STFT and iSTFT are expressed as
+   DFT-matrix GEMMs executed via `DigitalGPU().gemm(...)`. No librosa, no
+   scipy, no plain-numpy matmul in the transform itself.
+4. Stem files are written to `uploads/stems/<job_id>/<stem>.wav` and surfaced
+   on the job result as `stems: {drums: url, bass: url, melody: url}`.
+
+**The Tensor boundary rule (critical, fixed 2026-07-28):**
+`DigitalGPU().gemm` returns a MaxCore `Tensor` object. It has `.numpy()` but
+**not** `.astype`. Any numpy consumer of a gemm result (overlap-add, dtype
+casts) must unwrap through the `_gemm_np()` helper in `digital_gpu_synth.py`.
+Before this fix, every stems request crashed inside the never-raise stem path
+with `'Tensor' object has no attribute 'astype'`, which surfaced only as a
+one-line `[Producer] stems skipped:` warning — the job still reported `done`
+with `stems: {}`. **If stems ever come back empty, grep the Python log for
+"stems skipped" first.** The unwrap happens only on the finished result
+buffer; the GEMM compute itself stays on the Digital GPU (routing contract
+intact).
+
+### 13.2 Stem downloads through the proxy
+
+The dashboard fetches stems in two steps:
+
+1. `GET /api/audio/:jobId/stems` → JSON map of stem name → URL.
+2. `GET /api/files/stems/:jobId/:filename` → binary WAV stream.
+
+Route (2) was missing from the Node allowlist until 2026-07-28 (stem URLs
+404'd from the dashboard). It now lives in `model-proxy.ts` next to the MIDI
+route, uses `proxyBinaryStream`, shares `_audioLimiter`, and
+`encodeURIComponent`s both params. Python-side errors (e.g. unknown job) pass
+through as Python's JSON 404 — proving requests reach the Python server.
+
+**Path-traversal hardening (Python side, `api_serve_stem_file`):** the old
+check was a string `startswith` on the resolved path — bypassable by sibling
+directories sharing the uploads prefix and by encoded separators. It is now:
+
+- `job_id` and `filename` must fullmatch `[A-Za-z0-9._-]+` and must not be
+  `.`/`..`; `Path(filename).name` must equal `filename` (no separators).
+- The resolved path must satisfy
+  `stem_path.relative_to(stems_root / job_id)` — a real containment check,
+  not a prefix comparison.
+
+Verified: `../../server.py`, `..%2F..%2Fserver.py`, and
+`%2e%2e%2f...` payloads all return 404 through the Node proxy; legitimate stem
+fetches return 200 with full WAV bytes.
+
+### 13.3 The audio render cache (L1) and fast path
+
+Audio has a persistent-process cache, `_AUDIO_RENDER_CACHE` in `server.py`
+(max 256 entries, LRU-ish eviction). Two key families:
+
+- **Chunk key**: `(chunk_idx, duration_bucket, format, loudness, stems_flag)`
+  — written after every pool-served render.
+- **Genre key**: `("genre", genre, duration_bucket, format, loudness,
+  stems_flag)` — written for every preferred genre, probed by the request
+  handler *before* any dataset lookup (this is the few-ms fast path).
+
+Hits are validated: the main file must still exist on disk, and — since
+2026-07-28 — a `stems=true` probe additionally requires the cached entry to
+carry a **complete, on-disk** stem set. The stems flag is part of the key, so
+a stems request can only match a stems render.
+
+**Why the stems gate mattered:** the flywheel ingests every finished render
+back into the dataset, so an identical repeat request often selects a *newer
+chunk* than the first render → chunk-key miss. The genre-key fast path is
+what makes repeats fast, and it previously excluded `stems=true` for no
+reason, forcing ~20 s full re-renders. After the fix, stems repeats are
+~0.6 s.
+
+**Cache lifetime:** in-process only. A Python restart empties it, so the first
+"repeat" after a reboot re-renders once, and content-level dedup caches (disk
+backed) may still short-circuit some paths. When benchmarking fresh renders,
+always use a **novel topic string**.
+
+### 13.4 Flywheel direct serve
+
+If the selected pool chunk originated from the flywheel (already a final,
+mastered MP3) and the request is `mp3` + no stems + default loudness, bytes
+are written straight to the output path with zero ffmpeg work
+("flywheel direct" log line). Stems requests can never use this path — stems
+must be synthesized from the audio — which is exactly why the genre-key cache
+is their fast path instead.
+
+---
+
+## 14. Performance Characteristics & Operations Runbook
+
+### 14.1 Measured end-to-end latency (submission → job done, 2026-07-28)
+
+Via the Node proxy on :8080, warm server:
+
+| Request | Cold (novel topic) | Warm repeat (cache/dedup) |
+|---|---|---|
+| Text (sync) | ~67 ms | ms-level |
+| Image (sync) | ~1.4 s | ~0.9 s |
+| Audio 30 s | ~16 s | **~130 ms** |
+| Audio 180 s (full length) | ~20 s | **~125–160 ms** |
+| Audio 30 s + stems | ~24 s | **~630 ms** |
+| Video | ~13–18 s | ~13 s (see below) |
+
+Notes:
+- "Few-ms" completion holds on the warm/cached path only. Cold renders are
+  genuine generation and take seconds by design.
+- **Video has no completed-job dedup.** `_job_digest`/`_active_jobs` coalesce
+  only *in-flight* identical requests; a repeat after completion re-renders.
+  This is the as-designed behavior at this commit.
+- 180 s tracks scale to the same warm-path latency as 30 s clips because the
+  cache stores the finished file, keyed by duration bucket.
+
+### 14.2 Process topology (the one rule that matters)
+
+Run **only** the `Start application` workflow. It launches:
+
+- Vite dashboard (:5000) → the preview
+- Node API server cluster (:8080) → proxy + Python lifecycle owner
+- Python AI server (:9878, healthz :9879) — child-spawned by the Node server
+  that has `MODEL_API_PORT` set
+
+The artifact workflows (`artifacts/api-server`, `artifacts/ai-dashboard`,
+`artifacts/mockup-sandbox`) are platform-managed and **cannot be deleted**.
+The platform sometimes restarts them. When `artifacts/api-server` runs
+alongside `Start application`, you get **two Node clusters sharing :8080 via
+SO_REUSEPORT**: the tree without `MODEL_API_PORT` has no Python child
+(monitoring-only mode), requests hop between clusters, audio-job polls hit
+ECONNRESET/circuit-breaker, and under render load the doubled memory
+footprint can crash the Python process mid-job.
+
+**Runbook when the API misbehaves under load:**
+
+1. `ps -eo pid,ppid,cmd | grep api-server/src/index.ts` — more than one
+   parent tree ⇒ contention.
+2. Identify the tree that owns the Python child (`server.py`'s grandparent) —
+   that is the `Start application` tree. Kill the *other* tree (`kill -9` the
+   tsx parents and workers).
+3. Killing the stale tree can take the :8080 listener with it — restart
+   `Start application` afterwards and confirm `GET /api/health` → 200.
+4. Leave the `artifacts/api-server` workflow in stopped/failed state; do not
+   restart it.
+
+### 14.3 Testing & verification gotchas
+
+- **Dedup caches survive restarts** (disk-backed content dedup). To exercise
+  a truly fresh render, use a topic string never used before.
+- **Python edits require a full `Start application` restart** — modules are
+  import-cached; hot-reload does not apply.
+- Jobs lost to a mid-render crash stay "rendering" forever from the client's
+  view; after a respawn, resubmit — the job registry is in-process.
+- Long poll loops in the shell must stay under the 5-minute exec cap; split
+  batches.
