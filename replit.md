@@ -44,7 +44,8 @@ Without these, `ContentGenerationAwarenessService` and `IndustryMonitorService` 
 
 - **Frontend proxies to API**: Vite dev server proxies `/api` and `/uploads` to the Express API server (port 8080), which in turn proxies to the Python server (port 9878). No CORS issues.
 - **API server manages Python lifecycle**: The Node.js API server spawns and monitors the Python AI server as a child process with exponential backoff restarts.
-- **No external AI APIs**: All AI inference uses the in-house custom Transformer with Digital GPU simulation (NumPy SIMD) for CPU-safe operation.
+- **No external AI APIs**: All AI inference uses the in-house custom Transformer.
+- **Digital GPU, not native CPU (hard rule)**: ALL math — inference, training, sampling, audio DSP, image/video rendering — routes through the in-house Digital GPU system (`ai_model/gpu/`, `DigitalGPU().gemm`, MaxCore wrappers). Never write direct numpy/torch/scipy math at call sites; Replit's CPU is only the substrate the Digital GPU executes on. See DOCS.md §12 for the full stack and §12.0 for the rationale.
 - **In-process storage fallback**: If the pdim storage server is offline, the AI server operates in local-only mode transparently.
 - **Single external port**: Port 5000 → port 80 externally. In production, the API server serves the built React SPA directly.
 

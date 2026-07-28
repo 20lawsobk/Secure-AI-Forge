@@ -46,6 +46,22 @@
 
 ## 1. Project Overview
 
+> **⚠️ Foundational compute rule — the Digital GPU, not the raw CPU.**
+> This system does **not** run its math on Replit's native CPU environment
+> directly (plain NumPy calls, `torch` ops at call sites, scipy/librosa DSP).
+> **Every mathematical operation routes through the in-house Digital GPU
+> system** (`ai_model/gpu/`): a software-defined GPU execution stack with its
+> own kernels (GEMM, flash attention, softmax, conv, STFT-as-GEMM), opcode
+> specs, telemetry, caching (pocket accelerator), and SIMD-compiled native
+> paths. The CPU is only the physical substrate the Digital GPU executes on —
+> application and model code never touches it directly. This is a hard,
+> project-wide contract ("that's final"): see §12 for the full architecture,
+> §15.7 for the wiring, and the routing rules below. Any new math — inference,
+> training, audio DSP, image/video rendering — must be expressed through
+> Digital GPU kernels (`DigitalGPU().gemm`, `gpu.*`, MaxCore wrappers), never
+> as direct numpy/torch math. Fallbacks that silently bypass the Digital GPU
+> are bugs.
+
 A full-stack AI content generation platform for independent music artists. The
 system generates social-media content (text, image, audio, video, ads) across
 all major platforms conditioned on live platform awareness signals, user brand
@@ -1213,6 +1229,37 @@ Priority order based on what unlocks everything else:
 ---
 
 ## 12. Digital GPU System — Complete Documentation
+
+### 12.0 Why the Digital GPU replaces Replit's native CPU environment
+
+Replit provides a CPU-only container — there is no hardware GPU. Instead of
+writing CPU-style math (loose numpy/torch/scipy calls scattered through the
+codebase), this project routes **all** compute through the Digital GPU: a
+single, GPU-disciplined execution surface. Consequences of this decision:
+
+- **One compute surface for everything.** Inference
+  (`HyperCreativeTransformerLM`), training (`HyperTransformerLM` with
+  fwd+bwd autograd routed through `gpu.*` kernels), sampling
+  (`_gpu_softmax`), audio synthesis/STFT/HPSS (DFT-matrix GEMMs), image path
+  tracing, and video grading all execute on the same kernel stack — no
+  library soup (zero librosa/soundfile/scipy in any audio compute path).
+- **GPU-style discipline on CPU hardware.** Kernels are tiled
+  (flash attention with online softmax), fused (linear+gelu/silu), cached
+  (content-hash pocket dedup on all GEMM paths), and compiled to native SIMD
+  where it pays (`ai_model/gpu/native`, fused C kernels via gcc+ctypes).
+- **Verifiability.** Because every op flows through the kernel layer, routing
+  is testable: op counters (`gpu.core._total_ops`), fallback counters
+  (`.engine_fallback` must stay 0), and telemetry prove nothing leaked to
+  bare numpy.
+- **Honesty about performance.** This is a software-defined GPU, not
+  hardware: it brings structure, caching, and SIMD speedups — not GPU
+  throughput. Estimator components (`MaxCoreSilicon`) are side-channel
+  telemetry only, never an execution path.
+
+**Enforcement:** call sites must use the MaxCore/Digital GPU wrappers — never
+`TransformerLM`, `F.softmax`, `np.matmul`, or direct scipy DSP. Results
+crossing back into plain-Python consumers unwrap via the Tensor's own
+`.numpy()` (see §13.1) — read-out of a finished buffer, not a compute bypass.
 
 The Digital GPU system is a layered software stack that brings hardware-GPU-style
 programming discipline to CPU-only model training and inference. It is **not** an
